@@ -1,7 +1,7 @@
 package version
 
 var (
-	Version = "1.1.0"
+	Version = "1.1.1"
 	Repo    = "MengMengCode/CLICD"
 )
 
@@ -11,4 +11,3 @@ func Current() string {
 	}
 	return Version
 }
-

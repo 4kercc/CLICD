@@ -5,17 +5,36 @@ REPO="${CLICD_REPO:-MengMengCode/CLICD}"
 CLICD_INSTALL_VERSION="${CLICD_VERSION:-latest}"
 ASSET="clicd-linux-amd64.tar.gz"
 ACTION="${1:-install}"
+ACTION_CONFIRM="${2:-}"
+ISSUE_URL="https://github.com/${REPO}/issues"
+LOG_FILE="${CLICD_LOG_FILE:-/var/log/clicd-install.log}"
 
 echo "====================================="
-echo "  CLICD Installer"
+echo "  CLICD 中文安装/卸载脚本"
 echo "====================================="
+
+write_log_file() {
+    if [ "$(id -u 2>/dev/null || echo 1)" = "0" ]; then
+        printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || true)" "$*" >> "$LOG_FILE" 2>/dev/null || true
+    fi
+}
 
 log() {
     echo "[clicd] $*"
+    write_log_file "[clicd] $*"
+}
+
+warn() {
+    echo "[clicd][警告] $*" >&2
+    write_log_file "[警告] $*"
 }
 
 die() {
-    echo "ERROR: $*" >&2
+    echo "[clicd][错误] $*" >&2
+    write_log_file "[错误] $*"
+    echo "" >&2
+    echo "安装/卸载未完成。请查看日志：$LOG_FILE" >&2
+    echo "如果你确认这是程序问题，请提交 issue：$ISSUE_URL" >&2
     exit 1
 }
 
@@ -31,12 +50,69 @@ is_openrc() {
     has_cmd rc-service && has_cmd rc-update
 }
 
+run_step() {
+    step_name="$1"
+    shift
+    log "开始：$step_name"
+    if "$@" >> "$LOG_FILE" 2>&1; then
+        log "完成：$step_name"
+        return 0
+    fi
+    rc="$?"
+    echo "" >&2
+    echo "[clicd][错误] 步骤失败：$step_name，退出码：$rc" >&2
+    echo "[clicd][错误] 最近 80 行日志：$LOG_FILE" >&2
+    tail -n 80 "$LOG_FILE" >&2 2>/dev/null || true
+    echo "" >&2
+    echo "请将上述日志和系统信息提交到：$ISSUE_URL" >&2
+    exit "$rc"
+}
+
+check_os_compatibility() {
+    log "系统检测：ID=${OS_ID} ID_LIKE=${OS_LIKE} ARCH=$(uname -m 2>/dev/null || echo unknown)"
+    case "$(uname -m 2>/dev/null || echo unknown)" in
+        x86_64|amd64)
+            ;;
+        *)
+            die "当前安装包仅支持 x86_64/amd64，当前架构：$(uname -m 2>/dev/null || echo unknown)。"
+            ;;
+    esac
+    if ! is_systemd && ! is_openrc; then
+        die "未检测到 systemd 或 OpenRC，无法安装服务。"
+    fi
+    case "$OS_ID" in
+        ubuntu|debian|alpine|centos|rhel|rocky|almalinux|fedora)
+            ;;
+        *)
+            if ! has_cmd apt-get && ! has_cmd apk && ! has_cmd dnf && ! has_cmd yum; then
+                die "暂不支持当前 Linux 发行版：${OS_ID} ${OS_LIKE}。请提交 issue 并附上 /etc/os-release。"
+            fi
+            warn "发行版 ${OS_ID} 不在主要支持列表，将按检测到的软件包管理器尝试安装。"
+            ;;
+    esac
+}
+
+check_storage_compatibility() {
+    root_fs="$(findmnt -no FSTYPE / 2>/dev/null || echo unknown)"
+    avail_kb="$(df -Pk / 2>/dev/null | awk 'NR==2 {print $4}' || echo 0)"
+    log "存储检测：根文件系统=${root_fs} 可用空间=${avail_kb}KB"
+    if [ "${avail_kb:-0}" -lt 5242880 ]; then
+        warn "根分区可用空间低于 5GB，下载镜像或创建 KVM/LXC 时可能失败。"
+    fi
+}
+
 if [ "$(id -u)" -ne 0 ]; then
-    echo "Please run as root: sudo ./install.sh"
-    echo "Or: curl -fsSL https://raw.githubusercontent.com/${REPO}/main/install.sh | sudo sh"
-    echo "Uninstall: curl -fsSL https://raw.githubusercontent.com/${REPO}/main/install.sh | sudo sh -s -- uninstall"
+    echo "请使用 root 权限运行：sudo ./install.sh"
+    echo "或执行：curl -fsSL https://raw.githubusercontent.com/${REPO}/main/install.sh | sudo sh"
+    echo "卸载：curl -fsSL https://raw.githubusercontent.com/${REPO}/main/install.sh | sudo sh -s -- uninstall"
+    echo "问题反馈：$ISSUE_URL"
     exit 1
 fi
+
+: > "$LOG_FILE" 2>/dev/null || true
+log "日志文件：$LOG_FILE"
+log "仓库地址：https://github.com/${REPO}"
+log "问题反馈：$ISSUE_URL"
 
 OS_ID="unknown"
 OS_LIKE=""
@@ -48,17 +124,21 @@ fi
 
 usage() {
     cat << EOF
-Usage:
-  ./install.sh
-  ./install.sh uninstall
+用法：
+  ./install.sh              安装或升级 CLICD
+  ./install.sh uninstall    卸载 CLICD（会删除容器、虚拟机、镜像缓存和配置数据）
 
-Environment:
-  CLICD_REPO=owner/repo
-  CLICD_VERSION=latest|v1.0.0
+环境变量：
+  CLICD_REPO=owner/repo          默认：${REPO}
+  CLICD_VERSION=latest|v1.0.0    默认：latest
+  CLICD_LOG_FILE=/path/file.log  默认：${LOG_FILE}
 
-Examples:
+示例：
   curl -fsSL https://raw.githubusercontent.com/${REPO}/main/install.sh | sudo sh
   curl -fsSL https://raw.githubusercontent.com/${REPO}/main/install.sh | sudo sh -s -- uninstall
+
+日志：${LOG_FILE}
+问题反馈：${ISSUE_URL}
 EOF
 }
 
@@ -68,7 +148,7 @@ remove_path() {
         return
     fi
     rm -rf "$path"
-    log "Removed $path"
+    log "已删除 $path"
 }
 
 unmount_path_tree() {
@@ -125,17 +205,17 @@ remove_lxc_container_dir() {
     detach_container_loop_devices "$container_dir"
 
     if rm -rf "$container_dir" >/dev/null 2>&1; then
-        log "Removed $container_dir"
+        log "已删除 $container_dir"
         return
     fi
 
-    log "Retrying removal after terminating processes using $container_dir..."
+    log "检测到 $container_dir 被占用，终止占用进程后重试删除..."
     kill_path_users "$container_dir/rootfs"
     kill_path_users "$container_dir"
     unmount_path_tree "$container_dir"
     detach_container_loop_devices "$container_dir"
     rm -rf "$container_dir"
-    log "Removed $container_dir"
+    log "已删除 $container_dir"
 }
 
 remove_kvm_domain() {
@@ -158,7 +238,7 @@ remove_kvm_domain() {
         return
     fi
 
-    log "Removing KVM domain $domain..."
+    log "正在删除 KVM 虚拟机域 $domain..."
     virsh destroy "$domain" >/dev/null 2>&1 || true
     virsh undefine "$domain" --remove-all-storage --nvram >/dev/null 2>&1 ||
         virsh undefine "$domain" --nvram >/dev/null 2>&1 ||
@@ -171,7 +251,7 @@ destroy_clicd_kvm_domains() {
         return
     fi
 
-    log "Destroying CLICD KVM domains..."
+    log "正在销毁 CLICD 创建的 KVM 虚拟机..."
     virsh list --all --name 2>/dev/null | while IFS= read -r domain; do
         [ -n "$domain" ] || continue
         remove_kvm_domain "$domain"
@@ -231,7 +311,7 @@ delete_ip6tables_bridge_rules() {
 }
 
 cleanup_clicd_networking() {
-    log "Cleaning CLICD firewall and bridge rules..."
+    log "正在清理 CLICD 防火墙和网桥规则..."
     delete_iptables_lines nat PREROUTING 'clicd-'
     delete_iptables_rule nat POSTROUTING -s 10.0.3.0/24 -o eth+ -j MASQUERADE
     delete_iptables_rule nat POSTROUTING -s 192.168.122.0/24 -o eth+ -j MASQUERADE
@@ -269,7 +349,7 @@ remove_clicd_quota_records() {
         grep -v 'clicd-' "$file" > "$tmp" || true
         cat "$tmp" > "$file"
         rm -f "$tmp"
-        log "Cleaned CLICD quota records from $file"
+        log "已清理 $file 中的 CLICD 配额记录"
     done
 }
 
@@ -277,7 +357,7 @@ remove_clicd_tmp_files() {
     for path in /tmp/clicd-* /tmp/clicd.*; do
         [ -e "$path" ] || [ -L "$path" ] || continue
         rm -rf "$path"
-        log "Removed $path"
+        log "已删除 $path"
     done
 }
 
@@ -289,8 +369,28 @@ remove_clicd_swapfile() {
     remove_path /swapfile
 }
 
+
+confirm_uninstall() {
+    if [ "${CLICD_UNINSTALL_CONFIRM:-}" = "1" ] || [ "${CLICD_UNINSTALL_CONFIRM:-}" = "yes" ] || [ "$ACTION_CONFIRM" = "--yes" ] || [ "$ACTION_CONFIRM" = "-y" ]; then
+        return
+    fi
+    echo ""
+    echo "[clicd][警告] 卸载会停止并删除 CLICD 服务、配置数据库、CLICD 创建的 LXC/KVM 实例和缓存数据。" >&2
+    echo "[clicd][警告] 为避免误删生产数据，脚本只会删除名称形如 ct-数字 的 LXC 容器和 vm-数字 的 KVM 域。" >&2
+    echo "如需确认卸载，请输入：YES" >&2
+    if [ -t 0 ]; then
+        read answer
+    else
+        answer=""
+    fi
+    if [ "$answer" != "YES" ]; then
+        die "已取消卸载。如需非交互卸载，请设置 CLICD_UNINSTALL_CONFIRM=1。"
+    fi
+}
+
 uninstall_clicd() {
-    log "Uninstalling CLICD..."
+    confirm_uninstall
+    log "正在卸载 CLICD..."
 
     if has_cmd systemctl; then
         systemctl stop clicd >/dev/null 2>&1 || true
@@ -304,8 +404,8 @@ uninstall_clicd() {
         rc-update del clicd default >/dev/null 2>&1 || true
     fi
 
-    log "Destroying LXC containers under /var/lib/lxc..."
-    for container_dir in /var/lib/lxc/*; do
+    log "正在删除 CLICD 创建的 LXC 容器（/var/lib/lxc/ct-数字）..."
+    for container_dir in /var/lib/lxc/ct-[0-9]*; do
         [ -d "$container_dir" ] || continue
         remove_lxc_container_dir "$container_dir"
     done
@@ -321,13 +421,12 @@ uninstall_clicd() {
     remove_path /var/log/clicd.log
     remove_path /var/log/clicd.err
     remove_path /root/.clicd
-    unmount_path_tree /var/lib/lxc
-    remove_path /var/lib/lxc
+    # /var/lib/lxc 可能包含非 CLICD 容器，生产环境不整体删除。
     unmount_path_tree /var/lib/clicd
     remove_path /var/lib/clicd
-    remove_path /var/cache/lxc
+    # /var/cache/lxc 是 LXC 全局镜像缓存，可能被其他工具复用，生产环境不整体删除。
     remove_path /var/cache/clicd
-    remove_path /root/clicd-backups
+    warn "保留 /root/clicd-backups，避免误删部署/回滚备份。确认不需要后可手动删除。"
     remove_clicd_tmp_files
     remove_clicd_swapfile
 
@@ -341,11 +440,13 @@ uninstall_clicd() {
 
     echo ""
     echo "====================================="
-    echo "  CLICD Uninstalled"
+    echo "  CLICD 卸载完成"
     echo "====================================="
-    echo "  Removed service, binary, SQLite/config data, LXC containers,"
-    echo "  CLICD KVM domains, VM images, image caches, firewall rules,"
-    echo "  host hooks, quota records, temp files, backups, and swapfile."
+    echo "  已删除服务、二进制、SQLite/配置数据、CLICD LXC/KVM 实例、"
+    echo "  CLICD 镜像缓存、防火墙规则、主机钩子、配额记录和临时文件。"
+    echo "  已保留 /root/clicd-backups 和 LXC 全局缓存，避免误删生产备份/共享镜像。"
+    echo "  日志：$LOG_FILE"
+    echo "  问题反馈：$ISSUE_URL"
     echo "====================================="
 }
 
@@ -361,12 +462,12 @@ case "$ACTION" in
         exit 0
         ;;
     *)
-        die "Unknown action: $ACTION"
+        die "未知操作：$ACTION"
         ;;
 esac
 
 install_apk() {
-    log "Installing dependencies with apk..."
+    log "正在使用 apk 安装依赖..."
     apk update
     apk add --no-cache \
         ca-certificates \
@@ -393,12 +494,12 @@ install_apk() {
         libvirt-qemu
 
     for pkg in lxcfs shadow conntrack-tools quota-tools e2fsprogs xfsprogs cloud-utils genisoimage xorriso; do
-        apk add --no-cache "$pkg" >/dev/null 2>&1 || log "Optional package not installed: $pkg"
+        apk add --no-cache "$pkg" >/dev/null 2>&1 || warn "可选依赖未安装：$pkg"
     done
 }
 
 install_apt() {
-    log "Installing dependencies with apt..."
+    log "正在使用 apt 安装依赖..."
     export DEBIAN_FRONTEND=noninteractive
     apt-get update
     apt-get install -y \
@@ -445,7 +546,7 @@ enable_el_repos() {
 }
 
 install_dnf() {
-    log "Installing dependencies with dnf..."
+    log "正在使用 dnf 安装依赖..."
     enable_el_repos
     dnf install -y \
         ca-certificates \
@@ -475,12 +576,12 @@ install_dnf() {
         genisoimage
 
     for pkg in lxcfs xorriso edk2-ovmf; do
-        dnf install -y "$pkg" >/dev/null 2>&1 || log "Optional package not installed: $pkg"
+        dnf install -y "$pkg" >/dev/null 2>&1 || warn "可选依赖未安装：$pkg"
     done
 }
 
 install_yum() {
-    log "Installing dependencies with yum..."
+    log "正在使用 yum 安装依赖..."
     enable_el_repos
     yum install -y \
         ca-certificates \
@@ -510,7 +611,7 @@ install_yum() {
         genisoimage
 
     for pkg in lxcfs xorriso edk2-ovmf; do
-        yum install -y "$pkg" >/dev/null 2>&1 || log "Optional package not installed: $pkg"
+        yum install -y "$pkg" >/dev/null 2>&1 || warn "可选依赖未安装：$pkg"
     done
 }
 
@@ -528,7 +629,7 @@ install_dependencies() {
             elif has_cmd yum; then
                 install_yum
             else
-                die "dnf/yum not found on $OS_ID"
+                die "当前系统 $OS_ID 未找到 dnf/yum，无法安装依赖。"
             fi
             ;;
         *)
@@ -541,27 +642,27 @@ install_dependencies() {
             elif has_cmd yum; then
                 install_yum
             else
-                die "Unsupported Linux distribution: ${OS_ID} ${OS_LIKE}"
+                die "暂不支持当前 Linux 发行版：${OS_ID} ${OS_LIKE}。请提交 issue 并附上 /etc/os-release。"
             fi
             ;;
     esac
 
-    has_cmd lxc-create || die "lxc-create is still missing after dependency installation."
-    has_cmd iptables || die "iptables is still missing after dependency installation."
-    has_cmd ip || die "iproute2/ip command is still missing after dependency installation."
-    has_cmd virsh || die "virsh is still missing after dependency installation."
-    has_cmd qemu-img || die "qemu-img is still missing after dependency installation."
-    has_cmd cloud-localds || die "cloud-localds is still missing after dependency installation."
+    has_cmd lxc-create || die "依赖安装后仍未找到 lxc-create，请检查 LXC 软件源/安装日志。"
+    has_cmd iptables || die "依赖安装后仍未找到 iptables，请检查系统网络工具包。"
+    has_cmd ip || die "依赖安装后仍未找到 ip 命令，请检查 iproute2 安装。"
+    has_cmd virsh || die "依赖安装后仍未找到 virsh，请检查 libvirt-client/libvirt-clients 安装。"
+    has_cmd qemu-img || die "依赖安装后仍未找到 qemu-img，请检查 qemu-utils/qemu-img 安装。"
+    has_cmd cloud-localds || die "依赖安装后仍未找到 cloud-localds，请检查 cloud-image-utils/cloud-utils 安装。"
     if ! has_cmd genisoimage && ! has_cmd mkisofs && ! has_cmd xorriso; then
-        die "one of genisoimage, mkisofs, or xorriso is required for Windows KVM setup."
+        die "Windows KVM 初始化需要 genisoimage、mkisofs 或 xorriso 中任意一个。"
     fi
     if [ ! -e /dev/kvm ]; then
-        log "Warning: /dev/kvm was not found. KVM VMs require hardware virtualization or nested virtualization."
+        warn "未检测到 /dev/kvm。LXC 可用，但 KVM 虚拟机需要硬件虚拟化或嵌套虚拟化。"
     fi
 }
 
 configure_kernel_networking() {
-    log "Enabling kernel forwarding settings..."
+    log "正在启用内核转发配置..."
     cat > /etc/sysctl.d/99-clicd.conf << 'EOF'
 net.ipv4.ip_forward = 1
 net.ipv6.conf.all.forwarding = 1
@@ -574,7 +675,7 @@ EOF
 }
 
 setup_runtime_services() {
-    log "Configuring LXC and KVM services..."
+    log "正在配置 LXC 和 KVM 服务..."
 
     if is_systemd; then
         systemctl enable --now lxcfs >/dev/null 2>&1 || true
@@ -603,11 +704,49 @@ setup_runtime_services() {
         return
     fi
 
-    die "No supported service manager found. CLICD supports systemd or OpenRC."
+    die "未检测到支持的服务管理器。CLICD 当前支持 systemd 或 OpenRC。"
+}
+
+
+libvirt_network_active() {
+    virsh net-info default 2>/dev/null | awk -F: 'tolower($1) ~ /^[[:space:]]*active[[:space:]]*$/ {gsub(/^[ \t]+|[ \t]+$/, "", $2); print tolower($2)}' | grep -qx yes
+}
+
+setup_default_libvirt_network() {
+    if ! has_cmd virsh; then
+        warn "未找到 virsh，跳过 libvirt default NAT 网络检查。"
+        return
+    fi
+    log "正在检查 libvirt default NAT 网络..."
+    if ! virsh net-info default >/dev/null 2>&1; then
+        net_xml="$(mktemp /tmp/clicd-default-net.XXXXXX.xml)"
+        cat > "$net_xml" << 'EOF'
+<network>
+  <name>default</name>
+  <bridge name='virbr0'/>
+  <forward mode='nat'/>
+  <ip address='192.168.122.1' netmask='255.255.255.0'>
+    <dhcp>
+      <range start='192.168.122.2' end='192.168.122.254'/>
+    </dhcp>
+  </ip>
+</network>
+EOF
+        virsh net-define "$net_xml"
+        rm -f "$net_xml"
+    fi
+    if ! libvirt_network_active; then
+        virsh net-start default
+    fi
+    virsh net-autostart default >/dev/null
+    if ! libvirt_network_active; then
+        die "libvirt default 网络仍未启动。请执行 virsh net-info default 查看详情。"
+    fi
+    log "libvirt default NAT 网络已启用。"
 }
 
 setup_subids() {
-    log "Setting up subordinate UID/GID ranges..."
+    log "正在配置 subordinate UID/GID 范围..."
     touch /etc/subuid /etc/subgid
     grep -q '^root:' /etc/subuid 2>/dev/null || echo 'root:100000:65536' >> /etc/subuid
     grep -q '^root:' /etc/subgid 2>/dev/null || echo 'root:100000:65536' >> /etc/subgid
@@ -618,21 +757,21 @@ try_enable_project_quota() {
     root_fs="$(findmnt -no FSTYPE / 2>/dev/null || true)"
 
     if [ "$root_fs" != "ext4" ] || [ -z "$root_src" ] || [ ! -b "$root_src" ]; then
-        log "Project quota auto-enable skipped for root filesystem: ${root_fs:-unknown}"
+        warn "根文件系统 ${root_fs:-unknown} 不适合自动启用 project quota，将使用兼容模式。"
         return
     fi
 
     if ! has_cmd tune2fs; then
-        log "Project quota auto-enable skipped because tune2fs is unavailable."
+        warn "未找到 tune2fs，跳过 project quota 检查，将使用兼容模式。"
         return
     fi
 
     if tune2fs -l "$root_src" 2>/dev/null | grep -q 'project'; then
-        log "Ext4 project quota support already appears to be enabled."
+        log "检测到 ext4 project quota 已可用。"
         return
     fi
 
-    log "Ext4 project quota is not enabled. Disk limits will fall back to loopback images."
+    warn "ext4 project quota 未启用，磁盘限制将回退到 loopback 镜像模式。"
 }
 
 download_release_if_needed() {
@@ -646,8 +785,8 @@ download_release_if_needed() {
         download_url="https://github.com/${REPO}/releases/download/${CLICD_INSTALL_VERSION}/${ASSET}"
     fi
 
-    log "clicd binary not found in current directory."
-    log "Downloading release package: ${download_url}"
+    log "当前目录未找到 clicd 二进制，将下载发行版包。"
+    log "正在下载发行版包：${download_url}"
 
     tmp_dir="$(mktemp -d)"
     trap 'rm -rf "$tmp_dir"' 0
@@ -657,12 +796,12 @@ download_release_if_needed() {
     elif has_cmd wget; then
         wget -O "$tmp_dir/$ASSET" "$download_url"
     else
-        die "curl or wget is required to download the release package."
+        die "下载发行版包需要 curl 或 wget。"
     fi
 
     tar -xzf "$tmp_dir/$ASSET" -C "$tmp_dir"
     cd "$tmp_dir/clicd-linux-amd64"
-    [ -f "./clicd" ] || die "Downloaded release package did not contain clicd."
+    [ -f "./clicd" ] || die "下载的发行版包中未找到 clicd 二进制。"
 }
 
 install_binary() {
@@ -678,21 +817,24 @@ install_binary() {
     chmod +x "$tmp_bin"
     mv -f "$tmp_bin" /usr/local/bin/clicd
     chmod +x /usr/local/bin/clicd
-    log "Installed binary: /usr/local/bin/clicd"
+    log "已安装二进制：/usr/local/bin/clicd"
 }
 
 install_systemd_service() {
     cat > /etc/systemd/system/clicd.service << 'EOF'
 [Unit]
 Description=CLICD - LXC/KVM Container Manager
-After=network.target lxc.service libvirtd.service virtqemud.service
-Wants=libvirtd.service
+After=network-online.target lxc.service lxcfs.service libvirtd.service virtqemud.service virtqemud.socket virtlogd.socket
+Wants=network-online.target libvirtd.service virtqemud.socket virtlogd.socket
 
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/clicd server
 Restart=always
 RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=10
+LimitNOFILE=1048576
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 [Install]
@@ -729,51 +871,56 @@ EOF
 }
 
 install_service() {
-    log "Installing CLICD service..."
+    log "正在安装 CLICD 服务..."
 
     if is_systemd; then
         install_systemd_service
     elif is_openrc; then
         install_openrc_service
     else
-        die "No supported service manager found. CLICD supports systemd or OpenRC."
+        die "未检测到支持的服务管理器。CLICD 当前支持 systemd 或 OpenRC。"
     fi
 }
 
 print_summary() {
     echo ""
     echo "====================================="
-    echo "  Installation Complete"
+    echo "  安装完成"
     echo "====================================="
-    echo "  Web: http://YOUR_SERVER_IP:8999"
-    echo "  Binary: /usr/local/bin/clicd"
+    echo "  Web 面板：http://YOUR_SERVER_IP:8999"
+    echo "  二进制：/usr/local/bin/clicd"
+    echo "  安装日志：$LOG_FILE"
+    echo "  问题反馈：$ISSUE_URL"
     if is_systemd; then
-        echo "  Service: systemctl {start|stop|restart|status} clicd"
-        echo "  Logs: journalctl -u clicd -f"
+        echo "  服务：systemctl {start|stop|restart|status} clicd"
+        echo "  运行日志：journalctl -u clicd -f"
     elif is_openrc; then
-        echo "  Service: rc-service clicd {start|stop|restart|status}"
-        echo "  Logs: tail -f /var/log/clicd.log /var/log/clicd.err"
+        echo "  服务：rc-service clicd {start|stop|restart|status}"
+        echo "  运行日志：tail -f /var/log/clicd.log /var/log/clicd.err"
     fi
     echo "====================================="
     echo ""
-    echo "Initial credentials, if this was the first run:"
+    echo "首次安装时的初始账号信息："
     if is_systemd; then
         journalctl -u clicd --no-pager -n 80 | grep -E "Username:|Password:" || true
     else
         grep -E "Username:|Password:" /var/log/clicd.log /var/log/clicd.err 2>/dev/null || true
     fi
     echo ""
-    echo "If no password is shown, this server already had /root/.clicd/config.db."
-    echo "The existing admin password cannot be recovered from the bcrypt hash."
+    echo "如果没有显示密码，说明服务器已有 /root/.clicd/config.db。"
+    echo "已有管理员密码使用 bcrypt 存储，无法反查；请使用面板内修改密码或重置配置。"
 }
 
-install_dependencies
-configure_kernel_networking
-setup_runtime_services
-setup_subids
-try_enable_project_quota
-download_release_if_needed
-install_binary
-install_service
+run_step "兼容性检查" check_os_compatibility
+run_step "存储环境检查" check_storage_compatibility
+run_step "安装系统依赖" install_dependencies
+run_step "配置内核网络参数" configure_kernel_networking
+run_step "配置运行时服务" setup_runtime_services
+run_step "配置 libvirt default NAT 网络" setup_default_libvirt_network
+run_step "配置 UID/GID 映射" setup_subids
+run_step "检查 project quota" try_enable_project_quota
+run_step "下载发行版包" download_release_if_needed
+run_step "安装 CLICD 二进制" install_binary
+run_step "安装并启动 CLICD 服务" install_service
 sleep 2
 print_summary

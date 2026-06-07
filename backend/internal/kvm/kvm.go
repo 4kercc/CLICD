@@ -1407,7 +1407,7 @@ func ensureDefaultNetwork() error {
 	}
 	// Start and autostart the default network
 	if out, err := exec.Command("virsh", "net-info", "default").Output(); err == nil {
-		if !strings.Contains(strings.ToLower(string(out)), "active:") || !strings.Contains(strings.ToLower(string(out)), "yes") {
+		if !libvirtNetworkActive(string(out)) {
 			if startOut, startErr := exec.Command("virsh", "net-start", "default").CombinedOutput(); startErr != nil {
 				return fmt.Errorf("failed to start libvirt default network: %v, output: %s", startErr, string(startOut))
 			}
@@ -1417,6 +1417,19 @@ func ensureDefaultNetwork() error {
 		return fmt.Errorf("failed to set autostart for libvirt default network: %v, output: %s", err, string(out))
 	}
 	return nil
+}
+
+func libvirtNetworkActive(info string) bool {
+	for _, line := range strings.Split(info, "\n") {
+		key, value, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(key), "Active") {
+			return strings.EqualFold(strings.TrimSpace(value), "yes")
+		}
+	}
+	return false
 }
 
 func createOverlayDisk(base, target string, diskGB int) error {
