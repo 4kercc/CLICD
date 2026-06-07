@@ -144,6 +144,10 @@ export default function ContainerDetail() {
   const [resourceEdit, setResourceEdit] = useState({ vcpu: 1, ramMb: 512, ioMbps: 500, bwMbps: 100 })
   const [savingResource, setSavingResource] = useState(false)
   const [showPassword, setShowPassword] = useState(false)
+  const [showResetPassword, setShowResetPassword] = useState(false)
+  const [resetPasswordDraft, setResetPasswordDraft] = useState('')
+  const [resetPasswordResult, setResetPasswordResult] = useState('')
+  const [resetPasswordSaving, setResetPasswordSaving] = useState(false)
   const [showSnapshots, setShowSnapshots] = useState(false)
   const [snapshots, setSnapshots] = useState<Snapshot[]>([])
   const [snapshotQuota, setSnapshotQuota] = useState(3)
@@ -443,18 +447,56 @@ export default function ContainerDetail() {
     }
   }
 
+  const generateResetPassword = () => {
+    const letters = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+    const digits = '23456789'
+    const symbols = '!@#$%*-_+='
+    const all = letters + digits + symbols
+    const pick = (chars: string) => chars[Math.floor(Math.random() * chars.length)]
+    let password = pick(letters) + pick(digits)
+    while (password.length < 16) password += pick(all)
+    setResetPasswordDraft(password.split('').sort(() => Math.random() - 0.5).join(''))
+    setResetPasswordResult('')
+  }
+
+  const resetPasswordError = (password: string) => {
+    if (password.length < 8 || password.length > 64) return '密码长度必须为 8-64 位'
+    if (/\s/.test(password)) return '密码不能包含空白字符'
+    if (!/[A-Za-z]/.test(password)) return '密码至少需要包含字母'
+    if (!/\d/.test(password)) return '密码至少需要包含数字'
+    return ''
+  }
+
   const handleResetPassword = async () => {
-    if (!containerIdentifier || !(await dialog.confirm('重置密码', `确定要重置容器 ${container?.name} 的 SSH 密码吗？`))) return
+    if (!containerIdentifier) return
+    const password = resetPasswordDraft.trim()
+    const validationError = resetPasswordError(password)
+    if (validationError) {
+      await dialog.alert('密码格式不正确', validationError)
+      return
+    }
+    setResetPasswordSaving(true)
     try {
-      const res = await resetSSHPassword(containerIdentifier)
+      const res = await resetSSHPassword(containerIdentifier, password)
       if (res.data.success) {
-        await dialog.alert('密码已重置', `新密码: ${(res.data.data as { password: string })?.password}`)
+        const nextPassword = (res.data.data as { password: string })?.password || password
+        setResetPasswordResult(nextPassword)
+        setResetPasswordDraft(nextPassword)
         await fetchContainer()
       }
-    } catch (err) {
+    } catch (err: unknown) {
       console.error(err)
-      dialog.alert('密码重置失败', '请稍后重试')
+      const error = err as { response?: { data?: { message?: string } } }
+      dialog.alert('密码重置失败', error.response?.data?.message || '请稍后重试')
+    } finally {
+      setResetPasswordSaving(false)
     }
+  }
+
+  const openResetPassword = () => {
+    setResetPasswordDraft('')
+    setResetPasswordResult('')
+    setShowResetPassword(true)
   }
 
   const handleAssignIPv6 = async () => {
@@ -782,7 +824,7 @@ export default function ContainerDetail() {
       <div className="bg-white border border-gray-200 rounded-lg p-5">
         <div className="flex items-start justify-between gap-4">
           <div className="flex items-start gap-4">
-            <div className="w-14 h-14 bg-slate-100 rounded-lg flex items-center justify-center">
+            <div className="w-14 h-14 flex items-center justify-center">
               {getTemplateIcon(container.template || '') || <Cpu className="w-7 h-7 text-slate-700" />}
             </div>
             <div>
@@ -874,7 +916,18 @@ export default function ContainerDetail() {
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-        <Panel title="连接信息">
+        <Panel
+          title="连接信息"
+          extra={!isSubUser && !isWindows && !isSubUserPolicyBlocked ? (
+            <button
+              onClick={openResetPassword}
+              className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs text-gray-600 hover:bg-gray-100 hover:text-black"
+            >
+              <Key className="w-3.5 h-3.5" />
+              重置 SSH 密码
+            </button>
+          ) : undefined}
+        >
           {isSubUserPolicyBlocked ? (
             <div className="rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-700">
               虚拟机被策略临时封禁，连接信息暂不可用。
@@ -925,12 +978,6 @@ export default function ContainerDetail() {
                   )}
                 </div>
               </div>
-              {!isSubUser && (
-                <button onClick={handleResetPassword} className="inline-flex items-center gap-1.5 text-xs text-gray-600 hover:text-black">
-                  <Key className="w-3 h-3" />
-                  重置 SSH 密码
-                </button>
-              )}
             </>
           )}
         </Panel>
@@ -1082,6 +1129,60 @@ export default function ContainerDetail() {
       )}
 
       <ResourceStatsPanel range={range} onRangeChange={setRange} onRefresh={() => { fetchContainer(); fetchUsage() }} charts={charts} />
+
+      {showResetPassword && (
+        <Modal title="重置 SSH 密码" onClose={() => setShowResetPassword(false)}>
+          <div className="space-y-4">
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">新 SSH 密码</label>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={resetPasswordDraft}
+                  onChange={(e) => { setResetPasswordDraft(e.target.value); setResetPasswordResult('') }}
+                  placeholder="请输入 8-64 位，至少包含字母和数字"
+                  className={inputClass}
+                />
+                <button
+                  type="button"
+                  onClick={generateResetPassword}
+                  className="px-3 py-2 border border-gray-300 rounded-md text-gray-600 hover:bg-gray-50 hover:text-black"
+                  title="生成随机密码"
+                >
+                  <RefreshCw className="w-4 h-4" />
+                </button>
+              </div>
+              {resetPasswordDraft && resetPasswordError(resetPasswordDraft) && (
+                <p className="mt-1 text-xs text-red-600">{resetPasswordError(resetPasswordDraft)}</p>
+              )}
+            </div>
+            {resetPasswordResult && (
+              <div className="p-3 bg-green-50 border border-green-200 rounded-md">
+                <div className="text-xs text-green-700 mb-1">密码已修改成功</div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-mono text-sm text-green-900 break-all">{resetPasswordResult}</span>
+                  <button onClick={() => copyText(resetPasswordResult)} className="p-1 text-green-700 hover:text-green-900 rounded" title="复制">
+                    <Copy className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            )}
+            <p className="text-xs text-gray-500 leading-relaxed">
+              Linux LXC/KVM 修改 root SSH 密码通常无需重启；KVM 需要虚拟机运行且 guest agent 或 SSH 可用。
+            </p>
+            <div className="flex justify-end gap-2 pt-2">
+              <button onClick={() => setShowResetPassword(false)} className="px-4 py-2 text-sm text-gray-600 border border-gray-200 rounded-md hover:bg-gray-50">取消</button>
+              <button
+                onClick={handleResetPassword}
+                disabled={resetPasswordSaving || !resetPasswordDraft || !!resetPasswordError(resetPasswordDraft)}
+                className="px-4 py-2 text-sm bg-black text-white rounded-md hover:bg-gray-800 disabled:opacity-50"
+              >
+                {resetPasswordSaving ? '修改中...' : '确认修改'}
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
 
       {showSSH && (
         <Modal title={`WebSSH - ${container.name}`} onClose={() => setShowSSH(false)} wide>

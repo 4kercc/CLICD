@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -8,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"clicd/internal/config"
 	"clicd/internal/kvm"
@@ -16,23 +18,143 @@ import (
 
 // ImageInfo represents a template image with its download/enable status.
 type ImageInfo struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Type        string `json:"type"`
-	Distro      string `json:"distro"`
-	Release     string `json:"release"`
-	Arch        string `json:"arch"`
-	Description string `json:"description"`
-	Downloaded  bool   `json:"downloaded"`
-	Enabled     bool   `json:"enabled"`
-	Downloading bool   `json:"downloading"`
-	SizeBytes   int64  `json:"size_bytes"`
-	ManualPath  string `json:"manual_path,omitempty"`
-	Desktop     string `json:"desktop,omitempty"`
+	ID              string `json:"id"`
+	Name            string `json:"name"`
+	Type            string `json:"type"`
+	Distro          string `json:"distro"`
+	Release         string `json:"release"`
+	Arch            string `json:"arch"`
+	Description     string `json:"description"`
+	Downloaded      bool   `json:"downloaded"`
+	Enabled         bool   `json:"enabled"`
+	Downloading     bool   `json:"downloading"`
+	Progress        int    `json:"progress"`
+	DownloadedBytes int64  `json:"downloaded_bytes"`
+	TotalBytes      int64  `json:"total_bytes"`
+	Stage           string `json:"stage,omitempty"`
+	Error           string `json:"error,omitempty"`
+	SizeBytes       int64  `json:"size_bytes"`
+	ManualPath      string `json:"manual_path,omitempty"`
+	Desktop         string `json:"desktop,omitempty"`
 }
 
 var imageDownloadsMu sync.Mutex
-var imageDownloads = map[string]bool{}
+var imageDownloads = map[string]*imageDownloadStatus{}
+
+type imageDownloadStatus struct {
+	Downloading     bool
+	Progress        int
+	DownloadedBytes int64
+	TotalBytes      int64
+	Stage           string
+	Error           string
+	Cancel          context.CancelFunc
+	UpdatedAt       time.Time
+}
+
+type imageDownloadSnapshot struct {
+	Downloading     bool
+	Progress        int
+	DownloadedBytes int64
+	TotalBytes      int64
+	Stage           string
+	Error           string
+}
+
+func imageDownloadInfo(id string) imageDownloadSnapshot {
+	imageDownloadsMu.Lock()
+	defer imageDownloadsMu.Unlock()
+	st := imageDownloads[id]
+	if st == nil {
+		return imageDownloadSnapshot{}
+	}
+	return imageDownloadSnapshot{
+		Downloading:     st.Downloading,
+		Progress:        st.Progress,
+		DownloadedBytes: st.DownloadedBytes,
+		TotalBytes:      st.TotalBytes,
+		Stage:           st.Stage,
+		Error:           st.Error,
+	}
+}
+
+func startImageDownload(id, stage string) (context.Context, bool) {
+	imageDownloadsMu.Lock()
+	defer imageDownloadsMu.Unlock()
+	if st := imageDownloads[id]; st != nil && st.Downloading {
+		return nil, false
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	imageDownloads[id] = &imageDownloadStatus{
+		Downloading: true,
+		Stage:       stage,
+		Cancel:      cancel,
+		UpdatedAt:   time.Now(),
+	}
+	return ctx, true
+}
+
+func updateImageDownload(id string, update func(*imageDownloadStatus)) {
+	imageDownloadsMu.Lock()
+	defer imageDownloadsMu.Unlock()
+	st := imageDownloads[id]
+	if st == nil {
+		return
+	}
+	update(st)
+	st.UpdatedAt = time.Now()
+}
+
+func finishImageDownload(id string, err error) {
+	imageDownloadsMu.Lock()
+	defer imageDownloadsMu.Unlock()
+	st := imageDownloads[id]
+	if st == nil {
+		return
+	}
+	st.Downloading = false
+	st.Cancel = nil
+	st.UpdatedAt = time.Now()
+	if err != nil {
+		st.Error = err.Error()
+		return
+	}
+	delete(imageDownloads, id)
+}
+
+func clearImageDownload(id string) {
+	imageDownloadsMu.Lock()
+	delete(imageDownloads, id)
+	imageDownloadsMu.Unlock()
+}
+
+func isImageDownloadActive(id string) bool {
+	imageDownloadsMu.Lock()
+	defer imageDownloadsMu.Unlock()
+	st := imageDownloads[id]
+	return st != nil && st.Downloading
+}
+
+func lxcImageDownloadTempName(id string) string {
+	return fmt.Sprintf("clicd-img-dl-%s", id)
+}
+
+func cleanupLXCImageDownloadTemp(id string) {
+	tmpName := lxcImageDownloadTempName(id)
+	exec.Command("lxc-destroy", "-n", tmpName, "-f").Run()
+	os.RemoveAll(filepath.Join("/var/lib/lxc", tmpName))
+}
+
+func cleanupOldImageDownloadErrors() {
+	imageDownloadsMu.Lock()
+	defer imageDownloadsMu.Unlock()
+	cutoff := time.Now().Add(-10 * time.Minute)
+	for id, st := range imageDownloads {
+		if !st.Downloading && st.UpdatedAt.Before(cutoff) {
+			delete(imageDownloads, id)
+		}
+	}
+}
 
 // isImageDownloaded checks if the LXC download cache exists for a template.
 func isImageDownloaded(distro, release, arch string) bool {
@@ -101,54 +223,65 @@ func HandleImages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	enabledSet := getEnabledImageSet()
+	cleanupOldImageDownloadErrors()
 
 	templates := lxc.GetTemplates()
 	images := make([]ImageInfo, 0, len(templates)+len(kvm.GetImages()))
 	for _, t := range templates {
-		_, downloading := imageDownloads[t.ID]
+		dl := imageDownloadInfo(t.ID)
 		downloaded, size := imageDownloadedInfo(t.Distro, t.Release, t.Arch)
 		images = append(images, ImageInfo{
-			ID:          t.ID,
-			Name:        t.Name,
-			Type:        config.VirtualizationLXC,
-			Distro:      t.Distro,
-			Release:     t.Release,
-			Arch:        t.Arch,
-			Description: t.Description,
-			Downloaded:  downloaded,
-			Enabled:     enabledSet[t.ID],
-			Downloading: downloading,
-			SizeBytes:   size,
+			ID:              t.ID,
+			Name:            t.Name,
+			Type:            config.VirtualizationLXC,
+			Distro:          t.Distro,
+			Release:         t.Release,
+			Arch:            t.Arch,
+			Description:     t.Description,
+			Downloaded:      downloaded,
+			Enabled:         enabledSet[t.ID],
+			Downloading:     dl.Downloading,
+			Progress:        dl.Progress,
+			DownloadedBytes: dl.DownloadedBytes,
+			TotalBytes:      dl.TotalBytes,
+			Stage:           dl.Stage,
+			Error:           dl.Error,
+			SizeBytes:       size,
 		})
 	}
 	for _, t := range kvm.GetImages() {
-		_, downloading := imageDownloads[t.ID]
+		dl := imageDownloadInfo(t.ID)
 		downloaded, size := kvm.ImageDownloadedInfo(t.ID)
 		manualPath := ""
 		if t.Distro == "windows" {
 			manualPath = kvm.ImagePath(t.ID)
 		}
 		images = append(images, ImageInfo{
-			ID:          t.ID,
-			Name:        t.Name,
-			Type:        config.VirtualizationKVM,
-			Distro:      t.Distro,
-			Release:     t.Release,
-			Arch:        t.Arch,
-			Description: t.Description,
-			Downloaded:  downloaded,
-			Enabled:     enabledSet[t.ID],
-			Downloading: downloading,
-			SizeBytes:   size,
-			ManualPath:  manualPath,
-			Desktop:     t.Desktop,
+			ID:              t.ID,
+			Name:            t.Name,
+			Type:            config.VirtualizationKVM,
+			Distro:          t.Distro,
+			Release:         t.Release,
+			Arch:            t.Arch,
+			Description:     t.Description,
+			Downloaded:      downloaded,
+			Enabled:         enabledSet[t.ID],
+			Downloading:     dl.Downloading,
+			Progress:        dl.Progress,
+			DownloadedBytes: dl.DownloadedBytes,
+			TotalBytes:      dl.TotalBytes,
+			Stage:           dl.Stage,
+			Error:           dl.Error,
+			SizeBytes:       size,
+			ManualPath:      manualPath,
+			Desktop:         t.Desktop,
 		})
 	}
 
 	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Data: images})
 }
 
-// HandleImageDownload downloads a template image from the LXC image server.
+// HandleImageDownload starts a template image download in the background.
 func HandleImageDownload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
@@ -172,82 +305,127 @@ func HandleImageDownload(w http.ResponseWriter, r *http.Request) {
 		}
 		if ok, _ := kvm.ImageDownloadedInfo(image.ID); ok {
 			ensureImageEnabled(image.ID)
+			clearImageDownload(image.ID)
 			jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: "Already downloaded"})
 			return
 		}
-		imageDownloadsMu.Lock()
-		if imageDownloads[req.TemplateID] {
-			imageDownloadsMu.Unlock()
+		ctx, ok := startImageDownload(image.ID, "downloading")
+		if !ok {
 			jsonResponse(w, http.StatusConflict, APIResponse{Success: false, Message: "Already downloading"})
 			return
 		}
-		imageDownloads[req.TemplateID] = true
-		imageDownloadsMu.Unlock()
-		defer func() {
-			imageDownloadsMu.Lock()
-			delete(imageDownloads, req.TemplateID)
-			imageDownloadsMu.Unlock()
-		}()
-		ensureImageEnabled(image.ID)
-		if err := kvm.DownloadImage(*image); err != nil {
-			message := "Download failed: " + err.Error()
-
-			jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: message})
-			return
-		}
-		jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: "Downloaded successfully"})
+		go func(image kvm.Image) {
+			err := kvm.DownloadImageWithProgress(ctx, image, func(p kvm.DownloadProgress) {
+				updateImageDownload(image.ID, func(st *imageDownloadStatus) {
+					if p.Stage != "" {
+						st.Stage = p.Stage
+					}
+					if p.DownloadedBytes > 0 || p.TotalBytes > 0 {
+						st.DownloadedBytes = p.DownloadedBytes
+						st.TotalBytes = p.TotalBytes
+					}
+					st.Progress = p.Percent
+				})
+			})
+			if err != nil {
+				if ctx.Err() != nil {
+					os.Remove(kvm.ImagePath(image.ID) + ".tmp")
+					os.Remove(kvm.ImagePath(image.ID))
+					finishImageDownload(image.ID, nil)
+					return
+				}
+				finishImageDownload(image.ID, err)
+				return
+			}
+			ensureImageEnabled(image.ID)
+			finishImageDownload(image.ID, nil)
+		}(*image)
+		jsonResponse(w, http.StatusAccepted, APIResponse{Success: true, Message: "Download started"})
 		return
 	}
 
 	// Already downloaded? Just enable if needed.
 	if isImageDownloaded(tmpl.Distro, tmpl.Release, tmpl.Arch) {
 		ensureImageEnabled(tmpl.ID)
+		clearImageDownload(tmpl.ID)
 		jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: "Already downloaded"})
 		return
 	}
 
-	// Already downloading?
-	imageDownloadsMu.Lock()
-	if imageDownloads[req.TemplateID] {
-		imageDownloadsMu.Unlock()
+	ctx, ok := startImageDownload(tmpl.ID, "lxc-create")
+	if !ok {
 		jsonResponse(w, http.StatusConflict, APIResponse{Success: false, Message: "Already downloading"})
 		return
 	}
-	imageDownloads[req.TemplateID] = true
-	imageDownloadsMu.Unlock()
 
-	defer func() {
-		imageDownloadsMu.Lock()
-		delete(imageDownloads, req.TemplateID)
-		imageDownloadsMu.Unlock()
-	}()
-
-	// Auto-enable on download
-	ensureImageEnabled(tmpl.ID)
-
-	// Download via lxc-create with a temp container, then destroy it.
-	tmpName := fmt.Sprintf("clicd-img-dl-%s", tmpl.ID)
-	args := []string{"-n", tmpName, "-t", "download", "--",
-		"-d", tmpl.Distro, "-r", tmpl.Release, "-a", tmpl.Arch}
-	if tmpl.Variant != "" {
-		args = append(args, "--variant", tmpl.Variant)
-	}
-	cmd := exec.Command("lxc-create", args...)
-	output, err := cmd.CombinedOutput()
-
-	// Clean up the temp container unconditionally.
-	exec.Command("lxc-destroy", "-n", tmpName, "-f").Run()
-	os.RemoveAll(filepath.Join("/var/lib/lxc", tmpName))
-
-	if err != nil {
-		jsonResponse(w, http.StatusInternalServerError, APIResponse{
-			Success: false,
-			Message: fmt.Sprintf("Download failed: %v, output: %s", err, string(output)),
+	go func(tmpl lxc.Template) {
+		// Download via lxc-create with a temp container, then destroy it.
+		tmpName := lxcImageDownloadTempName(tmpl.ID)
+		args := []string{"-n", tmpName, "-t", "download", "--",
+			"-d", tmpl.Distro, "-r", tmpl.Release, "-a", tmpl.Arch}
+		if tmpl.Variant != "" {
+			args = append(args, "--variant", tmpl.Variant)
+		}
+		updateImageDownload(tmpl.ID, func(st *imageDownloadStatus) {
+			st.Stage = "lxc-create"
 		})
+		cmd := exec.CommandContext(ctx, "lxc-create", args...)
+		output, err := cmd.CombinedOutput()
+
+		// Clean up the temp container unconditionally.
+		cleanupLXCImageDownloadTemp(tmpl.ID)
+
+		if err != nil {
+			if ctx.Err() != nil {
+				finishImageDownload(tmpl.ID, nil)
+				return
+			}
+			err = fmt.Errorf("Download failed: %v, output: %s", err, string(output))
+			finishImageDownload(tmpl.ID, err)
+			return
+		}
+		ensureImageEnabled(tmpl.ID)
+		finishImageDownload(tmpl.ID, nil)
+	}(*tmpl)
+
+	jsonResponse(w, http.StatusAccepted, APIResponse{Success: true, Message: "Download started"})
+}
+
+// HandleImageCancel cancels an in-progress image download.
+func HandleImageCancel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
+		return
+	}
+	var req struct {
+		TemplateID string `json:"template_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.TemplateID == "" {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "template_id required"})
 		return
 	}
 
-	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: "Downloaded successfully"})
+	imageDownloadsMu.Lock()
+	st := imageDownloads[req.TemplateID]
+	if st == nil || !st.Downloading || st.Cancel == nil {
+		imageDownloadsMu.Unlock()
+		jsonResponse(w, http.StatusNotFound, APIResponse{Success: false, Message: "No active download"})
+		return
+	}
+	cancel := st.Cancel
+	st.Stage = "canceling"
+	st.UpdatedAt = time.Now()
+	imageDownloadsMu.Unlock()
+
+	cancel()
+	if image := kvm.FindImage(req.TemplateID); image != nil {
+		os.Remove(kvm.ImagePath(image.ID) + ".tmp")
+		os.Remove(kvm.ImagePath(image.ID))
+	}
+	if tmpl := lxc.FindTemplate(req.TemplateID); tmpl != nil {
+		go cleanupLXCImageDownloadTemp(tmpl.ID)
+	}
+	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: "Cancel requested"})
 }
 
 // HandleImageDelete deletes a cached template image from disk.
@@ -262,6 +440,10 @@ func HandleImageDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.TemplateID == "" {
 		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "template_id required"})
+		return
+	}
+	if isImageDownloadActive(req.TemplateID) {
+		jsonResponse(w, http.StatusConflict, APIResponse{Success: false, Message: "Image is downloading; cancel it before deleting"})
 		return
 	}
 

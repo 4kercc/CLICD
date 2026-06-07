@@ -2,10 +2,12 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"clicd/internal/config"
 	"clicd/internal/lxc"
@@ -394,7 +396,24 @@ func resetSSHPassword(w http.ResponseWriter, r *http.Request, id int) {
 		jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "容器已到期，不允许此操作"})
 		return
 	}
-	newPassword, err := resetPasswordByRuntime(id)
+	var req struct {
+		Password string `json:"password"`
+	}
+	if r.Body != nil {
+		decoder := json.NewDecoder(r.Body)
+		if err := decoder.Decode(&req); err != nil && err.Error() != "EOF" {
+			jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Invalid request body"})
+			return
+		}
+	}
+	password := strings.TrimSpace(req.Password)
+	if password != "" {
+		if err := validateSSHPassword(password); err != nil {
+			jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: err.Error()})
+			return
+		}
+	}
+	newPassword, err := resetPasswordByRuntime(id, password)
 	if err != nil {
 		jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: err.Error()})
 		return
@@ -404,6 +423,29 @@ func resetSSHPassword(w http.ResponseWriter, r *http.Request, id int) {
 		Message: "SSH password reset successfully",
 		Data:    map[string]string{"password": newPassword},
 	})
+}
+
+func validateSSHPassword(password string) error {
+	if len(password) < 8 || len(password) > 64 {
+		return fmt.Errorf("密码长度必须为 8-64 位")
+	}
+	hasLetter := false
+	hasDigit := false
+	for _, r := range password {
+		if unicode.IsSpace(r) {
+			return fmt.Errorf("密码不能包含空白字符")
+		}
+		if unicode.IsLetter(r) {
+			hasLetter = true
+		}
+		if unicode.IsDigit(r) {
+			hasDigit = true
+		}
+	}
+	if !hasLetter || !hasDigit {
+		return fmt.Errorf("密码至少需要包含字母和数字")
+	}
+	return nil
 }
 
 func addPortMapping(w http.ResponseWriter, r *http.Request, id int) {

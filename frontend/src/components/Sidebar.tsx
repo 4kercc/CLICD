@@ -83,14 +83,14 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
       <div className="flex items-center justify-between h-14 px-4 border-b border-gray-200 dark:border-gray-700">
         {!collapsed && (
           <div className="flex items-center gap-2">
-            <div className="w-7 h-7 bg-gray-100 rounded flex items-center justify-center dark:bg-gray-800">
+            <div className="w-7 h-7 flex items-center justify-center">
               <AppIcon className="w-5 h-5" />
             </div>
             <span className="font-bold text-black text-sm dark:text-white">CLICD</span>
           </div>
         )}
         {collapsed && (
-          <div className="w-7 h-7 bg-gray-100 rounded flex items-center justify-center mx-auto dark:bg-gray-800">
+          <div className="w-7 h-7 flex items-center justify-center mx-auto">
             <AppIcon className="w-5 h-5" />
           </div>
         )}

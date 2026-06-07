@@ -40,7 +40,7 @@ export default function Login() {
       <div className="w-full max-w-md">
         <div className="bg-white rounded-lg border border-gray-200 shadow-sm p-8">
             <div className="flex flex-col items-center mb-8">
-              <div className="w-16 h-16 rounded-lg border border-gray-200 bg-gray-50 flex items-center justify-center mb-4">
+              <div className="w-16 h-16 flex items-center justify-center mb-4">
                 <AppIcon className="w-10 h-10" />
               </div>
               <h1 className="text-2xl font-bold text-gray-950">CLICD</h1>

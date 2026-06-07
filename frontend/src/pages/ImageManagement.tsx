@@ -9,8 +9,9 @@ import {
   ToggleRight,
   Loader2,
   AlertCircle,
+  X,
 } from 'lucide-react'
-import { getImages, downloadImage, deleteImage, toggleImage, ImageInfo } from '../services/api'
+import { getImages, downloadImage, cancelImageDownload, deleteImage, toggleImage, ImageInfo } from '../services/api'
 import { useDialog } from '../components/Dialog'
 
 export default function ImageManagement() {
@@ -34,9 +35,13 @@ export default function ImageManagement() {
 
   useEffect(() => {
     fetchImages()
-    const interval = setInterval(fetchImages, 5000)
-    return () => clearInterval(interval)
   }, [fetchImages])
+
+  useEffect(() => {
+    const hasDownloads = images.some((img) => img.downloading)
+    const interval = setInterval(fetchImages, hasDownloads ? 1500 : 5000)
+    return () => clearInterval(interval)
+  }, [fetchImages, images])
 
   const handleDownload = async (templateId: string) => {
     setActionLoading(templateId)
@@ -46,6 +51,19 @@ export default function ImageManagement() {
       await fetchImages()
     } catch (err: unknown) {
       setError(apiErrorMessage(err, '下载失败'))
+    } finally {
+      setActionLoading(null)
+    }
+  }
+
+  const handleCancelDownload = async (templateId: string) => {
+    setActionLoading(templateId)
+    setError('')
+    try {
+      await cancelImageDownload(templateId)
+      await fetchImages()
+    } catch (err: unknown) {
+      setError(apiErrorMessage(err, '取消失败'))
     } finally {
       setActionLoading(null)
     }
@@ -125,6 +143,7 @@ export default function ImageManagement() {
         downloadedCount={lxcImages.filter((img) => img.downloaded).length}
         totalCount={lxcImages.length}
         onDownload={handleDownload}
+        onCancelDownload={handleCancelDownload}
         onDelete={handleDelete}
         onToggle={handleToggle}
       />
@@ -136,6 +155,7 @@ export default function ImageManagement() {
         downloadedCount={kvmImages.filter((img) => img.downloaded).length}
         totalCount={kvmImages.length}
         onDownload={handleDownload}
+        onCancelDownload={handleCancelDownload}
         onDelete={handleDelete}
         onToggle={handleToggle}
       />
@@ -150,6 +170,7 @@ function ImageTable({
   downloadedCount,
   totalCount,
   onDownload,
+  onCancelDownload,
   onDelete,
   onToggle,
 }: {
@@ -159,6 +180,7 @@ function ImageTable({
   downloadedCount: number
   totalCount: number
   onDownload: (id: string) => void
+  onCancelDownload: (id: string) => void
   onDelete: (id: string) => void
   onToggle: (id: string, enabled: boolean) => void
 }) {
@@ -202,7 +224,7 @@ function ImageTable({
                   <tr key={img.id} className="hover:bg-gray-50 transition-colors">
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-3">
-                        <span className="w-8 h-8 bg-gray-100 rounded-lg flex items-center justify-center flex-shrink-0">
+                        <span className="w-8 h-8 flex items-center justify-center flex-shrink-0">
                           {getTemplateIcon(img.id)}
                         </span>
                         <div>
@@ -242,13 +264,18 @@ function ImageTable({
                         )}
 
                         {img.downloading && (
-                          <span className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-50 border border-amber-200 rounded-md text-amber-700 text-xs font-medium">
-                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                            下载中...
-                          </span>
+                          <button
+                            onClick={() => onCancelDownload(img.id)}
+                            disabled={isBusy}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-red-200 text-red-600 hover:bg-red-50 transition-colors text-xs font-medium disabled:opacity-50"
+                            title="取消下载并清理临时文件"
+                          >
+                            {isBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <X className="w-3.5 h-3.5" />}
+                            {isBusy ? '取消中...' : '取消'}
+                          </button>
                         )}
 
-                        {img.downloaded && (
+                        {img.downloaded && !img.downloading && (
                           <>
                             <button
                               onClick={() => onToggle(img.id, img.enabled)}
@@ -287,10 +314,33 @@ function ImageTable({
 
 function StatusBadge({ img }: { img: ImageInfo }) {
   if (img.downloading) {
+    const progress = Math.max(0, Math.min(100, img.progress || 0))
+    const showProgress = img.stage === 'downloading' && progress > 0
     return (
-      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium bg-amber-50 text-amber-700">
-        <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
-        下载中
+      <div className="inline-flex flex-col gap-1">
+        <span
+          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium bg-amber-50 text-amber-700"
+          title={downloadStatusTitle(img)}
+        >
+          <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
+          {downloadStatusLabel(img)}
+        </span>
+        {showProgress && (
+          <span className="block h-1 w-24 overflow-hidden rounded-full bg-amber-100">
+            <span className="block h-full rounded-full bg-amber-500 transition-all" style={{ width: `${progress}%` }} />
+          </span>
+        )}
+      </div>
+    )
+  }
+  if (img.error) {
+    return (
+      <span
+        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium bg-red-50 text-red-600"
+        title={img.error}
+      >
+        <AlertCircle className="w-3 h-3" />
+        下载失败
       </span>
     )
   }
@@ -316,6 +366,23 @@ function StatusBadge({ img }: { img: ImageInfo }) {
       未下载
     </span>
   )
+}
+
+function downloadStatusLabel(img: ImageInfo) {
+  if (img.stage === 'canceling') return '取消中'
+  if (img.stage === 'converting') return '转换中'
+  if (img.stage === 'lxc-create') return '下载中'
+  if (img.progress > 0) return `下载中 ${Math.min(100, img.progress)}%`
+  return '下载中'
+}
+
+function downloadStatusTitle(img: ImageInfo) {
+  const parts = [downloadStatusLabel(img)]
+  if (img.stage) parts.push(`阶段：${img.stage}`)
+  if (img.downloaded_bytes > 0 || img.total_bytes > 0) {
+    parts.push(`${formatSize(img.downloaded_bytes)} / ${formatSize(img.total_bytes)}`)
+  }
+  return parts.join('，')
 }
 
 function isWindowsImage(img: ImageInfo) {

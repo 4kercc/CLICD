@@ -72,12 +72,12 @@ func reinstallByRuntime(id int, templateID string) error {
 	return lxcManager.ReinstallContainer(id, templateID)
 }
 
-func resetPasswordByRuntime(id int) (string, error) {
+func resetPasswordByRuntime(id int, password string) (string, error) {
 	c := config.FindContainer(id)
 	if c != nil && c.IsKVM() {
-		return kvmManager.ResetSSHPassword(id)
+		return kvmManager.ResetSSHPassword(id, password)
 	}
-	return lxcManager.ResetSSHPassword(id)
+	return lxcManager.ResetSSHPassword(id, password)
 }
 
 func assignIPv6ByRuntime(id int) (*config.Container, error) {

@@ -11,13 +11,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
-
-	"golang.org/x/sys/unix"
 
 	"clicd/internal/config"
 )
@@ -1005,11 +1004,10 @@ func (m *Manager) shiftRootfsForUnprivileged(lxcName string) error {
 	if err != nil {
 		return err
 	}
-	rootStat, ok := rootInfo.Sys().(*unix.Stat_t)
+	rootDev, _, _, ok := fileStatFields(rootInfo)
 	if !ok {
 		return fmt.Errorf("failed to read rootfs device for %s", rootfsPath)
 	}
-	rootDev := rootStat.Dev
 
 	if err := filepath.WalkDir(rootfsPath, func(path string, _ os.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -1019,18 +1017,16 @@ func (m *Manager) shiftRootfsForUnprivileged(lxcName string) error {
 		if err != nil {
 			return err
 		}
-		stat, ok := info.Sys().(*unix.Stat_t)
+		dev, uid, gid, ok := fileStatFields(info)
 		if !ok {
 			return fmt.Errorf("failed to read uid/gid for %s", path)
 		}
-		if path != rootfsPath && stat.Dev != rootDev {
+		if path != rootfsPath && dev != rootDev {
 			if info.IsDir() {
 				return filepath.SkipDir
 			}
 			return nil
 		}
-		uid := int(stat.Uid)
-		gid := int(stat.Gid)
 		if uid >= uidBase && uid < uidBase+65536 && gid >= gidBase && gid < gidBase+65536 {
 			return nil
 		}
@@ -1040,7 +1036,7 @@ func (m *Manager) shiftRootfsForUnprivileged(lxcName string) error {
 		if gid >= 0 && gid < 65536 {
 			gid += gidBase
 		}
-		return unix.Lchown(path, uid, gid)
+		return os.Lchown(path, uid, gid)
 	}); err != nil {
 		return fmt.Errorf("failed to shift rootfs ownership for unprivileged LXC: %v", err)
 	}
@@ -1048,7 +1044,7 @@ func (m *Manager) shiftRootfsForUnprivileged(lxcName string) error {
 	if err := os.WriteFile(marker, []byte("1\n"), 0644); err != nil {
 		return err
 	}
-	if err := unix.Lchown(marker, uidBase, gidBase); err != nil {
+	if err := os.Lchown(marker, uidBase, gidBase); err != nil {
 		return err
 	}
 
@@ -1061,6 +1057,48 @@ func (m *Manager) shiftRootfsForUnprivileged(lxcName string) error {
 		return fmt.Errorf("failed to fix container directory permissions: %v", err)
 	}
 	return nil
+}
+
+func fileStatFields(info os.FileInfo) (dev uint64, uid int, gid int, ok bool) {
+	if info == nil || info.Sys() == nil {
+		return 0, 0, 0, false
+	}
+	stat := reflect.ValueOf(info.Sys())
+	if stat.Kind() == reflect.Pointer {
+		if stat.IsNil() {
+			return 0, 0, 0, false
+		}
+		stat = stat.Elem()
+	}
+	if stat.Kind() != reflect.Struct {
+		return 0, 0, 0, false
+	}
+	devValue, devOK := numericField(stat, "Dev")
+	uidValue, uidOK := numericField(stat, "Uid")
+	gidValue, gidOK := numericField(stat, "Gid")
+	if !devOK || !uidOK || !gidOK {
+		return 0, 0, 0, false
+	}
+	return devValue, int(uidValue), int(gidValue), true
+}
+
+func numericField(v reflect.Value, name string) (uint64, bool) {
+	field := v.FieldByName(name)
+	if !field.IsValid() {
+		return 0, false
+	}
+	switch field.Kind() {
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		return field.Uint(), true
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		value := field.Int()
+		if value < 0 {
+			return 0, false
+		}
+		return uint64(value), true
+	default:
+		return 0, false
+	}
 }
 
 func (m *Manager) unmountRootfsChildMounts(rootfsPath string) {
@@ -1823,14 +1861,17 @@ pgrep -x sshd >/dev/null 2>&1 || exit 33
 }
 
 // ResetSSHPassword resets the root password of a container
-func (m *Manager) ResetSSHPassword(id int) (string, error) {
+func (m *Manager) ResetSSHPassword(id int, password string) (string, error) {
 	c := config.FindContainer(id)
 	if c == nil {
 		return "", fmt.Errorf("container not found: %d", id)
 	}
 	lxcName := c.LxcName()
 
-	newPassword := generateRandomString(16)
+	newPassword := strings.TrimSpace(password)
+	if newPassword == "" {
+		newPassword = generateRandomString(16)
+	}
 
 	if c.Status == "running" {
 		c.SSHPassword = newPassword

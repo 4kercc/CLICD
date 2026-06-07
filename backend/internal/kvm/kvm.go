@@ -2,6 +2,7 @@ package kvm
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/binary"
@@ -114,7 +115,22 @@ func ImageDownloadedInfo(id string) (bool, int64) {
 	return true, info.Size()
 }
 
+// DownloadProgress reports KVM image download/conversion progress.
+type DownloadProgress struct {
+	Stage           string
+	DownloadedBytes int64
+	TotalBytes      int64
+	Percent         int
+}
+
+// DownloadProgressFunc receives download progress updates.
+type DownloadProgressFunc func(DownloadProgress)
+
 func DownloadImage(image Image) error {
+	return DownloadImageWithProgress(context.Background(), image, nil)
+}
+
+func DownloadImageWithProgress(ctx context.Context, image Image, progress DownloadProgressFunc) error {
 	if err := os.MkdirAll(CacheDir(), 0755); err != nil {
 		return err
 	}
@@ -134,11 +150,15 @@ func DownloadImage(image Image) error {
 	tmp := target + ".tmp"
 	_ = os.Remove(tmp)
 	if image.Distro == "windows" {
-		if err := downloadFileWithValidator(image.URL, tmp, validateWindowsISOResponse(target)); err != nil {
+		if err := downloadFileWithValidator(ctx, image.URL, tmp, validateWindowsISOResponse(target), progress); err != nil {
 			_ = os.Remove(tmp)
 			return err
 		}
-	} else if err := downloadFile(image.URL, tmp); err != nil {
+	} else if err := downloadFile(ctx, image.URL, tmp, progress); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		_ = os.Remove(tmp)
 		return err
 	}
@@ -153,8 +173,12 @@ func DownloadImage(image Image) error {
 			return err
 		}
 	} else {
-		if err := normalizeQCOW2(tmp, target); err != nil {
+		if progress != nil {
+			progress(DownloadProgress{Stage: "converting", Percent: 100})
+		}
+		if err := normalizeQCOW2(ctx, tmp, target); err != nil {
 			_ = os.Remove(tmp)
+			_ = os.Remove(target)
 			return err
 		}
 	}
@@ -168,11 +192,11 @@ func DeleteImage(id string) error {
 
 type downloadResponseValidator func(*http.Response) error
 
-func downloadFile(url, target string) error {
-	return downloadFileWithValidator(url, target, nil)
+func downloadFile(ctx context.Context, url, target string, progress DownloadProgressFunc) error {
+	return downloadFileWithValidator(ctx, url, target, nil, progress)
 }
 
-func downloadFileWithValidator(url, target string, validate downloadResponseValidator) error {
+func downloadFileWithValidator(ctx context.Context, url, target string, validate downloadResponseValidator, progress DownloadProgressFunc) error {
 	client := http.Client{
 		Timeout: 30 * time.Minute,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -186,7 +210,7 @@ func downloadFileWithValidator(url, target string, validate downloadResponseVali
 			return nil
 		},
 	}
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return err
 	}
@@ -210,7 +234,48 @@ func downloadFileWithValidator(url, target string, validate downloadResponseVali
 		return err
 	}
 	defer out.Close()
-	if _, err := io.Copy(out, resp.Body); err != nil {
+	total := resp.ContentLength
+	if total < 0 {
+		total = 0
+	}
+	if progress != nil {
+		progress(DownloadProgress{Stage: "downloading", TotalBytes: total})
+	}
+	buf := make([]byte, 256*1024)
+	var downloaded int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		n, readErr := resp.Body.Read(buf)
+		if n > 0 {
+			written, writeErr := out.Write(buf[:n])
+			downloaded += int64(written)
+			if writeErr != nil {
+				return writeErr
+			}
+			if written != n {
+				return io.ErrShortWrite
+			}
+			if progress != nil {
+				percent := 0
+				if total > 0 {
+					percent = int(downloaded * 100 / total)
+					if percent > 99 {
+						percent = 99
+					}
+				}
+				progress(DownloadProgress{Stage: "downloading", DownloadedBytes: downloaded, TotalBytes: total, Percent: percent})
+			}
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return readErr
+		}
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	return out.Sync()
@@ -266,11 +331,11 @@ func validateWindowsISO(path, target string) error {
 	return nil
 }
 
-func normalizeQCOW2(src, target string) error {
+func normalizeQCOW2(ctx context.Context, src, target string) error {
 	if err := requireCommand("qemu-img"); err != nil {
 		return err
 	}
-	cmd := exec.Command("qemu-img", "convert", "-O", "qcow2", src, target)
+	cmd := exec.CommandContext(ctx, "qemu-img", "convert", "-O", "qcow2", src, target)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("qemu-img convert failed: %v, output: %s", err, string(output))
 	}
@@ -647,7 +712,7 @@ func (m *Manager) ReinstallContainer(id int, templateID string) error {
 	return m.StartContainer(id)
 }
 
-func (m *Manager) ResetSSHPassword(id int) (string, error) {
+func (m *Manager) ResetSSHPassword(id int, password string) (string, error) {
 	c := config.FindContainer(id)
 	if c == nil {
 		return "", fmt.Errorf("container not found: %d", id)
@@ -658,7 +723,9 @@ func (m *Manager) ResetSSHPassword(id int) (string, error) {
 	if c.Status != "running" {
 		return "", fmt.Errorf("KVM VM must be running before password reset")
 	}
-	password := generateRandomString(16)
+	if strings.TrimSpace(password) == "" {
+		password = generateRandomString(16)
+	}
 	if err := runKVMGuestAgentSSHSetup(c.VirshName(), password); err == nil {
 		c.SSHPassword = password
 		c.SSHHostKey = ""
@@ -1459,7 +1526,7 @@ func ensureVirtioWinISO() error {
 	virtioURL := "https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/stable-virtio/virtio-win.iso"
 	tmp := virtioPath + ".tmp"
 	_ = os.Remove(tmp)
-	if err := downloadFile(virtioURL, tmp); err != nil {
+	if err := downloadFile(context.Background(), virtioURL, tmp, nil); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("failed to download virtio-win.iso: %v", err)
 	}

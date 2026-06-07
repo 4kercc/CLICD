@@ -245,8 +245,8 @@ export const restartContainer = (id: ContainerIdentifier) =>
 export const reinstallContainer = (id: ContainerIdentifier, templateId: string) =>
   api.post<APIResponse>(`/containers/${id}/reinstall`, { template_id: templateId })
 
-export const resetSSHPassword = (id: ContainerIdentifier) =>
-  api.post<APIResponse<{ password: string }>>(`/containers/${id}/reset-password`)
+export const resetSSHPassword = (id: ContainerIdentifier, password?: string) =>
+  api.post<APIResponse<{ password: string }>>(`/containers/${id}/reset-password`, password ? { password } : {})
 
 export const getContainerUsage = (id: ContainerIdentifier) =>
   api.get<APIResponse<ContainerUsage>>(`/containers/${id}/usage`)
@@ -358,6 +358,11 @@ export interface ImageInfo {
   downloaded: boolean
   enabled: boolean
   downloading: boolean
+  progress: number
+  downloaded_bytes: number
+  total_bytes: number
+  stage?: string
+  error?: string
   size_bytes: number
   manual_path?: string
   desktop?: string
@@ -367,7 +372,10 @@ export const getImages = () =>
   api.get<APIResponse<ImageInfo[]>>('/images')
 
 export const downloadImage = (templateId: string) =>
-  api.post<APIResponse>('/images/download', { template_id: templateId }, { timeout: 1800000 }) // 30min timeout
+  api.post<APIResponse>('/images/download', { template_id: templateId })
+
+export const cancelImageDownload = (templateId: string) =>
+  api.post<APIResponse>('/images/cancel', { template_id: templateId })
 
 export const deleteImage = (templateId: string) =>
   api.delete<APIResponse>('/images/delete', { data: { template_id: templateId } })
