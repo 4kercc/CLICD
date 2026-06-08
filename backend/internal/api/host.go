@@ -2,17 +2,22 @@ package api
 
 import (
 	"bufio"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"clicd/internal/lxc"
-
-	"golang.org/x/sys/unix"
 )
 
 type HostInfo struct {
@@ -22,6 +27,148 @@ type HostInfo struct {
 	Network NetworkInfo `json:"network"`
 	DiskIO  DiskIOInfo  `json:"disk_io"`
 	Load    LoadInfo    `json:"load"`
+}
+
+type HostProbeReport struct {
+	GeneratedAt       string                `json:"generated_at"`
+	Hostname          string                `json:"hostname"`
+	Kernel            string                `json:"kernel"`
+	OS                string                `json:"os"`
+	CPU               HostCPUProbe          `json:"cpu"`
+	Memory            HostMemoryProbe       `json:"memory"`
+	Disks             []HostDiskProbe       `json:"disks"`
+	NetworkInterfaces []HostNICProbe        `json:"network_interfaces"`
+	PublicIPv4        []string              `json:"public_ipv4"`
+	IPv4Addresses     []HostIPProbe         `json:"ipv4_addresses"`
+	IPv4Prefixes      []HostIPv4PrefixProbe `json:"ipv4_prefixes"`
+	IPv6Addresses     []HostIPProbe         `json:"ipv6_addresses"`
+	IPv6Prefixes      []lxc.IPv6PrefixInfo  `json:"ipv6_prefixes"`
+	Gateways          []HostGatewayProbe    `json:"gateways"`
+	GPUs              []HostGPUProbe        `json:"gpus"`
+	Runtime           HostRuntimeProbe      `json:"runtime"`
+	System            HostSystemProbe       `json:"system"`
+	Environment       []HostEnvCheck        `json:"environment"`
+}
+
+type HostCPUProbe struct {
+	Model             string   `json:"model"`
+	Cores             int      `json:"cores"`
+	Threads           int      `json:"threads"`
+	Architecture      string   `json:"architecture"`
+	Flags             []string `json:"flags"`
+	HasIntegratedGPU  bool     `json:"has_integrated_gpu"`
+	Virtualization    bool     `json:"virtualization"`
+	VirtualizationKey string   `json:"virtualization_key"`
+}
+
+type HostMemoryProbe struct {
+	TotalMB int64              `json:"total_mb"`
+	UsedMB  int64              `json:"used_mb"`
+	FreeMB  int64              `json:"free_mb"`
+	Modules []HostMemoryModule `json:"modules"`
+}
+
+type HostMemoryModule struct {
+	Locator      string `json:"locator"`
+	Size         string `json:"size"`
+	Type         string `json:"type"`
+	Speed        string `json:"speed"`
+	Manufacturer string `json:"manufacturer"`
+	PartNumber   string `json:"part_number"`
+	SerialNumber string `json:"serial_number"`
+}
+
+type HostDiskProbe struct {
+	Name         string             `json:"name"`
+	Path         string             `json:"path"`
+	Model        string             `json:"model"`
+	Serial       string             `json:"serial"`
+	SizeBytes    uint64             `json:"size_bytes"`
+	Type         string             `json:"type"`
+	Rotational   bool               `json:"rotational"`
+	Mountpoints  []string           `json:"mountpoints"`
+	Health       string             `json:"health"`
+	HealthDetail string             `json:"health_detail"`
+	SMART        HostDiskSMARTProbe `json:"smart"`
+}
+
+type HostDiskSMARTProbe struct {
+	Available         bool   `json:"available"`
+	LifeUsedPercent   *int   `json:"life_used_percent,omitempty"`
+	PowerOnHours      int64  `json:"power_on_hours,omitempty"`
+	PowerCycleCount   int64  `json:"power_cycle_count,omitempty"`
+	ReadDataBytes     uint64 `json:"read_data_bytes,omitempty"`
+	WrittenDataBytes  uint64 `json:"written_data_bytes,omitempty"`
+	ReadCommands      uint64 `json:"read_commands,omitempty"`
+	WriteCommands     uint64 `json:"write_commands,omitempty"`
+	WearLevelingCount string `json:"wear_leveling_count,omitempty"`
+	EraseCount        string `json:"erase_count,omitempty"`
+	MediaErrors       uint64 `json:"media_errors,omitempty"`
+}
+
+type HostNICProbe struct {
+	Name      string        `json:"name"`
+	MAC       string        `json:"mac"`
+	State     string        `json:"state"`
+	SpeedMbps int           `json:"speed_mbps"`
+	Driver    string        `json:"driver"`
+	Model     string        `json:"model"`
+	IPv4      []HostIPProbe `json:"ipv4"`
+	IPv6      []HostIPProbe `json:"ipv6"`
+}
+
+type HostIPProbe struct {
+	Interface string `json:"interface"`
+	Address   string `json:"address"`
+	PrefixLen int    `json:"prefix_len"`
+	Scope     string `json:"scope"`
+	Gateway   string `json:"gateway,omitempty"`
+}
+
+type HostIPv4PrefixProbe struct {
+	Interface  string `json:"interface"`
+	Address    string `json:"address"`
+	Prefix     string `json:"prefix"`
+	PrefixLen  int    `json:"prefix_len"`
+	SubnetMask string `json:"subnet_mask"`
+	Gateway    string `json:"gateway"`
+	Source     string `json:"source"`
+}
+
+type HostGatewayProbe struct {
+	Family    string `json:"family"`
+	Interface string `json:"interface"`
+	Gateway   string `json:"gateway"`
+}
+
+type HostGPUProbe struct {
+	Name   string `json:"name"`
+	Vendor string `json:"vendor"`
+	Driver string `json:"driver"`
+	Type   string `json:"type"`
+}
+
+type HostRuntimeProbe struct {
+	LXCAvailable         bool   `json:"lxc_available"`
+	KVMAvailable         bool   `json:"kvm_available"`
+	DevKVM               bool   `json:"dev_kvm"`
+	NestedVirtualization bool   `json:"nested_virtualization"`
+	NestedDetail         string `json:"nested_detail"`
+	SupportMode          string `json:"support_mode"`
+}
+
+type HostSystemProbe struct {
+	UptimeSeconds int64  `json:"uptime_seconds"`
+	UptimeText    string `json:"uptime_text"`
+	ProcessCount  int    `json:"process_count"`
+}
+
+type HostEnvCheck struct {
+	Key      string `json:"key"`
+	Label    string `json:"label"`
+	OK       bool   `json:"ok"`
+	Required bool   `json:"required"`
+	Detail   string `json:"detail"`
 }
 
 type LoadInfo struct {
@@ -136,8 +283,11 @@ func getMemoryInfo() MemoryInfo {
 }
 
 func getDiskInfo() DiskInfo {
-	var stat unix.Statfs_t
-	if err := unix.Statfs("/", &stat); err != nil {
+	if info, ok := getRootDiskInfo(); ok {
+		return info
+	}
+
+	{
 		// Try command-based fallback
 		cmd := exec.Command("df", "-BG", "/")
 		output, err := cmd.Output()
@@ -154,16 +304,6 @@ func getDiskInfo() DiskInfo {
 			}
 		}
 		return DiskInfo{}
-	}
-
-	total := float64(int64(stat.Blocks)*int64(stat.Bsize)) / (1024 * 1024 * 1024)
-	free := float64(int64(stat.Bavail)*int64(stat.Bsize)) / (1024 * 1024 * 1024)
-	used := total - free
-
-	return DiskInfo{
-		TotalGB: total,
-		UsedGB:  used,
-		FreeGB:  free,
 	}
 }
 
@@ -374,4 +514,1048 @@ func getLoadInfo() LoadInfo {
 	load5, _ := strconv.ParseFloat(fields[1], 64)
 	load15, _ := strconv.ParseFloat(fields[2], 64)
 	return LoadInfo{Load1: load1, Load5: load5, Load15: load15}
+}
+
+func HandleHostReport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
+		return
+	}
+	if !requireScope(w, r, "host:read") {
+		return
+	}
+	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Data: getHostProbeReport()})
+}
+
+func getHostProbeReport() HostProbeReport {
+	host, _ := os.Hostname()
+	mem := getMemoryInfo()
+	report := HostProbeReport{
+		GeneratedAt:       time.Now().Format("2006-01-02 15:04:05"),
+		Hostname:          host,
+		Kernel:            strings.TrimSpace(runCommandOutput(2*time.Second, "uname", "-srmo")),
+		OS:                detectOSRelease(),
+		CPU:               detectHostCPUProbe(),
+		Memory:            HostMemoryProbe{TotalMB: mem.TotalMB, UsedMB: mem.UsedMB, FreeMB: mem.FreeMB, Modules: detectMemoryModules()},
+		Disks:             detectHostDisks(),
+		NetworkInterfaces: detectHostNICs(),
+		PublicIPv4:        detectAllPublicIPv4(),
+		IPv6Prefixes:      lxc.DetectPublicIPv6Prefixes(),
+		Gateways:          detectGateways(),
+		GPUs:              detectGPUs(),
+		System:            detectSystemProbe(),
+		Environment:       detectHostEnvironment(),
+	}
+	report.IPv6Addresses = collectIPv6Addresses(report.NetworkInterfaces)
+	report.IPv4Addresses = collectIPv4Addresses(report.NetworkInterfaces)
+	report.IPv4Prefixes = detectPublicIPv4Prefixes(report.NetworkInterfaces, report.Gateways)
+	report.Runtime = detectRuntimeProbe(report.Environment)
+	report.CPU.HasIntegratedGPU = hasIntegratedGPU(report.GPUs)
+	return report
+}
+
+func detectOSRelease() string {
+	values := readKeyValueFile("/etc/os-release", "=")
+	if pretty := trimOSReleaseValue(values["PRETTY_NAME"]); pretty != "" {
+		return pretty
+	}
+	if name := trimOSReleaseValue(values["NAME"]); name != "" {
+		return name
+	}
+	return strings.TrimSpace(runCommandOutput(2*time.Second, "uname", "-o"))
+}
+
+func trimOSReleaseValue(value string) string {
+	return strings.Trim(strings.TrimSpace(value), `"`)
+}
+
+func detectHostCPUProbe() HostCPUProbe {
+	probe := HostCPUProbe{Cores: runtime.NumCPU(), Threads: runtime.NumCPU(), Architecture: runtime.GOARCH}
+	if data, err := os.ReadFile("/proc/cpuinfo"); err == nil {
+		seenFlags := map[string]bool{}
+		for _, line := range strings.Split(string(data), "\n") {
+			fields := strings.SplitN(line, ":", 2)
+			if len(fields) != 2 {
+				continue
+			}
+			key := strings.TrimSpace(fields[0])
+			value := strings.TrimSpace(fields[1])
+			switch key {
+			case "model name", "Hardware", "Processor":
+				if probe.Model == "" {
+					probe.Model = value
+				}
+			case "cpu cores":
+				if cores, err := strconv.Atoi(value); err == nil && cores > probe.Cores {
+					probe.Cores = cores
+				}
+			case "flags", "Features":
+				for _, flag := range strings.Fields(value) {
+					if flag == "vmx" || flag == "svm" {
+						probe.Virtualization = true
+						probe.VirtualizationKey = flag
+					}
+					if !seenFlags[flag] {
+						seenFlags[flag] = true
+						probe.Flags = append(probe.Flags, flag)
+					}
+				}
+			}
+		}
+		sort.Strings(probe.Flags)
+	}
+	if probe.Model == "" {
+		probe.Model = "Unknown"
+	}
+	return probe
+}
+
+func detectMemoryModules() []HostMemoryModule {
+	if !commandExists("dmidecode") {
+		return nil
+	}
+	out := runCommandOutput(4*time.Second, "dmidecode", "-t", "memory")
+	modules := make([]HostMemoryModule, 0)
+	var current HostMemoryModule
+	inDevice := false
+	flush := func() {
+		if !inDevice {
+			return
+		}
+		if current.Size != "" && !strings.EqualFold(current.Size, "No Module Installed") {
+			modules = append(modules, current)
+		}
+		current = HostMemoryModule{}
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "Memory Device") {
+			flush()
+			inDevice = true
+			continue
+		}
+		if !inDevice {
+			continue
+		}
+		parts := strings.SplitN(strings.TrimSpace(line), ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key, value := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+		switch key {
+		case "Locator":
+			current.Locator = value
+		case "Size":
+			current.Size = value
+		case "Type":
+			current.Type = value
+		case "Speed":
+			current.Speed = value
+		case "Manufacturer":
+			current.Manufacturer = value
+		case "Part Number":
+			current.PartNumber = value
+		case "Serial Number":
+			current.SerialNumber = value
+		}
+	}
+	flush()
+	return modules
+}
+
+func detectHostDisks() []HostDiskProbe {
+	disks := make([]HostDiskProbe, 0)
+	entries, err := os.ReadDir("/sys/block")
+	if err != nil {
+		return disks
+	}
+	mounts := detectMountpointsByDevice()
+	for _, entry := range entries {
+		name := entry.Name()
+		if strings.HasPrefix(name, "loop") || strings.HasPrefix(name, "ram") || strings.HasPrefix(name, "fd") || strings.HasPrefix(name, "sr") {
+			continue
+		}
+		base := filepath.Join("/sys/block", name)
+		path := "/dev/" + name
+		disk := HostDiskProbe{
+			Name:        name,
+			Path:        path,
+			Model:       strings.TrimSpace(readFirstExistingFile(filepath.Join(base, "device/model"), filepath.Join(base, "device/name"))),
+			Serial:      strings.TrimSpace(readFirstExistingFile(filepath.Join(base, "device/serial"), filepath.Join(base, "serial"))),
+			SizeBytes:   readUintFile(filepath.Join(base, "size")) * 512,
+			Type:        detectDiskType(base, name),
+			Rotational:  strings.TrimSpace(readFirstExistingFile(filepath.Join(base, "queue/rotational"))) == "1",
+			Mountpoints: mounts[name],
+		}
+		disk.SMART = detectDiskSMART(path)
+		disk.Health = disk.SMARTHealth()
+		disk.HealthDetail = disk.SMARTDetail()
+		disks = append(disks, disk)
+	}
+	sort.Slice(disks, func(i, j int) bool { return disks[i].Name < disks[j].Name })
+	return disks
+}
+
+func detectDiskType(base, name string) string {
+	if strings.HasPrefix(name, "nvme") {
+		return "NVMe"
+	}
+	if strings.TrimSpace(readFirstExistingFile(filepath.Join(base, "queue/rotational"))) == "1" {
+		return "HDD"
+	}
+	return "SSD"
+}
+
+func (disk HostDiskProbe) SMARTHealth() string {
+	if disk.SMART.Available && disk.Health != "" {
+		return disk.Health
+	}
+	return disk.SMART.Health()
+}
+
+func (disk HostDiskProbe) SMARTDetail() string {
+	return disk.SMART.Detail()
+}
+
+func (smart HostDiskSMARTProbe) Health() string {
+	if !smart.Available {
+		return "unknown"
+	}
+	if smart.MediaErrors > 0 {
+		return "failed"
+	}
+	return "ok"
+}
+
+func (smart HostDiskSMARTProbe) Detail() string {
+	if !smart.Available {
+		return "smartctl not installed or no SMART output"
+	}
+	parts := []string{"SMART passed"}
+	if smart.LifeUsedPercent != nil {
+		parts = append(parts, fmt.Sprintf("寿命已用 %d%%", *smart.LifeUsedPercent))
+	}
+	if smart.PowerOnHours > 0 {
+		parts = append(parts, fmt.Sprintf("通电 %dh", smart.PowerOnHours))
+	}
+	if smart.WrittenDataBytes > 0 {
+		parts = append(parts, fmt.Sprintf("写入 %s", formatBytesText(smart.WrittenDataBytes)))
+	}
+	if smart.ReadDataBytes > 0 {
+		parts = append(parts, fmt.Sprintf("读取 %s", formatBytesText(smart.ReadDataBytes)))
+	}
+	if smart.MediaErrors > 0 {
+		parts = append(parts, fmt.Sprintf("介质错误 %d", smart.MediaErrors))
+	}
+	return strings.Join(parts, " | ")
+}
+
+func detectDiskSMART(path string) HostDiskSMARTProbe {
+	smart := HostDiskSMARTProbe{}
+	if !commandExists("smartctl") {
+		return smart
+	}
+	out := runCommandOutput(8*time.Second, "smartctl", "-a", "-j", path)
+	if strings.TrimSpace(out) == "" {
+		return smart
+	}
+	var data smartctlOutput
+	if err := json.Unmarshal([]byte(out), &data); err != nil {
+		return smart
+	}
+	smart.Available = true
+	smart.PowerOnHours = data.PowerOnTime.Hours
+	smart.PowerCycleCount = data.PowerCycleCount
+	if data.NVMe.PowerOnHours > 0 {
+		smart.PowerOnHours = int64(data.NVMe.PowerOnHours)
+	}
+	if data.NVMe.PowerCycles > 0 {
+		smart.PowerCycleCount = int64(data.NVMe.PowerCycles)
+	}
+	if data.NVMe.PercentageUsed > 0 {
+		used := int(data.NVMe.PercentageUsed)
+		smart.LifeUsedPercent = &used
+	}
+	smart.ReadDataBytes = data.NVMe.DataUnitsRead * 512000
+	smart.WrittenDataBytes = data.NVMe.DataUnitsWritten * 512000
+	smart.ReadCommands = data.NVMe.HostReadCommands
+	smart.WriteCommands = data.NVMe.HostWriteCommands
+	smart.MediaErrors = data.NVMe.MediaErrors
+
+	parseATAAttributes(&smart, data.ATASmartAttributes.Table)
+	if data.SmartStatus != nil && !data.SmartStatus.Passed {
+		smart.MediaErrors++
+	}
+	return smart
+}
+
+type smartctlOutput struct {
+	SmartStatus *struct {
+		Passed bool `json:"passed"`
+	} `json:"smart_status"`
+	PowerOnTime struct {
+		Hours int64 `json:"hours"`
+	} `json:"power_on_time"`
+	PowerCycleCount    int64 `json:"power_cycle_count"`
+	ATASmartAttributes struct {
+		Table []smartctlAttribute `json:"table"`
+	} `json:"ata_smart_attributes"`
+	NVMe struct {
+		PercentageUsed    uint64 `json:"percentage_used"`
+		DataUnitsRead     uint64 `json:"data_units_read"`
+		DataUnitsWritten  uint64 `json:"data_units_written"`
+		HostReadCommands  uint64 `json:"host_reads"`
+		HostWriteCommands uint64 `json:"host_writes"`
+		PowerOnHours      uint64 `json:"power_on_hours"`
+		PowerCycles       uint64 `json:"power_cycles"`
+		MediaErrors       uint64 `json:"media_errors"`
+	} `json:"nvme_smart_health_information_log"`
+}
+
+type smartctlAttribute struct {
+	ID    int    `json:"id"`
+	Name  string `json:"name"`
+	Value int    `json:"value"`
+	Raw   struct {
+		Value  json.Number `json:"value"`
+		String string      `json:"string"`
+	} `json:"raw"`
+}
+
+func parseATAAttributes(smart *HostDiskSMARTProbe, attrs []smartctlAttribute) {
+	for _, attr := range attrs {
+		name := normalizeSMARTAttrName(attr.Name)
+		raw := smartAttrRawUint(attr)
+		rawText := smartAttrRawText(attr)
+		switch name {
+		case "poweronhours":
+			if smart.PowerOnHours == 0 {
+				smart.PowerOnHours = int64(raw)
+			}
+		case "powercyclecount":
+			if smart.PowerCycleCount == 0 {
+				smart.PowerCycleCount = int64(raw)
+			}
+		case "totallbaswritten":
+			if smart.WrittenDataBytes == 0 {
+				smart.WrittenDataBytes = raw * 512
+			}
+		case "totallbasread":
+			if smart.ReadDataBytes == 0 {
+				smart.ReadDataBytes = raw * 512
+			}
+		case "hostwrites32mib":
+			if smart.WrittenDataBytes == 0 {
+				smart.WrittenDataBytes = raw * 32 * 1024 * 1024
+			}
+		case "hostreads32mib":
+			if smart.ReadDataBytes == 0 {
+				smart.ReadDataBytes = raw * 32 * 1024 * 1024
+			}
+		case "hostwritecommands":
+			smart.WriteCommands = raw
+		case "hostreadcommands":
+			smart.ReadCommands = raw
+		case "wearlevelingcount":
+			smart.WearLevelingCount = rawText
+			if smart.LifeUsedPercent == nil && attr.Value > 0 && attr.Value <= 100 {
+				used := 100 - attr.Value
+				if used < 0 {
+					used = 0
+				}
+				smart.LifeUsedPercent = &used
+			}
+		case "percentlifetimeremain", "mediawearoutindicator":
+			if smart.LifeUsedPercent == nil {
+				remaining := attr.Value
+				if raw > 0 && raw <= 100 {
+					remaining = int(raw)
+				}
+				used := 100 - remaining
+				if used < 0 {
+					used = 0
+				}
+				if used <= 100 {
+					smart.LifeUsedPercent = &used
+				}
+			}
+		case "percentageused":
+			if smart.LifeUsedPercent == nil && raw <= 255 {
+				used := int(raw)
+				smart.LifeUsedPercent = &used
+			}
+		case "erasefailcounttotal", "erasecount", "nandwrites", "programfailcnttotal":
+			if smart.EraseCount == "" && rawText != "" {
+				smart.EraseCount = rawText
+			}
+		case "mediaerrors":
+			smart.MediaErrors = raw
+		}
+	}
+}
+
+func normalizeSMARTAttrName(name string) string {
+	name = strings.ToLower(name)
+	var b strings.Builder
+	for _, ch := range name {
+		if ch >= 'a' && ch <= 'z' || ch >= '0' && ch <= '9' {
+			b.WriteRune(ch)
+		}
+	}
+	return b.String()
+}
+
+func smartAttrRawText(attr smartctlAttribute) string {
+	if attr.Raw.String != "" {
+		return attr.Raw.String
+	}
+	if attr.Raw.Value != "" {
+		return attr.Raw.Value.String()
+	}
+	return ""
+}
+
+func smartAttrRawUint(attr smartctlAttribute) uint64 {
+	text := smartAttrRawText(attr)
+	if value, err := strconv.ParseUint(text, 10, 64); err == nil {
+		return value
+	}
+	digits := firstUintText(text)
+	if digits == "" {
+		return 0
+	}
+	value, _ := strconv.ParseUint(digits, 10, 64)
+	return value
+}
+
+func firstUintText(value string) string {
+	start := -1
+	for i, ch := range value {
+		if ch >= '0' && ch <= '9' {
+			if start < 0 {
+				start = i
+			}
+			continue
+		}
+		if start >= 0 {
+			return value[start:i]
+		}
+	}
+	if start >= 0 {
+		return value[start:]
+	}
+	return ""
+}
+
+func detectMountpointsByDevice() map[string][]string {
+	result := map[string][]string{}
+	f, err := os.Open("/proc/mounts")
+	if err != nil {
+		return result
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) < 2 || !strings.HasPrefix(fields[0], "/dev/") {
+			continue
+		}
+		dev := strings.TrimPrefix(filepath.Base(fields[0]), "/dev/")
+		parent := diskParentName(dev)
+		result[parent] = append(result[parent], fields[1])
+	}
+	return result
+}
+
+func diskParentName(dev string) string {
+	for _, suffix := range []string{"p1", "p2", "p3", "p4", "p5", "p6", "p7", "p8", "p9"} {
+		if strings.HasSuffix(dev, suffix) && strings.HasPrefix(dev, "nvme") {
+			return strings.TrimSuffix(dev, suffix)
+		}
+	}
+	for len(dev) > 0 && dev[len(dev)-1] >= '0' && dev[len(dev)-1] <= '9' {
+		dev = dev[:len(dev)-1]
+	}
+	return dev
+}
+
+func detectHostNICs() []HostNICProbe {
+	entries, err := os.ReadDir("/sys/class/net")
+	if err != nil {
+		return nil
+	}
+	ipv4, ipv6 := detectInterfaceIPs()
+	nics := make([]HostNICProbe, 0)
+	for _, entry := range entries {
+		name := entry.Name()
+		if name == "lo" {
+			continue
+		}
+		base := filepath.Join("/sys/class/net", name)
+		speed, _ := strconv.Atoi(strings.TrimSpace(readFirstExistingFile(filepath.Join(base, "speed"))))
+		nic := HostNICProbe{
+			Name:      name,
+			MAC:       strings.TrimSpace(readFirstExistingFile(filepath.Join(base, "address"))),
+			State:     strings.TrimSpace(readFirstExistingFile(filepath.Join(base, "operstate"))),
+			SpeedMbps: speed,
+			Driver:    strings.TrimSpace(runCommandOutput(2*time.Second, "sh", "-c", fmt.Sprintf("basename $(readlink -f /sys/class/net/%s/device/driver 2>/dev/null) 2>/dev/null", shellQuoteSimple(name)))),
+			Model:     detectNICModel(name),
+			IPv4:      ipv4[name],
+			IPv6:      ipv6[name],
+		}
+		nics = append(nics, nic)
+	}
+	sort.Slice(nics, func(i, j int) bool { return nics[i].Name < nics[j].Name })
+	return nics
+}
+
+func detectNICModel(name string) string {
+	out := runCommandOutput(2*time.Second, "sh", "-c", fmt.Sprintf("lspci -D 2>/dev/null | grep -iE 'ethernet|network' | head -n 1 || true"))
+	if out != "" {
+		return strings.TrimSpace(out)
+	}
+	return strings.TrimSpace(readFirstExistingFile(filepath.Join("/sys/class/net", name, "device", "uevent")))
+}
+
+func detectInterfaceIPs() (map[string][]HostIPProbe, map[string][]HostIPProbe) {
+	ipv4 := map[string][]HostIPProbe{}
+	ipv6 := map[string][]HostIPProbe{}
+	for _, family := range []struct {
+		arg string
+		dst map[string][]HostIPProbe
+	}{{"-4", ipv4}, {"-6", ipv6}} {
+		out := runCommandOutput(3*time.Second, "ip", "-o", family.arg, "addr", "show")
+		for _, line := range strings.Split(out, "\n") {
+			fields := strings.Fields(line)
+			if len(fields) < 4 {
+				continue
+			}
+			iface := strings.TrimSuffix(fields[1], ":")
+			addr := fields[3]
+			ip, network, err := net.ParseCIDR(addr)
+			if err != nil || ip == nil || network == nil {
+				continue
+			}
+			ones, _ := network.Mask.Size()
+			scope := ""
+			for i, field := range fields {
+				if field == "scope" && i+1 < len(fields) {
+					scope = fields[i+1]
+				}
+			}
+			family.dst[iface] = append(family.dst[iface], HostIPProbe{
+				Interface: iface,
+				Address:   ip.String(),
+				PrefixLen: ones,
+				Scope:     scope,
+			})
+		}
+	}
+	return ipv4, ipv6
+}
+
+func detectAllPublicIPv4() []string {
+	seen := map[string]bool{}
+	result := make([]string, 0)
+	if pub := lxc.DetectPublicIPv4(); pub.Address != "" {
+		if ip := net.ParseIP(pub.Address); isPublicIPv4(ip) {
+			seen[pub.Address] = true
+			result = append(result, pub.Address)
+		}
+	}
+	out := runCommandOutput(3*time.Second, "ip", "-o", "-4", "addr", "show", "scope", "global")
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			continue
+		}
+		ip, _, err := net.ParseCIDR(fields[3])
+		if err != nil || ip == nil {
+			continue
+		}
+		if !isPublicIPv4(ip) {
+			continue
+		}
+		value := ip.String()
+		if !seen[value] {
+			seen[value] = true
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func collectIPv4Addresses(nics []HostNICProbe) []HostIPProbe {
+	result := make([]HostIPProbe, 0)
+	for _, nic := range nics {
+		for _, ip := range nic.IPv4 {
+			parsed := net.ParseIP(ip.Address)
+			if isPublicIPv4(parsed) {
+				result = append(result, ip)
+			}
+		}
+	}
+	return result
+}
+
+func detectPublicIPv4Prefixes(nics []HostNICProbe, gateways []HostGatewayProbe) []HostIPv4PrefixProbe {
+	result := make([]HostIPv4PrefixProbe, 0)
+	seen := map[string]bool{}
+	gatewayByIface := map[string]string{}
+	for _, gateway := range gateways {
+		if gateway.Family == "ipv4" && gateway.Interface != "" && gateway.Gateway != "" {
+			gatewayByIface[gateway.Interface] = gateway.Gateway
+		}
+	}
+	add := func(item HostIPv4PrefixProbe) {
+		if item.Prefix == "" || item.Interface == "" {
+			return
+		}
+		key := item.Interface + "|" + item.Prefix
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		result = append(result, item)
+	}
+	for _, nic := range nics {
+		for _, ip := range nic.IPv4 {
+			parsed := net.ParseIP(ip.Address)
+			if !isPublicIPv4(parsed) || ip.PrefixLen <= 0 || ip.PrefixLen > 32 {
+				continue
+			}
+			prefix, subnet := ipv4PrefixAndMask(parsed, ip.PrefixLen)
+			add(HostIPv4PrefixProbe{
+				Interface:  nic.Name,
+				Address:    ip.Address,
+				Prefix:     prefix,
+				PrefixLen:  ip.PrefixLen,
+				SubnetMask: subnet,
+				Gateway:    gatewayByIface[nic.Name],
+				Source:     "address",
+			})
+		}
+	}
+	for _, item := range detectIPv4RoutePrefixes(gatewayByIface) {
+		add(item)
+	}
+	sort.SliceStable(result, func(i, j int) bool {
+		if result[i].Interface == result[j].Interface {
+			return result[i].Prefix < result[j].Prefix
+		}
+		return result[i].Interface < result[j].Interface
+	})
+	return result
+}
+
+func detectIPv4RoutePrefixes(gatewayByIface map[string]string) []HostIPv4PrefixProbe {
+	out := runCommandOutput(3*time.Second, "ip", "-4", "route", "show")
+	result := make([]HostIPv4PrefixProbe, 0)
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || fields[0] == "default" {
+			continue
+		}
+		_, network, err := net.ParseCIDR(fields[0])
+		if err != nil || network == nil || network.IP.To4() == nil {
+			continue
+		}
+		if !isPublicIPv4(network.IP) {
+			continue
+		}
+		iface := ""
+		gateway := ""
+		src := ""
+		for i, field := range fields {
+			if field == "dev" && i+1 < len(fields) {
+				iface = fields[i+1]
+			}
+			if field == "via" && i+1 < len(fields) {
+				gateway = fields[i+1]
+			}
+			if field == "src" && i+1 < len(fields) {
+				src = fields[i+1]
+			}
+		}
+		if iface == "" || isContainerLikeInterfaceName(iface) {
+			continue
+		}
+		ones, bits := network.Mask.Size()
+		if bits != 32 || ones <= 0 || ones > 32 {
+			continue
+		}
+		if gateway == "" {
+			gateway = gatewayByIface[iface]
+		}
+		prefix, subnet := ipv4PrefixAndMask(network.IP, ones)
+		result = append(result, HostIPv4PrefixProbe{
+			Interface:  iface,
+			Address:    src,
+			Prefix:     prefix,
+			PrefixLen:  ones,
+			SubnetMask: subnet,
+			Gateway:    gateway,
+			Source:     "route",
+		})
+	}
+	return result
+}
+
+func ipv4PrefixAndMask(ip net.IP, prefixLen int) (string, string) {
+	v4 := ip.To4()
+	if v4 == nil {
+		return "", ""
+	}
+	mask := net.CIDRMask(prefixLen, 32)
+	network := v4.Mask(mask)
+	subnet := fmt.Sprintf("%d.%d.%d.%d", mask[0], mask[1], mask[2], mask[3])
+	return fmt.Sprintf("%s/%d", network.String(), prefixLen), subnet
+}
+
+func isPublicIPv4(ip net.IP) bool {
+	ip = ip.To4()
+	if ip == nil {
+		return false
+	}
+	return !ip.IsPrivate() && !ip.IsLoopback() && !ip.IsLinkLocalUnicast() && !ip.IsMulticast() && !ip.IsUnspecified()
+}
+
+func isContainerLikeInterfaceName(iface string) bool {
+	prefixes := []string{"lo", "lxc", "docker", "br-", "veth", "virbr", "cni", "flannel", "cali", "kube", "dummy", "ifb"}
+	for _, prefix := range prefixes {
+		if iface == prefix || strings.HasPrefix(iface, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func collectIPv6Addresses(nics []HostNICProbe) []HostIPProbe {
+	result := make([]HostIPProbe, 0)
+	for _, nic := range nics {
+		for _, ip := range nic.IPv6 {
+			if ip.Scope == "global" {
+				result = append(result, ip)
+			}
+		}
+	}
+	return result
+}
+
+func detectGateways() []HostGatewayProbe {
+	gateways := make([]HostGatewayProbe, 0)
+	for _, item := range []struct {
+		family string
+		args   []string
+	}{{"ipv4", []string{"-4", "route", "show", "default"}}, {"ipv6", []string{"-6", "route", "show", "default"}}} {
+		out := runCommandOutput(3*time.Second, "ip", item.args...)
+		for _, line := range strings.Split(out, "\n") {
+			fields := strings.Fields(line)
+			gw := ""
+			iface := ""
+			for i, field := range fields {
+				if field == "via" && i+1 < len(fields) {
+					gw = fields[i+1]
+				}
+				if field == "dev" && i+1 < len(fields) {
+					iface = fields[i+1]
+				}
+			}
+			if gw != "" || iface != "" {
+				gateways = append(gateways, HostGatewayProbe{Family: item.family, Interface: iface, Gateway: gw})
+			}
+		}
+	}
+	return gateways
+}
+
+func detectGPUs() []HostGPUProbe {
+	gpus := make([]HostGPUProbe, 0)
+	out := runCommandOutput(3*time.Second, "sh", "-c", "lspci -nnk 2>/dev/null | grep -iEA3 'vga|3d|display' || true")
+	var current *HostGPUProbe
+	for _, line := range strings.Split(out, "\n") {
+		trimmed := strings.TrimSpace(line)
+		lower := strings.ToLower(trimmed)
+		if strings.Contains(lower, "vga") || strings.Contains(lower, "3d controller") || strings.Contains(lower, "display controller") {
+			gpus = append(gpus, HostGPUProbe{Name: trimmed, Vendor: detectGPUVendor(trimmed), Type: detectGPUType(trimmed)})
+			current = &gpus[len(gpus)-1]
+			continue
+		}
+		if current != nil && strings.HasPrefix(trimmed, "Kernel driver in use:") {
+			current.Driver = strings.TrimSpace(strings.TrimPrefix(trimmed, "Kernel driver in use:"))
+		}
+	}
+	return gpus
+}
+
+func detectGPUVendor(value string) string {
+	lower := strings.ToLower(value)
+	switch {
+	case strings.Contains(lower, "intel"):
+		return "Intel"
+	case strings.Contains(lower, "nvidia"):
+		return "NVIDIA"
+	case strings.Contains(lower, "amd") || strings.Contains(lower, "ati"):
+		return "AMD"
+	default:
+		return "Unknown"
+	}
+}
+
+func detectGPUType(value string) string {
+	lower := strings.ToLower(value)
+	if strings.Contains(lower, "intel") {
+		return "integrated"
+	}
+	return "discrete"
+}
+
+func hasIntegratedGPU(gpus []HostGPUProbe) bool {
+	for _, gpu := range gpus {
+		if gpu.Type == "integrated" {
+			return true
+		}
+	}
+	return false
+}
+
+func detectRuntimeProbe(env []HostEnvCheck) HostRuntimeProbe {
+	devKVM := fileExists("/dev/kvm")
+	nested, detail := detectNestedVirtualization()
+	lxcOK := envCheckOK(env, "lxc-create")
+	probe := HostRuntimeProbe{
+		LXCAvailable:         lxcOK,
+		KVMAvailable:         devKVM && envCheckOK(env, "virsh"),
+		DevKVM:               devKVM,
+		NestedVirtualization: nested,
+		NestedDetail:         detail,
+		SupportMode:          "unsupported",
+	}
+	if probe.KVMAvailable {
+		probe.SupportMode = "kvm_lxc"
+	} else if probe.LXCAvailable {
+		probe.SupportMode = "lxc_only"
+	}
+	return probe
+}
+
+func detectNestedVirtualization() (bool, string) {
+	paths := []string{
+		"/sys/module/kvm_intel/parameters/nested",
+		"/sys/module/kvm_amd/parameters/nested",
+	}
+	for _, path := range paths {
+		value := strings.TrimSpace(readFirstExistingFile(path))
+		if value == "" {
+			continue
+		}
+		enabled := strings.EqualFold(value, "Y") || value == "1"
+		return enabled, filepath.Base(filepath.Dir(filepath.Dir(path))) + "=" + value
+	}
+	if fileExists("/dev/kvm") {
+		return true, "/dev/kvm present"
+	}
+	return false, "no kvm nested parameter or /dev/kvm"
+}
+
+func detectSystemProbe() HostSystemProbe {
+	uptime := int64(0)
+	if data, err := os.ReadFile("/proc/uptime"); err == nil {
+		first := strings.Fields(string(data))
+		if len(first) > 0 {
+			value, _ := strconv.ParseFloat(first[0], 64)
+			uptime = int64(value)
+		}
+	}
+	return HostSystemProbe{
+		UptimeSeconds: uptime,
+		UptimeText:    formatDurationText(uptime),
+		ProcessCount:  countProcesses(),
+	}
+}
+
+func detectHostEnvironment() []HostEnvCheck {
+	checks := []HostEnvCheck{
+		commandCheck("service-manager", "服务管理器 systemd/OpenRC", true, "systemctl", "systemd"),
+		commandCheck("lxc-create", "LXC 创建工具", true, "lxc-create", ""),
+		commandCheck("lxc-start", "LXC 启动工具", true, "lxc-start", ""),
+		commandCheck("iptables", "iptables 网络规则", true, "iptables", ""),
+		commandCheck("ip", "iproute2 网络工具", true, "ip", ""),
+		commandCheck("conntrack", "conntrack 安全扫描", false, "conntrack", ""),
+		commandCheck("virsh", "libvirt virsh", false, "virsh", ""),
+		commandCheck("qemu-system-x86_64", "QEMU/KVM 虚拟机", false, "qemu-system-x86_64", ""),
+		commandCheck("genisoimage", "KVM cloud-init ISO 工具", false, "genisoimage", "xorriso/mkisofs 可替代"),
+		commandCheck("xorriso", "ISO 备用工具", false, "xorriso", ""),
+		commandCheck("smartctl", "硬盘健康检测", false, "smartctl", ""),
+	}
+	checks = append(checks, HostEnvCheck{Key: "dev-kvm", Label: "/dev/kvm 硬件虚拟化", OK: fileExists("/dev/kvm"), Required: false, Detail: boolDetail(fileExists("/dev/kvm"))})
+	checks = append(checks, HostEnvCheck{Key: "ipv4-forward", Label: "IPv4 转发", OK: strings.TrimSpace(readFirstExistingFile("/proc/sys/net/ipv4/ip_forward")) == "1", Required: true, Detail: strings.TrimSpace(readFirstExistingFile("/proc/sys/net/ipv4/ip_forward"))})
+	checks = append(checks, HostEnvCheck{Key: "lxcfs", Label: "lxcfs 服务", OK: serviceActive("lxcfs"), Required: false, Detail: serviceDetail("lxcfs")})
+	checks = append(checks, HostEnvCheck{Key: "libvirt", Label: "libvirt 服务", OK: serviceActive("libvirtd") || serviceActive("virtqemud"), Required: false, Detail: firstNonEmpty(serviceDetail("libvirtd"), serviceDetail("virtqemud"))})
+	return checks
+}
+
+func commandCheck(key, label string, required bool, cmd string, fallback string) HostEnvCheck {
+	ok := commandExists(cmd)
+	detail := "missing"
+	if ok {
+		detail = strings.TrimSpace(runCommandOutput(2*time.Second, "sh", "-c", cmd+" --version 2>&1 | head -n 1"))
+		if detail == "" {
+			detail = "installed"
+		}
+	} else if fallback != "" {
+		detail = fallback
+	}
+	return HostEnvCheck{Key: key, Label: label, OK: ok, Required: required, Detail: detail}
+}
+
+func envCheckOK(checks []HostEnvCheck, key string) bool {
+	for _, check := range checks {
+		if check.Key == key {
+			return check.OK
+		}
+	}
+	return false
+}
+
+func serviceActive(name string) bool {
+	if commandExists("systemctl") {
+		return strings.TrimSpace(runCommandOutput(2*time.Second, "systemctl", "is-active", name)) == "active"
+	}
+	if commandExists("rc-service") {
+		return strings.Contains(runCommandOutput(2*time.Second, "rc-service", name, "status"), "started")
+	}
+	return false
+}
+
+func serviceDetail(name string) string {
+	if commandExists("systemctl") {
+		return strings.TrimSpace(runCommandOutput(2*time.Second, "systemctl", "is-active", name))
+	}
+	if commandExists("rc-service") {
+		return strings.TrimSpace(runCommandOutput(2*time.Second, "rc-service", name, "status"))
+	}
+	return "unknown"
+}
+
+func readKeyValueFile(path, sep string) map[string]string {
+	result := map[string]string{}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return result
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		parts := strings.SplitN(line, sep, 2)
+		if len(parts) == 2 {
+			result[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
+		}
+	}
+	return result
+}
+
+func readFirstExistingFile(paths ...string) string {
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			return string(data)
+		}
+	}
+	return ""
+}
+
+func commandExists(name string) bool {
+	_, err := exec.LookPath(name)
+	return err == nil
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func runCommandOutput(timeout time.Duration, name string, args ...string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
+	if err != nil && len(out) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func shortCommandDetail(value string) string {
+	value = strings.TrimSpace(value)
+	lines := strings.Split(value, "\n")
+	if len(lines) > 4 {
+		lines = lines[:4]
+	}
+	return strings.Join(lines, " | ")
+}
+
+func shellQuoteSimple(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+}
+
+func formatDurationText(seconds int64) string {
+	days := seconds / 86400
+	seconds %= 86400
+	hours := seconds / 3600
+	seconds %= 3600
+	minutes := seconds / 60
+	if days > 0 {
+		return fmt.Sprintf("%dd %dh %dm", days, hours, minutes)
+	}
+	return fmt.Sprintf("%dh %dm", hours, minutes)
+}
+
+func formatBytesText(value uint64) string {
+	if value == 0 {
+		return "0 B"
+	}
+	units := []string{"B", "KB", "MB", "GB", "TB", "PB"}
+	next := float64(value)
+	index := 0
+	for next >= 1024 && index < len(units)-1 {
+		next /= 1024
+		index++
+	}
+	if index == 0 {
+		return fmt.Sprintf("%d %s", value, units[index])
+	}
+	return fmt.Sprintf("%.1f %s", next, units[index])
+}
+
+func countProcesses() int {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return 0
+	}
+	count := 0
+	for _, entry := range entries {
+		if _, err := strconv.Atoi(entry.Name()); err == nil {
+			count++
+		}
+	}
+	return count
+}
+
+func boolDetail(ok bool) string {
+	if ok {
+		return "available"
+	}
+	return "missing"
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" && value != "inactive" && value != "unknown" {
+			return value
+		}
+	}
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }

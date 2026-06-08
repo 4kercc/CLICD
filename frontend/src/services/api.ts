@@ -136,6 +136,16 @@ export interface IPv6Status {
   prefixes: IPv6PrefixInfo[]
 }
 
+export interface IPv4PrefixInfo {
+  interface: string
+  address: string
+  prefix: string
+  prefix_len: number
+  subnet_mask: string
+  gateway: string
+  source: string
+}
+
 export interface DashboardStats {
   total_containers: number
   running: number
@@ -159,6 +169,93 @@ export interface HostInfo {
   }
   disk_io: { read_bytes: number; write_bytes: number; read_bps: number; write_bps: number }
   load: { load1: number; load5: number; load15: number }
+}
+
+export interface HostProbeReport {
+  generated_at: string
+  hostname: string
+  kernel: string
+  os: string
+  cpu: {
+    model: string
+    cores: number
+    threads: number
+    architecture: string
+    flags: string[]
+    has_integrated_gpu: boolean
+    virtualization: boolean
+    virtualization_key: string
+  }
+  memory: {
+    total_mb: number
+    used_mb: number
+    free_mb: number
+    modules: Array<{
+      locator: string
+      size: string
+      type: string
+      speed: string
+      manufacturer: string
+      part_number: string
+      serial_number: string
+    }>
+  }
+  disks: Array<{
+    name: string
+    path: string
+    model: string
+    serial: string
+    size_bytes: number
+    type: string
+    rotational: boolean
+    mountpoints: string[]
+    health: string
+    health_detail: string
+    smart?: {
+      available: boolean
+      life_used_percent?: number
+      power_on_hours?: number
+      power_cycle_count?: number
+      read_data_bytes?: number
+      written_data_bytes?: number
+      read_commands?: number
+      write_commands?: number
+      wear_leveling_count?: string
+      erase_count?: string
+      media_errors?: number
+    }
+  }>
+  network_interfaces: Array<{
+    name: string
+    mac: string
+    state: string
+    speed_mbps: number
+    driver: string
+    model: string
+    ipv4: Array<{ interface: string; address: string; prefix_len: number; scope: string; gateway?: string }>
+    ipv6: Array<{ interface: string; address: string; prefix_len: number; scope: string; gateway?: string }>
+  }>
+  public_ipv4: string[]
+  ipv4_addresses: Array<{ interface: string; address: string; prefix_len: number; scope: string; gateway?: string }>
+  ipv4_prefixes: IPv4PrefixInfo[]
+  ipv6_addresses: Array<{ interface: string; address: string; prefix_len: number; scope: string; gateway?: string }>
+  ipv6_prefixes: IPv6PrefixInfo[]
+  gateways: Array<{ family: string; interface: string; gateway: string }>
+  gpus: Array<{ name: string; vendor: string; driver: string; type: string }>
+  runtime: {
+    lxc_available: boolean
+    kvm_available: boolean
+    dev_kvm: boolean
+    nested_virtualization: boolean
+    nested_detail: string
+    support_mode: string
+  }
+  system: {
+    uptime_seconds: number
+    uptime_text: string
+    process_count: number
+  }
+  environment: Array<{ key: string; label: string; ok: boolean; required: boolean; detail: string }>
 }
 
 export interface ContainerUsage {
@@ -392,6 +489,9 @@ export const getDashboard = () =>
 
 export const getHostInfo = () =>
   api.get<APIResponse<HostInfo>>('/host-info')
+
+export const getHostReport = () =>
+  api.get<APIResponse<HostProbeReport>>('/host-report')
 
 // Snapshots
 export interface Snapshot {

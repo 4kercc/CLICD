@@ -4,6 +4,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Code2,
+  Cpu,
   Camera,
   LayoutDashboard,
   LogOut,
@@ -71,6 +72,7 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
   const isRoutingPage = location.pathname.startsWith('/routing')
   const isAuditLogsPage = location.pathname.startsWith('/audit-logs')
   const isApiIntegrationPage = location.pathname.startsWith('/api-integration')
+  const isHostReportPage = location.pathname.startsWith('/host-report')
   const isSecurityPage = location.pathname.startsWith('/security')
   const isSettingsPage = location.pathname.startsWith('/settings')
 
@@ -220,6 +222,18 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
             >
               <Code2 className="w-4 h-4" />
               {!collapsed && <span>API 集成</span>}
+            </button>
+
+            <button
+              onClick={() => navigate('/host-report')}
+              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-md text-sm transition-colors ${
+                isHostReportPage
+                  ? 'bg-black text-white dark:bg-white dark:text-black'
+                  : 'text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-800'
+              }`}
+            >
+              <Cpu className="w-4 h-4" />
+              {!collapsed && <span>宿主机信息</span>}
             </button>
 
             <button

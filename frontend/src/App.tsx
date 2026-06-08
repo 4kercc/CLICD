@@ -8,6 +8,7 @@ import ContainerDetail from './pages/ContainerDetail'
 import Security from './pages/Security'
 import AuditLogs from './pages/AuditLogs'
 import ApiIntegration from './pages/ApiIntegration'
+import HostReport from './pages/HostReport'
 import Settings from './pages/Settings'
 import ImageManagement from './pages/ImageManagement'
 import Snapshots from './pages/Snapshots'
@@ -64,6 +65,7 @@ function App() {
         <Route path="routing" element={<Routing />} />
         <Route path="audit-logs" element={<AuditLogs />} />
         <Route path="api-integration" element={<ApiIntegration />} />
+        <Route path="host-report" element={<HostReport />} />
         <Route path="sub-users" element={<SubUserManagement />} />
         <Route path="settings" element={<Settings />} />
       </Route>
