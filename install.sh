@@ -54,7 +54,7 @@ run_step() {
     step_name="$1"
     shift
     log "开始：$step_name"
-    if "$@" >> "$LOG_FILE" 2>&1; then
+    if ( "$@" ) >> "$LOG_FILE" 2>&1; then
         log "完成：$step_name"
         return 0
     fi
@@ -846,15 +846,18 @@ download_release_if_needed() {
     trap 'rm -rf "$tmp_dir"' 0
 
     if has_cmd curl; then
-        curl -fL "$download_url" -o "$tmp_dir/$ASSET"
+        curl -fL --retry 6 --retry-delay 2 --connect-timeout 20 --max-time 600 "$download_url" -o "$tmp_dir/$ASSET" ||
+            die "Release package download failed: $download_url"
     elif has_cmd wget; then
-        wget -O "$tmp_dir/$ASSET" "$download_url"
+        wget --tries=6 --timeout=30 --waitretry=2 -O "$tmp_dir/$ASSET" "$download_url" ||
+            die "Release package download failed: $download_url"
     else
         die "下载发行版包需要 curl 或 wget。"
     fi
 
-    tar -xzf "$tmp_dir/$ASSET" -C "$tmp_dir"
-    cd "$tmp_dir/clicd-linux-amd64"
+    [ -s "$tmp_dir/$ASSET" ] || die "Release package is empty: $download_url"
+    tar -xzf "$tmp_dir/$ASSET" -C "$tmp_dir" || die "Failed to extract release package: $tmp_dir/$ASSET"
+    cd "$tmp_dir/clicd-linux-amd64" || die "Release package layout is invalid: missing clicd-linux-amd64 directory"
     [ -f "./clicd" ] || die "下载的发行版包中未找到 clicd 二进制。"
 }
 
