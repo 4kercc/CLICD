@@ -124,7 +124,7 @@ export default function ContainerDetail() {
   const vncFullscreenRef = useRef<HTMLDivElement>(null)
   const [vncFullscreen, setVncFullscreen] = useState(false)
   const [showNat, setShowNat] = useState(false)
-  const [showNatAdd, setShowNatAdd] = useState(false)
+  const [showMappingEditor, setShowMappingEditor] = useState(false)
   const [showExpiryEdit, setShowExpiryEdit] = useState(false)
   const [editExpiry, setEditExpiry] = useState('')
   const [savingExpiry, setSavingExpiry] = useState(false)
@@ -517,21 +517,11 @@ export default function ContainerDetail() {
     if (isSubUser && container?.policy_blocked) return
     setDraft(emptyDraft)
     setShowNat(true)
+    setShowMappingEditor(true)
   }
 
   const openEditMapping = (pm: PortMapping, index: number) => {
     if (isSubUser && container?.policy_blocked) return
-    if (isSubUser) {
-      // Sub-user: only edit container_port in a simple modal
-      setDraft({
-        index,
-        description: pm.description,
-        host_port: String(pm.host_port),
-        container_port: String(pm.container_port),
-        protocol: pm.protocol || 'all',
-      })
-      return
-    }
     setDraft({
       index,
       description: pm.description,
@@ -539,6 +529,8 @@ export default function ContainerDetail() {
       container_port: String(pm.container_port),
       protocol: pm.protocol || 'all',
     })
+    setShowNat(true)
+    setShowMappingEditor(true)
   }
 
   const submitMapping = async (): Promise<boolean> => {
@@ -1394,9 +1386,9 @@ export default function ContainerDetail() {
       )}
 
       {showNat && (
-        <Modal title="NAT 端口管理" onClose={() => { setShowNat(false); setDraft(emptyDraft); setShowNatAdd(false) }} wide extra={
-          !isSubUser && canAddMapping && !showNatAdd && (
-            <button onClick={() => { setShowNatAdd(true); setDraft({...emptyDraft}) }} className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-black text-white rounded-md text-xs hover:bg-gray-800">
+        <Modal title="NAT 端口管理" onClose={() => { setShowNat(false); setDraft(emptyDraft); setShowMappingEditor(false) }} wide extra={
+          !isSubUser && canAddMapping && (
+            <button onClick={openAddMapping} className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-black text-white rounded-md text-xs hover:bg-gray-800">
               <Plus className="w-3.5 h-3.5" />添加映射
             </button>
           )
@@ -1411,93 +1403,30 @@ export default function ContainerDetail() {
               )}
             </div>
             <MappingTable mappings={container.port_mappings || []} publicHost={publicHost} onEdit={openEditMapping} onDelete={isSubUser ? () => {} : removeMapping} isSubUser={isSubUser} />
-            {showNatAdd && !isSubUser && (
-              <div className="border border-gray-200 rounded-lg p-4">
-                <div className="flex items-center justify-between mb-3">
-                  <h3 className="text-sm font-semibold text-black">添加映射规则</h3>
-                  <button onClick={() => setShowNatAdd(false)} className="text-xs text-gray-500 hover:text-black"><X className="w-3.5 h-3.5" /></button>
-                </div>
-                <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
-                  <Field label="名称">
-                    <input value={draft.description} onChange={(e) => setDraft({ ...draft, description: e.target.value })} className={inputClass} placeholder="Web / API" />
-                  </Field>
-                  <Field label="协议">
-                    <select value={draft.protocol} onChange={(e) => setDraft({ ...draft, protocol: e.target.value })} className={inputClass}>
-                      <option value="all">全部 (ALL)</option>
-                      <option value="tcp">TCP</option>
-                      <option value="udp">UDP</option>
-                      <option value="tcp+udp">TCP+UDP</option>
-                      <option value="icmp">ICMP</option>
-                    </select>
-                  </Field>
-                  <Field label="外部端口">
-                    <div className="flex gap-1">
-                      <input value={draft.host_port} onChange={(e) => setDraft({ ...draft, host_port: e.target.value })} className={inputClass + ' flex-1'} placeholder="默认同内部" />
-                      <button
-                        onClick={async () => {
-                          try {
-                            const res = await api.get<APIResponse<{port: number}>>(`/containers/${containerIdentifier}/random-port`)
-                            const port = res.data.data?.port || 0
-                            if (port > 0) setDraft({ ...draft, host_port: String(port) })
-                          } catch { /* ignore */ }
-                        }}
-                        className="px-2 py-2 border border-gray-300 rounded-md text-xs text-gray-500 hover:bg-gray-50"
-                        title="随机空闲端口"
-                      >随机</button>
-                    </div>
-                  </Field>
-                  <Field label="内部端口">
-                    <input
-                      value={draft.container_port}
-                      onChange={(e) => setDraft({ ...draft, container_port: e.target.value })}
-                      className={inputClass}
-                      placeholder="例如 80"
-                    />
-                  </Field>
-                  <div className="flex items-end">
-                    <button onClick={async () => { if (await submitMapping()) setShowNatAdd(false) }} disabled={savingMapping || !canAddMapping} className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 bg-black text-white rounded-md text-sm hover:bg-gray-800 disabled:opacity-50">
-                      <Save className="w-4 h-4" />
-                      {savingMapping ? '保存中...' : '保存'}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
-            {/* Sub-user edit port modal: only container_port is editable */}
-            {draft.index !== null && isSubUser && (
-              <div className="border border-gray-200 rounded-lg p-4">
-                <div className="flex items-center justify-between mb-3">
-                  <h3 className="text-sm font-semibold text-black">修改端口映射</h3>
-                  <button onClick={() => setDraft(emptyDraft)} className="text-xs text-gray-500 hover:text-black"><X className="w-3.5 h-3.5" /></button>
-                </div>
-                <div className="grid grid-cols-4 gap-3">
-                  <Field label="名称">
-                    <input value={draft.description} disabled className="w-full px-3 py-2 border border-gray-200 rounded-md text-sm text-gray-400 bg-gray-50" />
-                  </Field>
-                  <Field label="协议">
-                    <input value={draft.protocol.toUpperCase()} disabled className="w-full px-3 py-2 border border-gray-200 rounded-md text-sm text-gray-400 bg-gray-50" />
-                  </Field>
-                  <Field label="外部端口">
-                    <input value={draft.host_port} disabled className="w-full px-3 py-2 border border-gray-200 rounded-md text-sm text-gray-400 bg-gray-50" />
-                  </Field>
-                  <Field label="内部端口">
-                    <input
-                      value={draft.container_port}
-                      onChange={(e) => setDraft({ ...draft, container_port: e.target.value })}
-                      className={inputClass}
-                      placeholder="例如 80"
-                    />
-                  </Field>
-                </div>
-                <div className="flex justify-end gap-2 mt-4">
-                  <button onClick={() => setDraft(emptyDraft)} className="px-4 py-2 text-sm text-gray-600 border border-gray-200 rounded-md hover:bg-gray-50">取消</button>
-                  <button onClick={async () => { if (await submitMapping()) setDraft(emptyDraft) }} disabled={savingMapping} className="px-4 py-2 text-sm bg-black text-white rounded-md hover:bg-gray-800 disabled:opacity-50">
-                    {savingMapping ? '保存中...' : '保存'}
-                  </button>
-                </div>
-              </div>
-            )}
           </div>
+        </Modal>
+      )}
+
+      {showMappingEditor && (
+        <Modal
+          title={draft.index === null ? '添加端口映射' : '修改端口映射'}
+          onClose={() => { setShowMappingEditor(false); setDraft(emptyDraft) }}
+        >
+          <MappingEditor
+            draft={draft}
+            setDraft={setDraft}
+            isSubUser={isSubUser}
+            canAddMapping={canAddMapping}
+            saving={savingMapping}
+            containerIdentifier={containerIdentifier}
+            onCancel={() => { setShowMappingEditor(false); setDraft(emptyDraft) }}
+            onSubmit={async () => {
+              if (await submitMapping()) {
+                setShowMappingEditor(false)
+                setDraft(emptyDraft)
+              }
+            }}
+          />
         </Modal>
       )}
 
@@ -1799,6 +1728,116 @@ function SnapshotTable({ snapshots, busy, onRestore, onDelete }: {
           ))}
         </tbody>
       </table>
+    </div>
+  )
+}
+
+function MappingEditor({
+  draft,
+  setDraft,
+  isSubUser,
+  canAddMapping,
+  saving,
+  containerIdentifier,
+  onCancel,
+  onSubmit,
+}: {
+  draft: MappingDraft
+  setDraft: (draft: MappingDraft) => void
+  isSubUser: boolean
+  canAddMapping: boolean
+  saving: boolean
+  containerIdentifier: string
+  onCancel: () => void
+  onSubmit: () => void
+}) {
+  const isEditing = draft.index !== null
+  const updateDraft = (patch: Partial<MappingDraft>) => setDraft({ ...draft, ...patch })
+  const disabledInputClass = 'w-full px-3 py-2 border border-gray-200 rounded-md text-sm text-gray-400 bg-gray-50'
+
+  const fillRandomPort = async () => {
+    try {
+      const res = await api.get<APIResponse<{ port: number }>>(`/containers/${containerIdentifier}/random-port`)
+      const port = res.data.data?.port || 0
+      if (port > 0) updateDraft({ host_port: String(port) })
+    } catch {
+      // keep manual input available if random port lookup fails
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <Field label="名称">
+          <input
+            value={draft.description}
+            disabled={isSubUser}
+            onChange={(e) => updateDraft({ description: e.target.value })}
+            className={isSubUser ? disabledInputClass : inputClass}
+            placeholder="Web / API"
+          />
+        </Field>
+
+        <Field label="协议">
+          {isSubUser ? (
+            <input value={draft.protocol.toUpperCase()} disabled className={disabledInputClass} />
+          ) : (
+            <select value={draft.protocol} onChange={(e) => updateDraft({ protocol: e.target.value })} className={inputClass}>
+              <option value="all">全部 (ALL)</option>
+              <option value="tcp">TCP</option>
+              <option value="udp">UDP</option>
+              <option value="tcp+udp">TCP+UDP</option>
+              <option value="icmp">ICMP</option>
+            </select>
+          )}
+        </Field>
+
+        <Field label="外部端口">
+          {isSubUser ? (
+            <input value={draft.host_port} disabled className={disabledInputClass} />
+          ) : (
+            <div className="flex gap-1">
+              <input
+                value={draft.host_port}
+                onChange={(e) => updateDraft({ host_port: e.target.value })}
+                className={`${inputClass} flex-1`}
+                placeholder="默认同内部"
+              />
+              <button
+                type="button"
+                onClick={fillRandomPort}
+                className="rounded-md border border-gray-300 px-2 py-2 text-xs text-gray-500 hover:bg-gray-50"
+                title="随机空闲端口"
+              >
+                随机
+              </button>
+            </div>
+          )}
+        </Field>
+
+        <Field label="内部端口">
+          <input
+            value={draft.container_port}
+            onChange={(e) => updateDraft({ container_port: e.target.value })}
+            className={inputClass}
+            placeholder="例如 80"
+          />
+        </Field>
+      </div>
+
+      <div className="flex justify-end gap-2 border-t border-gray-100 pt-4">
+        <button onClick={onCancel} className="px-4 py-2 text-sm text-gray-600 border border-gray-200 rounded-md hover:bg-gray-50">
+          取消
+        </button>
+        <button
+          onClick={onSubmit}
+          disabled={saving || (!isEditing && !canAddMapping)}
+          className="inline-flex items-center justify-center gap-1.5 px-4 py-2 text-sm bg-black text-white rounded-md hover:bg-gray-800 disabled:opacity-50"
+        >
+          <Save className="w-4 h-4" />
+          {saving ? '保存中...' : '保存'}
+        </button>
+      </div>
     </div>
   )
 }
