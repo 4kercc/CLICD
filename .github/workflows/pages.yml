@@ -44,7 +44,7 @@ jobs:
       - name: Build docs
         working-directory: docs
         env:
-          VITEPRESS_BASE: /${{ github.event.repository.name }}/
+          VITEPRESS_BASE: /
         run: npm run build
 
       - name: Upload artifact
