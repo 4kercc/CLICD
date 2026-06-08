@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestRootfsCommandAddsSeparatorAndPreservesArgs(t *testing.T) {
+func TestRootfsCommandAddsSeparatorForAllowedCommand(t *testing.T) {
 	base := t.TempDir()
 	rootfs := filepath.Join(base, "ct-1", "rootfs")
 	if err := os.MkdirAll(rootfs, 0755); err != nil {
@@ -16,18 +16,31 @@ func TestRootfsCommandAddsSeparatorAndPreservesArgs(t *testing.T) {
 	}
 
 	m := &Manager{LxcPath: base}
-	cmd, err := m.rootfsCommand(rootfs, "sh", "-c", "true", "--flag")
+	cmd, err := m.rootfsCommand(rootfs, "chpasswd")
 	if err != nil {
 		t.Fatalf("rootfsCommand returned error: %v", err)
 	}
 
-	want := []string{"chroot", "--", rootfs, "sh", "-c", "true", "--flag"}
+	want := []string{"chroot", "--", rootfs, "chpasswd"}
 	if !reflect.DeepEqual(cmd.Args, want) {
 		t.Fatalf("cmd.Args = %#v, want %#v", cmd.Args, want)
 	}
 }
 
-func TestRootfsCommandAllowsLeadingDashContainerName(t *testing.T) {
+func TestRootfsCommandRejectsUnmanagedCommand(t *testing.T) {
+	base := t.TempDir()
+	rootfs := filepath.Join(base, "ct-1", "rootfs")
+	if err := os.MkdirAll(rootfs, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	m := &Manager{LxcPath: base}
+	if _, err := m.rootfsCommand(rootfs, "true"); err == nil {
+		t.Fatal("rootfsCommand allowed unmanaged command")
+	}
+}
+
+func TestRootfsCommandRejectsLeadingDashContainerName(t *testing.T) {
 	base := t.TempDir()
 	rootfs := filepath.Join(base, "-ct", "rootfs")
 	if err := os.MkdirAll(rootfs, 0755); err != nil {
@@ -35,14 +48,8 @@ func TestRootfsCommandAllowsLeadingDashContainerName(t *testing.T) {
 	}
 
 	m := &Manager{LxcPath: base}
-	cmd, err := m.rootfsCommand(rootfs, "true")
-	if err != nil {
-		t.Fatalf("rootfsCommand returned error: %v", err)
-	}
-
-	want := []string{"chroot", "--", rootfs, "true"}
-	if !reflect.DeepEqual(cmd.Args, want) {
-		t.Fatalf("cmd.Args = %#v, want %#v", cmd.Args, want)
+	if _, err := m.rootfsCommand(rootfs, "chpasswd"); err == nil {
+		t.Fatal("rootfsCommand allowed leading-dash container name")
 	}
 }
 
@@ -64,7 +71,7 @@ func TestRootfsCommandRejectsUnsafeRootfsPaths(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := m.rootfsCommand(tc.path, "true"); err == nil {
+			if _, err := m.rootfsCommand(tc.path, "chpasswd"); err == nil {
 				t.Fatalf("rootfsCommand(%q) returned nil error", tc.path)
 			}
 		})

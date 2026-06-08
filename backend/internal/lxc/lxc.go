@@ -390,7 +390,7 @@ func (m *Manager) CreateContainer(cfg ContainerConfig) error {
 			fmt.Printf("Warning: failed to install IPv6 init in %s: %v\n", lxcName, err)
 		}
 	}
-	if err := m.preconfigureSSH(rootfsPath, sshPassword, cfg.TemplateID); err != nil {
+	if err := m.preconfigureSSH(rootfsPath, cfg.TemplateID); err != nil {
 		fmt.Printf("Warning: failed to pre-configure SSH in %s: %v\n", lxcName, err)
 	}
 
@@ -402,8 +402,7 @@ func (m *Manager) CreateContainer(cfg ContainerConfig) error {
 
 	// Set root password AFTER shiftRootfsForUnprivileged,
 	// otherwise /etc/shadow ownership breaks and SSHD cannot authenticate.
-	if err := m.runRootfsCommand(rootfsPath,
-		"sh", "-c", fmt.Sprintf("printf '%%s:%%s\\n' root %s | chpasswd", shellQuote(sshPassword))); err != nil {
+	if err := m.setRootfsPassword(rootfsPath, sshPassword); err != nil {
 		fmt.Printf("Warning: failed to set root password in %s: %v\n", lxcName, err)
 	}
 
@@ -472,11 +471,11 @@ IPv6AcceptRA=no
 }
 
 // preconfigureSSH installs and configures SSH directly in the rootfs before first boot.
-func (m *Manager) preconfigureSSH(rootfsPath, password, templateID string) error {
+func (m *Manager) preconfigureSSH(rootfsPath, templateID string) error {
 	_ = templateID
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
-	cmd, err := m.rootfsCommand(rootfsPath, "sh", "-c", sshSetupScript(password, false))
+	cmd, err := m.rootfsCommand(rootfsPath, "sh", "-c", sshSetupScript(false))
 	if err != nil {
 		return err
 	}
@@ -1650,7 +1649,7 @@ func (m *Manager) EnsureSSH(id int) error {
 		config.SaveConfig()
 	}
 
-	script := sshSetupScript(c.SSHPassword, true)
+	script := sshSetupScript(true)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
@@ -1661,6 +1660,9 @@ func (m *Manager) EnsureSSH(id int) error {
 	}
 	if err != nil {
 		return fmt.Errorf("failed to configure SSH in container %d: %v, output: %s", id, err, string(output))
+	}
+	if err := m.quickEnsureSSHPassword(lxcName, c.SSHPassword); err != nil {
+		return fmt.Errorf("failed to set SSH password in container %d: %v", id, err)
 	}
 
 	if c.IP == "" {
@@ -1680,18 +1682,32 @@ func (m *Manager) EnsureSSH(id int) error {
 }
 
 func (m *Manager) quickEnsureSSHPassword(lxcName, password string) error {
-	if password == "" {
-		return fmt.Errorf("empty SSH password")
+	if err := validateRootPassword(password); err != nil {
+		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "lxc-attach", "-n", lxcName, "--", "sh", "-c",
-		fmt.Sprintf("printf '%%s:%%s\\n' root %s | chpasswd", shellQuote(password)))
+	cmd := exec.CommandContext(ctx, "lxc-attach", "-n", lxcName, "--", "chpasswd")
+	cmd.Stdin = strings.NewReader(rootPasswordInput(password))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to update SSH password quickly: %v, output: %s", err, string(output))
 	}
 	return nil
+}
+
+func validateRootPassword(password string) error {
+	if password == "" {
+		return fmt.Errorf("empty SSH password")
+	}
+	if strings.ContainsAny(password, "\r\n") || strings.ContainsRune(password, '\x00') {
+		return fmt.Errorf("SSH password contains unsupported control characters")
+	}
+	return nil
+}
+
+func rootPasswordInput(password string) string {
+	return "root:" + password + "\n"
 }
 
 func (m *Manager) containerPortListening(lxcName string, port int) bool {
@@ -1701,9 +1717,8 @@ func (m *Manager) containerPortListening(lxcName string, port int) bool {
 	return exec.CommandContext(ctx, "lxc-attach", "-n", lxcName, "--", "sh", "-c", check).Run() == nil
 }
 
-func sshSetupScript(password string, startService bool) string {
+func sshSetupScript(startService bool) string {
 	script := `set -u
-ROOT_PASSWORD=` + shellQuote(password) + `
 
 # DNS setup: handle both traditional /etc/resolv.conf and systemd-resolved (Ubuntu 24.04).
 # On modern distros, /etc/resolv.conf is a symlink managed by systemd-resolved.
@@ -1827,11 +1842,6 @@ set_sshd_option KbdInteractiveAuthentication no
 set_sshd_option ChallengeResponseAuthentication no
 set_sshd_option UsePAM no
 
-if [ -n "$ROOT_PASSWORD" ]; then
-	printf '%s:%s\n' root "$ROOT_PASSWORD" | chpasswd || exit 31
-	passwd -u root >/dev/null 2>&1 || true
-fi
-
 if command -v rc-update >/dev/null 2>&1; then
 	rc-update add sshd default >/dev/null 2>&1 || true
 fi
@@ -1912,16 +1922,11 @@ func (m *Manager) ResetSSHPassword(id int, password string) (string, error) {
 			return "", err
 		}
 		rootfsPath := filepath.Join(m.LxcPath, lxcName, "rootfs")
-		if err := m.preconfigureSSH(rootfsPath, newPassword, c.Template); err != nil {
+		if err := m.preconfigureSSH(rootfsPath, c.Template); err != nil {
 			return "", fmt.Errorf("failed to configure SSH: %v", err)
 		}
-		cmd, err := m.rootfsCommand(rootfsPath, "sh", "-c", fmt.Sprintf("printf '%%s:%%s\\n' root %s | chpasswd", shellQuote(newPassword)))
-		if err != nil {
-			return "", err
-		}
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			return "", fmt.Errorf("failed to set password: %v, output: %s", err, string(output))
+		if err := m.setRootfsPassword(rootfsPath, newPassword); err != nil {
+			return "", fmt.Errorf("failed to set password: %v", err)
 		}
 		c.SSHPassword = newPassword
 		config.SaveConfig()
@@ -1935,6 +1940,10 @@ func (m *Manager) rootfsCommand(rootfsPath string, args ...string) (*exec.Cmd, e
 	if err != nil {
 		return nil, err
 	}
+	safeArgs, err := safeRootfsCommandArgs(args)
+	if err != nil {
+		return nil, err
+	}
 
 	marker := filepath.Join(cleanRootfsPath, ".clicd-unprivileged-shifted")
 	if _, err := os.Stat(marker); err == nil {
@@ -1945,11 +1954,11 @@ func (m *Manager) rootfsCommand(rootfsPath string, args ...string) (*exec.Cmd, e
 				"-m", fmt.Sprintf("g:0:%d:65536", gidBase),
 				"--", "chroot", "--", cleanRootfsPath,
 			}
-			cmdArgs = append(cmdArgs, args...)
+			cmdArgs = append(cmdArgs, safeArgs...)
 			return exec.Command("lxc-usernsexec", cmdArgs...), nil
 		}
 	}
-	cmdArgs := append([]string{"--", cleanRootfsPath}, args...)
+	cmdArgs := append([]string{"--", cleanRootfsPath}, safeArgs...)
 	return exec.Command("chroot", cmdArgs...), nil
 }
 
@@ -1959,6 +1968,58 @@ func (m *Manager) runRootfsCommand(rootfsPath string, args ...string) error {
 		return err
 	}
 	return cmd.Run()
+}
+
+func (m *Manager) setRootfsPassword(rootfsPath, password string) error {
+	if err := validateRootPassword(password); err != nil {
+		return err
+	}
+	cmd, err := m.rootfsCommand(rootfsPath, "chpasswd")
+	if err != nil {
+		return err
+	}
+	cmd.Stdin = strings.NewReader(rootPasswordInput(password))
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%v, output: %s", err, string(output))
+	}
+	return nil
+}
+
+func safeRootfsCommandArgs(args []string) ([]string, error) {
+	if len(args) == 0 {
+		return nil, fmt.Errorf("empty rootfs command")
+	}
+	allowed := map[string]bool{
+		"chpasswd":  true,
+		"rc-update": true,
+		"sh":        true,
+		"systemctl": true,
+	}
+	if !allowed[args[0]] || strings.HasPrefix(args[0], "-") || strings.Contains(args[0], "/") {
+		return nil, fmt.Errorf("rootfs command is not allowed: %s", args[0])
+	}
+	for _, arg := range args {
+		if strings.ContainsRune(arg, '\x00') {
+			return nil, fmt.Errorf("rootfs command argument contains NUL byte")
+		}
+	}
+	if args[0] == "sh" {
+		if len(args) != 3 || args[1] != "-c" {
+			return nil, fmt.Errorf("unsupported rootfs shell invocation")
+		}
+		if !isCLICDManagedRootfsScript(args[2]) {
+			return nil, fmt.Errorf("refusing unmanaged rootfs shell script")
+		}
+	}
+	return append([]string(nil), args...), nil
+}
+
+func isCLICDManagedRootfsScript(script string) bool {
+	return strings.Contains(script, "99-clicd.conf") &&
+		strings.Contains(script, "install_sshd") &&
+		!strings.Contains(script, "ROOT_PASSWORD") &&
+		!strings.Contains(script, "chpasswd")
 }
 
 func (m *Manager) safeRootfsPath(rootfsPath string) (string, error) {
@@ -1992,6 +2053,13 @@ func (m *Manager) safeRootfsPath(rootfsPath string) (string, error) {
 	}
 	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
 		return "", fmt.Errorf("refusing unsafe rootfs path: %s", cleanRootfsPath)
+	}
+	parts := strings.Split(rel, string(os.PathSeparator))
+	if len(parts) != 2 || parts[1] != "rootfs" {
+		return "", fmt.Errorf("refusing nested or malformed rootfs path: %s", cleanRootfsPath)
+	}
+	if strings.HasPrefix(parts[0], "-") || !regexp.MustCompile(`^[A-Za-z0-9_.-]+$`).MatchString(parts[0]) {
+		return "", fmt.Errorf("refusing unsafe container directory name: %s", parts[0])
 	}
 	return cleanRootfsPath, nil
 }
@@ -2235,6 +2303,85 @@ func (m *Manager) ImportExistingClicdContainers() ([]config.Container, error) {
 	return imported, nil
 }
 
+func (m *Manager) replaceRootfsFromTemplate(lxcName string, tmpl *Template) error {
+	if tmpl == nil {
+		return fmt.Errorf("template is nil")
+	}
+	tmpName := fmt.Sprintf("clicd-reinstall-%s-%s", lxcName, generateRandomString(8))
+	tmpDir := filepath.Join(m.LxcPath, tmpName)
+	if err := os.RemoveAll(tmpDir); err != nil {
+		return fmt.Errorf("failed to clean temporary reinstall directory: %v", err)
+	}
+	defer m.cleanupTemporaryContainer(tmpName)
+
+	args := []string{
+		"-n", tmpName,
+		"-t", "download",
+		"--",
+		"-d", tmpl.Distro,
+		"-r", tmpl.Release,
+		"-a", tmpl.Arch,
+	}
+	if tmpl.Variant != "" {
+		args = append(args, "--variant", tmpl.Variant)
+	}
+	output, err := exec.Command("lxc-create", args...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to download replacement rootfs: %v, output: %s", err, string(output))
+	}
+
+	tmpRootfs := filepath.Join(tmpDir, "rootfs")
+	if !rootfsHasInit(tmpRootfs) {
+		return fmt.Errorf("downloaded replacement rootfs is invalid: init not found")
+	}
+
+	rootfsPath := filepath.Join(m.LxcPath, lxcName, "rootfs")
+	if err := m.ensureDiskImageMounted(lxcName); err != nil {
+		return err
+	}
+	m.unmountRootfsChildMounts(rootfsPath)
+	if err := os.MkdirAll(rootfsPath, 0755); err != nil {
+		return err
+	}
+	if err := removeDirectoryContents(rootfsPath); err != nil {
+		return fmt.Errorf("failed to clear old rootfs: %v", err)
+	}
+	if err := copyRootfsContents(tmpRootfs, rootfsPath); err != nil {
+		return err
+	}
+	if !rootfsHasInit(rootfsPath) {
+		return fmt.Errorf("replacement rootfs copy failed: init not found")
+	}
+	return nil
+}
+
+func (m *Manager) cleanupTemporaryContainer(lxcName string) {
+	exec.Command("lxc-stop", "-n", lxcName, "-k").Run()
+	exec.Command("lxc-destroy", "-n", lxcName, "-f").Run()
+	os.RemoveAll(filepath.Join(m.LxcPath, lxcName))
+}
+
+func removeDirectoryContents(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if err := os.RemoveAll(filepath.Join(dir, entry.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func copyRootfsContents(src, dst string) error {
+	output, err := exec.Command("cp", "-a", src+string(os.PathSeparator)+".", dst+string(os.PathSeparator)).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to copy replacement rootfs: %v, output: %s", err, string(output))
+	}
+	return nil
+}
+
 // ReinstallContainer reinstalls the container OS
 func (m *Manager) ReinstallContainer(id int, templateID string) error {
 	c := config.FindContainer(id)
@@ -2258,28 +2405,10 @@ func (m *Manager) ReinstallContainer(id int, templateID string) error {
 	// Clean port mappings temporarily
 	m.CleanPortMappings(id)
 
-	// Destroy old LXC but keep config. lxc-destroy can leave the config
-	// directory behind when rootfs mounts are still present, which makes the
-	// following lxc-create fail with "Container already exists".
-	exec.Command("lxc-stop", "-n", lxcName, "-k").Run()
-	rootfs := filepath.Join(m.LxcPath, lxcName, "rootfs")
-	exec.Command("umount", "-R", "-l", rootfs).Run()
-	exec.Command("lxc-destroy", "-n", lxcName, "-f").Run()
-	exec.Command("umount", "-R", "-l", rootfs).Run()
-	os.RemoveAll(filepath.Join(m.LxcPath, lxcName))
-
-	// Create new container with same LXC name (preserves ID)
-	cmd := exec.Command("lxc-create",
-		"-n", lxcName,
-		"-t", "download",
-		"--",
-		"-d", tmpl.Distro,
-		"-r", tmpl.Release,
-		"-a", tmpl.Arch,
-	)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("lxc-create failed: %v, output: %s", err, string(output))
+	// Download the new OS into a temporary container, then replace only the
+	// existing rootfs. The target container directory and config are preserved.
+	if err := m.replaceRootfsFromTemplate(lxcName, tmpl); err != nil {
+		return err
 	}
 
 	if err := m.applyDiskLimit(lxcName, c.DiskGB); err != nil {
@@ -2319,14 +2448,13 @@ func (m *Manager) ReinstallContainer(id int, templateID string) error {
 	if c.SSHPassword == "" {
 		c.SSHPassword = generateRandomString(16)
 	}
-	if err := m.preconfigureSSH(rootfsPath, c.SSHPassword, templateID); err != nil {
+	if err := m.preconfigureSSH(rootfsPath, templateID); err != nil {
 		fmt.Printf("Warning: failed to pre-configure SSH in %s after reinstall: %v\n", lxcName, err)
 	}
 	if err := m.shiftRootfsForUnprivileged(lxcName); err != nil {
 		return err
 	}
-	if err := m.runRootfsCommand(rootfsPath,
-		"sh", "-c", fmt.Sprintf("printf '%%s:%%s\\n' root %s | chpasswd", shellQuote(c.SSHPassword))); err != nil {
+	if err := m.setRootfsPassword(rootfsPath, c.SSHPassword); err != nil {
 		fmt.Printf("Warning: failed to set root password in %s after reinstall: %v\n", lxcName, err)
 	}
 

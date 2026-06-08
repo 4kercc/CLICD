@@ -38,6 +38,19 @@ func HandleContainers(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// HandleContainerListAlias supports legacy integrations that call
+// /api/containers/list or /api/v1/containers/list.
+func HandleContainerListAlias(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
+		return
+	}
+	if !requireScope(w, r, "container:read") {
+		return
+	}
+	listContainers(w, r)
+}
+
 // HandleSingleContainer handles individual container operations by ID or name: /api/containers/{id-or-name}/...
 func HandleSingleContainer(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1/containers/")

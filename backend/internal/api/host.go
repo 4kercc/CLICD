@@ -766,14 +766,15 @@ func detectDiskSMART(path string) HostDiskSMARTProbe {
 	smart.PowerOnHours = data.PowerOnTime.Hours
 	smart.PowerCycleCount = data.PowerCycleCount
 	if data.NVMe.PowerOnHours > 0 {
-		smart.PowerOnHours = int64(data.NVMe.PowerOnHours)
+		smart.PowerOnHours = uint64ToInt64(data.NVMe.PowerOnHours)
 	}
 	if data.NVMe.PowerCycles > 0 {
-		smart.PowerCycleCount = int64(data.NVMe.PowerCycles)
+		smart.PowerCycleCount = uint64ToInt64(data.NVMe.PowerCycles)
 	}
 	if data.NVMe.PercentageUsed > 0 {
-		used := int(data.NVMe.PercentageUsed)
-		smart.LifeUsedPercent = &used
+		if used, ok := smartPercentToInt(data.NVMe.PercentageUsed); ok {
+			smart.LifeUsedPercent = &used
+		}
 	}
 	smart.ReadDataBytes = data.NVMe.DataUnitsRead * 512000
 	smart.WrittenDataBytes = data.NVMe.DataUnitsWritten * 512000
@@ -829,11 +830,15 @@ func parseATAAttributes(smart *HostDiskSMARTProbe, attrs []smartctlAttribute) {
 		switch name {
 		case "poweronhours":
 			if smart.PowerOnHours == 0 {
-				smart.PowerOnHours = int64(raw)
+				if parsed, ok := smartAttrRawInt64(attr); ok {
+					smart.PowerOnHours = parsed
+				}
 			}
 		case "powercyclecount":
 			if smart.PowerCycleCount == 0 {
-				smart.PowerCycleCount = int64(raw)
+				if parsed, ok := smartAttrRawInt64(attr); ok {
+					smart.PowerCycleCount = parsed
+				}
 			}
 		case "totallbaswritten":
 			if smart.WrittenDataBytes == 0 {
@@ -868,7 +873,9 @@ func parseATAAttributes(smart *HostDiskSMARTProbe, attrs []smartctlAttribute) {
 			if smart.LifeUsedPercent == nil {
 				remaining := attr.Value
 				if raw > 0 && raw <= 100 {
-					remaining = int(raw)
+					if parsed, ok := smartPercentToInt(raw); ok {
+						remaining = parsed
+					}
 				}
 				used := 100 - remaining
 				if used < 0 {
@@ -880,8 +887,9 @@ func parseATAAttributes(smart *HostDiskSMARTProbe, attrs []smartctlAttribute) {
 			}
 		case "percentageused":
 			if smart.LifeUsedPercent == nil && raw <= 255 {
-				used := int(raw)
-				smart.LifeUsedPercent = &used
+				if used, ok := smartPercentToInt(raw); ok {
+					smart.LifeUsedPercent = &used
+				}
 			}
 		case "erasefailcounttotal", "erasecount", "nandwrites", "programfailcnttotal":
 			if smart.EraseCount == "" && rawText != "" {
@@ -891,6 +899,20 @@ func parseATAAttributes(smart *HostDiskSMARTProbe, attrs []smartctlAttribute) {
 			smart.MediaErrors = raw
 		}
 	}
+}
+
+func uint64ToInt64(value uint64) int64 {
+	if value > 9223372036854775807 {
+		return 0
+	}
+	return int64(value)
+}
+
+func smartPercentToInt(value uint64) (int, bool) {
+	if value > 2147483647 {
+		return 0, false
+	}
+	return int(value), true
 }
 
 func normalizeSMARTAttrName(name string) string {
@@ -912,6 +934,22 @@ func smartAttrRawText(attr smartctlAttribute) string {
 		return attr.Raw.Value.String()
 	}
 	return ""
+}
+
+func smartAttrRawInt64(attr smartctlAttribute) (int64, bool) {
+	text := smartAttrRawText(attr)
+	if value, err := strconv.ParseInt(text, 10, 64); err == nil {
+		return value, true
+	}
+	digits := firstUintText(text)
+	if digits == "" {
+		return 0, false
+	}
+	value, err := strconv.ParseInt(digits, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return value, true
 }
 
 func smartAttrRawUint(attr smartctlAttribute) uint64 {

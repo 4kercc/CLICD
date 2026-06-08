@@ -452,10 +452,10 @@ export default function ContainerDetail() {
     const digits = '23456789'
     const symbols = '!@#$%*-_+='
     const all = letters + digits + symbols
-    const pick = (chars: string) => chars[Math.floor(Math.random() * chars.length)]
+    const pick = (chars: string) => chars[secureRandomInt(chars.length)]
     let password = pick(letters) + pick(digits)
     while (password.length < 16) password += pick(all)
-    setResetPasswordDraft(password.split('').sort(() => Math.random() - 0.5).join(''))
+    setResetPasswordDraft(secureShuffle(password.split('')).join(''))
     setResetPasswordResult('')
   }
 
@@ -2052,6 +2052,32 @@ function TrafficBar({ container }: { container: Container }) {
       </div>
     </div>
   )
+}
+
+function secureRandomInt(maxExclusive: number) {
+  if (!Number.isSafeInteger(maxExclusive) || maxExclusive <= 0) {
+    throw new Error('invalid random range')
+  }
+  const values = new Uint32Array(1)
+  const maxUint32 = 0x100000000
+  const limit = Math.floor(maxUint32 / maxExclusive) * maxExclusive
+  let value = 0
+  do {
+    crypto.getRandomValues(values)
+    value = values[0]
+  } while (value >= limit)
+  return value % maxExclusive
+}
+
+function secureShuffle<T>(items: T[]) {
+  const next = [...items]
+  for (let i = next.length - 1; i > 0; i--) {
+    const j = secureRandomInt(i + 1)
+    const value = next[i]
+    next[i] = next[j]
+    next[j] = value
+  }
+  return next
 }
 
 function getTemplateIcon(id: string): ReactNode {

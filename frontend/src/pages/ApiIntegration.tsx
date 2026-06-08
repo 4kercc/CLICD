@@ -132,6 +132,7 @@ const endpointGroups = [
     title: '容器',
     endpoints: [
       ['GET', '/api/v1/containers', '容器列表'],
+      ['POST', '/api/v1/containers/list', '容器列表（兼容旧接口）'],
       ['POST', '/api/v1/containers', '创建容器'],
       ['GET', '/api/v1/containers/{id|uuid|name}', '容器详情'],
       ['POST', '/api/v1/containers/{id}/start', '开机'],
@@ -472,8 +473,9 @@ export default function ApiIntegration() {
         {showDocs && (
           <div className="space-y-6 p-5">
             <div className="rounded-lg bg-gray-900 p-4 font-mono text-xs text-gray-100">
-              <div>curl -H "X-API-Key: clicd_sk_xxxx" {BASE_URL}/api/v1/containers</div>
-              <div className="mt-2 text-gray-400">curl -H "Authorization: Bearer clicd_sk_xxxx" {BASE_URL}/api/v1/dashboard</div>
+              <div>curl -X GET {BASE_URL}/api/v1/containers -H "X-API-Key: clicd_sk_xxxx"</div>
+              <div className="mt-2 text-gray-400">curl -X GET {BASE_URL}/api/v1/dashboard -H "Authorization: Bearer clicd_sk_xxxx"</div>
+              <div className="mt-2 text-amber-300">旧版 /api/containers/list 已兼容，但新接入请使用 GET /api/v1/containers</div>
             </div>
 
             {endpointGroups.map(group => (
