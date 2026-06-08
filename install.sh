@@ -136,6 +136,7 @@ usage() {
 示例：
   curl -fsSL https://raw.githubusercontent.com/${REPO}/main/install.sh | sudo sh
   curl -fsSL https://raw.githubusercontent.com/${REPO}/main/install.sh | sudo sh -s -- uninstall
+  curl -fsSL https://raw.githubusercontent.com/${REPO}/main/install.sh | sudo sh -s -- uninstall --yes
 
 日志：${LOG_FILE}
 问题反馈：${ISSUE_URL}
@@ -384,8 +385,10 @@ confirm_uninstall() {
     echo "[clicd][警告] 卸载会停止并删除 CLICD 服务、配置数据库、CLICD 创建的 LXC/KVM 实例和缓存数据。" >&2
     echo "[clicd][警告] 为避免误删生产数据，脚本只会删除名称形如 ct-数字 的 LXC 容器和 vm-数字 的 KVM 域。" >&2
     echo "如需确认卸载，请输入：YES" >&2
-    if [ -t 0 ]; then
-        read answer
+    if [ -r /dev/tty ]; then
+        IFS= read -r answer < /dev/tty
+    elif [ -t 0 ]; then
+        IFS= read -r answer
     else
         answer=""
     fi
