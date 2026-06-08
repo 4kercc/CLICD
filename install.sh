@@ -220,6 +220,39 @@ remove_lxc_container_dir() {
     log "已删除 $container_dir"
 }
 
+remove_clicd_lxc_image_cache() {
+    log "正在删除 CLICD 使用的 LXC 镜像缓存..."
+
+    for container_dir in /var/lib/lxc/clicd-img-dl-*; do
+        [ -d "$container_dir" ] || continue
+        remove_lxc_container_dir "$container_dir"
+    done
+
+    for image in \
+        "ubuntu noble amd64" \
+        "ubuntu jammy amd64" \
+        "debian bookworm amd64" \
+        "debian bullseye amd64" \
+        "alpine 3.21 amd64" \
+        "centos 9-Stream amd64" \
+        "archlinux current amd64" \
+        "fedora 44 amd64" \
+        "rockylinux 10 amd64"
+    do
+        set -- $image
+        distro="$1"
+        release="$2"
+        arch="$3"
+        cache_dir="/var/cache/lxc/download/$distro/$release/$arch"
+        remove_path "$cache_dir"
+        rmdir "/var/cache/lxc/download/$distro/$release" >/dev/null 2>&1 || true
+        rmdir "/var/cache/lxc/download/$distro" >/dev/null 2>&1 || true
+    done
+
+    rmdir /var/cache/lxc/download >/dev/null 2>&1 || true
+    rmdir /var/cache/lxc >/dev/null 2>&1 || true
+}
+
 remove_kvm_domain() {
     domain="$1"
     case "$domain" in
@@ -384,7 +417,7 @@ confirm_uninstall() {
     fi
     echo ""
     echo "[clicd][警告] 卸载会停止并删除 CLICD 服务、配置数据库、CLICD 创建的 LXC/KVM 实例和缓存数据。" >&2
-    echo "[clicd][警告] 为避免误删生产数据，脚本只会删除名称形如 ct-数字 的 LXC 容器和 vm-数字 的 KVM 域。" >&2
+    echo "[clicd][警告] 为避免误删生产数据，脚本只会删除名称形如 ct-数字 的 LXC 容器、clicd-img-dl-* 下载临时容器和 vm-数字 的 KVM 域。" >&2
     echo "如需确认卸载，请输入：YES" >&2
     if [ -r /dev/tty ]; then
         IFS= read -r answer < /dev/tty
@@ -419,6 +452,7 @@ uninstall_clicd() {
         [ -d "$container_dir" ] || continue
         remove_lxc_container_dir "$container_dir"
     done
+    remove_clicd_lxc_image_cache
     destroy_clicd_kvm_domains
     cleanup_clicd_networking
     remove_clicd_host_hooks
@@ -434,7 +468,7 @@ uninstall_clicd() {
     # /var/lib/lxc 可能包含非 CLICD 容器，生产环境不整体删除。
     unmount_path_tree /var/lib/clicd
     remove_path /var/lib/clicd
-    # /var/cache/lxc 是 LXC 全局镜像缓存，可能被其他工具复用，生产环境不整体删除。
+    # /var/cache/lxc 是 LXC 全局缓存，已按 CLICD 模板精确清理，生产环境不整体删除。
     remove_path /var/cache/clicd
     warn "保留 /root/clicd-backups，避免误删部署/回滚备份。确认不需要后可手动删除。"
     remove_clicd_tmp_files
