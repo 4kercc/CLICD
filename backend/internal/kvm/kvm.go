@@ -37,6 +37,7 @@ type Manager struct {
 }
 
 const ipv6GatewayLinkLocal = "fe80::1"
+const libvirtDefaultNetworkMarker = "/var/lib/clicd/kvm/default-network.created"
 
 type usageSample struct {
 	CPUUsec    uint64
@@ -1475,6 +1476,9 @@ func ensureDefaultNetwork() error {
 		defer os.Remove(tmpFile)
 		if out, err := exec.Command("virsh", "net-define", tmpFile).CombinedOutput(); err != nil {
 			return fmt.Errorf("failed to define libvirt default network: %v, output: %s", err, string(out))
+		}
+		if err := os.MkdirAll(filepath.Dir(libvirtDefaultNetworkMarker), 0755); err == nil {
+			_ = os.WriteFile(libvirtDefaultNetworkMarker, []byte("created-by-clicd\n"), 0644)
 		}
 	}
 	// Start and autostart the default network

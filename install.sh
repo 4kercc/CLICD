@@ -9,6 +9,7 @@ ACTION_CONFIRM="${2:-}"
 ISSUE_URL="https://github.com/${REPO}/issues"
 LOG_FILE="${CLICD_LOG_FILE:-/var/log/clicd-install.log}"
 INSTALL_DOWNLOAD_MARKER="${CLICD_INSTALL_DOWNLOAD_MARKER:-/tmp/clicd-install-dir.$$}"
+LIBVIRT_DEFAULT_MARKER="/var/lib/clicd/kvm/default-network.created"
 
 echo "====================================="
 echo "  CLICD 中文安装/卸载脚本"
@@ -291,6 +292,48 @@ destroy_clicd_kvm_domains() {
         [ -n "$domain" ] || continue
         remove_kvm_domain "$domain"
     done
+}
+
+domain_is_clicd_kvm() {
+    domain="$1"
+    case "$domain" in
+        vm-[0-9]*)
+            return 0
+            ;;
+    esac
+    virsh dumpxml "$domain" 2>/dev/null | grep -q '/var/lib/clicd/kvm/'
+}
+
+libvirt_default_used_by_non_clicd_domain() {
+    if ! has_cmd virsh; then
+        return 1
+    fi
+
+    for domain in $(virsh list --all --name 2>/dev/null); do
+        [ -n "$domain" ] || continue
+        if domain_is_clicd_kvm "$domain"; then
+            continue
+        fi
+        if virsh domiflist "$domain" 2>/dev/null | awk '$3 == "default" || $3 == "virbr0" {found = 1} END {exit found ? 0 : 1}'; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+remove_clicd_libvirt_default_network() {
+    if ! has_cmd virsh || [ ! -f "$LIBVIRT_DEFAULT_MARKER" ]; then
+        return
+    fi
+    if libvirt_default_used_by_non_clicd_domain; then
+        warn "检测到非 CLICD 虚拟机仍在使用 libvirt default 网络，已保留 default/virbr0。"
+        return
+    fi
+
+    log "正在删除 CLICD 创建的 libvirt default NAT 网络..."
+    virsh net-destroy default >/dev/null 2>&1 || true
+    virsh net-undefine default >/dev/null 2>&1 || true
+    rm -f "$LIBVIRT_DEFAULT_MARKER"
 }
 
 delete_iptables_lines() {
@@ -593,6 +636,7 @@ uninstall_clicd() {
     done
     remove_clicd_lxc_image_cache
     destroy_clicd_kvm_domains
+    remove_clicd_libvirt_default_network
     cleanup_clicd_networking
     remove_clicd_host_hooks
     remove_clicd_quota_records
@@ -943,6 +987,8 @@ setup_default_libvirt_network() {
 EOF
         virsh net-define "$net_xml"
         rm -f "$net_xml"
+        mkdir -p "$(dirname "$LIBVIRT_DEFAULT_MARKER")"
+        touch "$LIBVIRT_DEFAULT_MARKER"
     fi
     if ! libvirt_network_active; then
         virsh net-start default

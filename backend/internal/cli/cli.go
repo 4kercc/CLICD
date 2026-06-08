@@ -21,8 +21,9 @@ import (
 var manager = lxc.NewManager()
 
 const (
-	clicdBackupDir     = "/root/clicd-backups"
-	clicdNewBinaryPath = "/usr/local/bin/clicd.new"
+	clicdBackupDir              = "/root/clicd-backups"
+	clicdNewBinaryPath          = "/usr/local/bin/clicd.new"
+	libvirtDefaultNetworkMarker = "/var/lib/clicd/kvm/default-network.created"
 )
 
 // Run starts the CLI interface.
@@ -754,6 +755,7 @@ func cliUninstall(reader *bufio.Reader) {
 
 	destroyAllLXCContainers()
 	destroyAllKVMDomains()
+	removeCLICDLibvirtDefaultNetwork()
 	cleanupCLICDNetworking()
 	removeCLICDHostHooks()
 	removeCLICDQuotaRecords()
@@ -838,6 +840,56 @@ func removeKVMDomain(name string) {
 		return
 	}
 	runQuiet("virsh", "undefine", name)
+}
+
+func removeCLICDLibvirtDefaultNetwork() {
+	if !commandExists("virsh") || !fileExists(libvirtDefaultNetworkMarker) {
+		return
+	}
+	if libvirtDefaultUsedByNonCLICDDomain() {
+		fmt.Println("检测到非 CLICD 虚拟机仍在使用 libvirt default 网络，已保留 default/virbr0。")
+		return
+	}
+	fmt.Println("Removing CLICD-created libvirt default network...")
+	runQuiet("virsh", "net-destroy", "default")
+	runQuiet("virsh", "net-undefine", "default")
+	removePath(libvirtDefaultNetworkMarker)
+}
+
+func libvirtDefaultUsedByNonCLICDDomain() bool {
+	if !commandExists("virsh") {
+		return false
+	}
+	out, err := exec.Command("virsh", "list", "--all", "--name").Output()
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		name := strings.TrimSpace(line)
+		if name == "" || isCLICDKVMDomain(name) {
+			continue
+		}
+		if usesLibvirtDefaultNetwork(name) {
+			return true
+		}
+	}
+	return false
+}
+
+func usesLibvirtDefaultNetwork(domain string) bool {
+	out, err := exec.Command("virsh", "domiflist", domain).Output()
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		for _, field := range fields {
+			if field == "default" || field == "virbr0" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func cleanupCLICDNetworking() {
