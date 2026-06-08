@@ -330,6 +330,143 @@ delete_filter_rule() {
     done
 }
 
+delete_ip6_filter_rule() {
+    if ! has_cmd ip6tables; then
+        return
+    fi
+
+    while ip6tables -D "$@" >/dev/null 2>&1; do
+        :
+    done
+}
+
+delete_ip6tables_nat_source() {
+    source="$1"
+    if ! has_cmd ip6tables || [ -z "$source" ]; then
+        return
+    fi
+
+    while :; do
+        rule="$(
+            ip6tables -t nat -S POSTROUTING 2>/dev/null |
+                grep -F -- "-s $source" |
+                grep -F -- " -j MASQUERADE" |
+                sed 's/^-A /-D /' |
+                head -n 1
+        )"
+        [ -n "$rule" ] || break
+        # shellcheck disable=SC2086
+        ip6tables -t nat $rule >/dev/null 2>&1 || break
+    done
+}
+
+read_clicd_network_records() {
+    db="/root/.clicd/config.db"
+    legacy="/root/.clicd/config.json"
+    query="SELECT COALESCE(virtualization,''), COALESCE(ipv6,''), COALESCE(ipv6_interface,''), COALESCE(mac_address,'') FROM containers WHERE COALESCE(ipv6,'') <> '' OR COALESCE(mac_address,'') <> '';"
+
+    if [ -f "$db" ] && has_cmd sqlite3; then
+        sqlite3 -separator '|' "$db" "$query" 2>/dev/null || true
+    elif [ -f "$db" ] && has_cmd python3; then
+        CLICD_DB="$db" python3 - <<'PY' 2>/dev/null || true
+import os
+import sqlite3
+
+db = os.environ.get("CLICD_DB")
+for row in sqlite3.connect(db).execute(
+    "SELECT COALESCE(virtualization,''), COALESCE(ipv6,''), COALESCE(ipv6_interface,''), COALESCE(mac_address,'') "
+    "FROM containers WHERE COALESCE(ipv6,'') <> '' OR COALESCE(mac_address,'') <> ''"
+):
+    print("|".join("" if value is None else str(value) for value in row))
+PY
+    fi
+
+    if [ -f "$legacy" ] && has_cmd python3; then
+        CLICD_LEGACY_CONFIG="$legacy" python3 - <<'PY' 2>/dev/null || true
+import json
+import os
+
+path = os.environ.get("CLICD_LEGACY_CONFIG")
+with open(path, "r", encoding="utf-8") as f:
+    data = json.load(f)
+for item in data.get("containers", []):
+    virt = item.get("virtualization", "")
+    ipv6 = item.get("ipv6", "")
+    uplink = item.get("ipv6_interface", "")
+    mac = item.get("mac_address", "")
+    if ipv6 or mac:
+        print("|".join(str(value or "") for value in (virt, ipv6, uplink, mac)))
+PY
+    fi
+}
+
+cleanup_clicd_ipv6_record() {
+    virt="$1"
+    ipv6="$2"
+    uplink="$3"
+    mac="$4"
+    bridge="lxcbr0"
+    if [ "$virt" = "kvm" ]; then
+        bridge="virbr0"
+    fi
+    mac="$(printf '%s' "$mac" | tr '[:upper:]' '[:lower:]')"
+
+    if [ -n "$mac" ] && [ "$bridge" = "virbr0" ]; then
+        delete_ip6_filter_rule FORWARD -i "$bridge" -m mac --mac-source "$mac" -j DROP
+    fi
+
+    [ -n "$ipv6" ] || return
+    addr="${ipv6%%/*}"
+    source="$ipv6"
+    case "$source" in
+        */*) ;;
+        *) source="$source/128" ;;
+    esac
+
+    delete_ip6tables_nat_source "$source"
+    delete_ip6_filter_rule FORWARD -i "$bridge" -s "$source" -j ACCEPT
+    delete_ip6_filter_rule FORWARD -o "$bridge" -d "$source" -j ACCEPT
+    if [ -n "$mac" ] && [ "$bridge" = "virbr0" ]; then
+        delete_ip6_filter_rule FORWARD -i "$bridge" -m mac --mac-source "$mac" -s "$source" -j ACCEPT
+        delete_ip6_filter_rule FORWARD -i "$bridge" -m mac --mac-source "$mac" -j DROP
+    fi
+
+    if has_cmd ip; then
+        ip -6 route del "$source" dev "$bridge" >/dev/null 2>&1 || true
+        if [ -n "$uplink" ]; then
+            ip -6 neigh del proxy "$addr" dev "$uplink" >/dev/null 2>&1 || true
+        fi
+    fi
+}
+
+cleanup_clicd_ipv6_from_config() {
+    read_clicd_network_records | while IFS='|' read -r virt ipv6 uplink mac; do
+        cleanup_clicd_ipv6_record "$virt" "$ipv6" "$uplink" "$mac"
+    done
+}
+
+cleanup_clicd_ipv6_bridge_routes() {
+    if ! has_cmd ip; then
+        return
+    fi
+
+    for bridge in lxcbr0 virbr0; do
+        ip -6 route show dev "$bridge" 2>/dev/null | awk '$1 ~ /\/128$/ {print $1}' | while IFS= read -r source; do
+            [ -n "$source" ] || continue
+            addr="${source%%/*}"
+            delete_ip6tables_nat_source "$source"
+            delete_ip6_filter_rule FORWARD -i "$bridge" -s "$source" -j ACCEPT
+            delete_ip6_filter_rule FORWARD -o "$bridge" -d "$source" -j ACCEPT
+            ip -6 neigh show proxy 2>/dev/null | awk -v addr="$addr" '$1 == addr {for (i = 1; i < NF; i++) if ($i == "dev") print $(i + 1)}' | while IFS= read -r uplink; do
+                [ -n "$uplink" ] || continue
+                ip -6 neigh del proxy "$addr" dev "$uplink" >/dev/null 2>&1 || true
+            done
+            ip -6 route del "$source" dev "$bridge" >/dev/null 2>&1 || true
+        done
+        ip -6 addr del fe80::1/64 dev "$bridge" >/dev/null 2>&1 || true
+    done
+}
+
 delete_ip6tables_bridge_rules() {
     if ! has_cmd ip6tables; then
         return
@@ -350,6 +487,8 @@ cleanup_clicd_networking() {
     delete_iptables_lines nat PREROUTING 'clicd-'
     delete_iptables_rule nat POSTROUTING -s 10.0.3.0/24 -o eth+ -j MASQUERADE
     delete_iptables_rule nat POSTROUTING -s 192.168.122.0/24 -o eth+ -j MASQUERADE
+    cleanup_clicd_ipv6_from_config
+    cleanup_clicd_ipv6_bridge_routes
 
     for bridge in lxcbr0 virbr0; do
         delete_filter_rule FORWARD -i "$bridge" -j ACCEPT
@@ -488,7 +627,7 @@ uninstall_clicd() {
     echo "====================================="
     echo "  已删除服务、二进制、SQLite/配置数据、CLICD LXC/KVM 实例、"
     echo "  CLICD 镜像缓存、防火墙规则、主机钩子、配额记录和临时文件。"
-    echo "  已保留 /root/clicd-backups 和 LXC 全局缓存，避免误删生产备份/共享镜像。"
+    echo "  已保留 /root/clicd-backups 和非 CLICD 的 LXC 全局缓存，避免误删生产备份/共享镜像。"
     echo "  日志：$LOG_FILE"
     echo "  问题反馈：$ISSUE_URL"
     echo "====================================="

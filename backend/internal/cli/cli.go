@@ -842,11 +842,130 @@ func removeKVMDomain(name string) {
 
 func cleanupCLICDNetworking() {
 	removeCLICDNATRules()
+	cleanupCLICDIPv6Runtime()
+	cleanupCLICDIPv6BridgeRoutes()
 	for _, bridge := range []string{"lxcbr0", "virbr0"} {
 		deleteFilterRule("FORWARD", "-i", bridge, "-j", "ACCEPT")
 		deleteFilterRule("FORWARD", "-o", bridge, "-j", "ACCEPT")
 		deleteFilterRule("FORWARD", "-i", bridge, "-o", bridge, "-j", "ACCEPT")
 		deleteIP6TablesBridgeRules(bridge)
+	}
+}
+
+func cleanupCLICDIPv6Runtime() {
+	if config.AppConfig == nil {
+		return
+	}
+	for _, c := range config.AppConfig.Containers {
+		cleanupCLICDContainerIPv6(c)
+	}
+}
+
+func cleanupCLICDContainerIPv6(c config.Container) {
+	bridge := "lxcbr0"
+	if c.IsKVM() {
+		bridge = "virbr0"
+	}
+	mac := strings.ToLower(strings.TrimSpace(c.MACAddress))
+	if mac != "" && bridge == "virbr0" {
+		deleteIP6FilterRule("FORWARD", "-i", bridge, "-m", "mac", "--mac-source", mac, "-j", "DROP")
+	}
+	if strings.TrimSpace(c.IPv6) == "" {
+		return
+	}
+
+	addr := strings.TrimSpace(c.IPv6)
+	if slash := strings.Index(addr, "/"); slash >= 0 {
+		addr = addr[:slash]
+	}
+	source := strings.TrimSpace(c.IPv6)
+	if !strings.Contains(source, "/") {
+		source += "/128"
+	}
+
+	deleteIP6NATSource(source)
+	deleteIP6FilterRule("FORWARD", "-i", bridge, "-s", source, "-j", "ACCEPT")
+	deleteIP6FilterRule("FORWARD", "-o", bridge, "-d", source, "-j", "ACCEPT")
+	if mac != "" && bridge == "virbr0" {
+		deleteIP6FilterRule("FORWARD", "-i", bridge, "-m", "mac", "--mac-source", mac, "-s", source, "-j", "ACCEPT")
+		deleteIP6FilterRule("FORWARD", "-i", bridge, "-m", "mac", "--mac-source", mac, "-j", "DROP")
+	}
+
+	runQuiet("ip", "-6", "route", "del", source, "dev", bridge)
+	if strings.TrimSpace(c.IPv6Interface) != "" {
+		runQuiet("ip", "-6", "neigh", "del", "proxy", addr, "dev", c.IPv6Interface)
+	}
+}
+
+func cleanupCLICDIPv6BridgeRoutes() {
+	if !commandExists("ip") {
+		return
+	}
+	for _, bridge := range []string{"lxcbr0", "virbr0"} {
+		out, err := exec.Command("ip", "-6", "route", "show", "dev", bridge).Output()
+		if err == nil {
+			for _, line := range strings.Split(string(out), "\n") {
+				fields := strings.Fields(line)
+				if len(fields) == 0 || !strings.HasSuffix(fields[0], "/128") {
+					continue
+				}
+				source := fields[0]
+				addr := strings.TrimSuffix(source, "/128")
+				deleteIP6NATSource(source)
+				deleteIP6FilterRule("FORWARD", "-i", bridge, "-s", source, "-j", "ACCEPT")
+				deleteIP6FilterRule("FORWARD", "-o", bridge, "-d", source, "-j", "ACCEPT")
+				removeProxyNDPForAddress(addr)
+				runQuiet("ip", "-6", "route", "del", source, "dev", bridge)
+			}
+		}
+		runQuiet("ip", "-6", "addr", "del", "fe80::1/64", "dev", bridge)
+	}
+}
+
+func removeProxyNDPForAddress(addr string) {
+	out, err := exec.Command("ip", "-6", "neigh", "show", "proxy").Output()
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || fields[0] != addr {
+			continue
+		}
+		for i := 0; i+1 < len(fields); i++ {
+			if fields[i] == "dev" {
+				runQuiet("ip", "-6", "neigh", "del", "proxy", addr, "dev", fields[i+1])
+			}
+		}
+	}
+}
+
+func deleteIP6NATSource(source string) {
+	if !commandExists("ip6tables") || strings.TrimSpace(source) == "" {
+		return
+	}
+	for {
+		out, err := exec.Command("ip6tables", "-t", "nat", "-S", "POSTROUTING").Output()
+		if err != nil {
+			return
+		}
+		deleted := false
+		for _, line := range strings.Split(string(out), "\n") {
+			if !strings.Contains(line, "-s "+source) || !strings.Contains(line, " -j MASQUERADE") {
+				continue
+			}
+			fields := strings.Fields(line)
+			if len(fields) == 0 || fields[0] != "-A" {
+				continue
+			}
+			fields[0] = "-D"
+			args := append([]string{"-t", "nat"}, fields...)
+			deleted = runCommandOK("ip6tables", args...)
+			break
+		}
+		if !deleted {
+			return
+		}
 	}
 }
 
@@ -876,6 +995,12 @@ func deleteNATRule(args ...string) {
 func deleteFilterRule(args ...string) {
 	fullArgs := append([]string{"-D"}, args...)
 	for runCommandOK("iptables", fullArgs...) {
+	}
+}
+
+func deleteIP6FilterRule(args ...string) {
+	fullArgs := append([]string{"-D"}, args...)
+	for runCommandOK("ip6tables", fullArgs...) {
 	}
 }
 
