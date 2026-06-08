@@ -354,8 +354,14 @@ remove_clicd_quota_records() {
 }
 
 remove_clicd_tmp_files() {
+    current_dir="$(pwd -P 2>/dev/null || pwd)"
     for path in /tmp/clicd-* /tmp/clicd.*; do
         [ -e "$path" ] || [ -L "$path" ] || continue
+        abs_path="$(cd "$(dirname "$path")" 2>/dev/null && pwd -P)/$(basename "$path")"
+        if [ "$abs_path" = "$current_dir" ]; then
+            log "跳过当前安装目录 $path，避免中断后续安装步骤。"
+            continue
+        fi
         rm -rf "$path"
         log "已删除 $path"
     done
@@ -674,17 +680,43 @@ EOF
     sysctl --system >/dev/null 2>&1 || true
 }
 
+systemd_unit_exists() {
+    unit="$1"
+    systemctl list-unit-files "$unit" >/dev/null 2>&1 || [ -e "/etc/systemd/system/$unit" ] || [ -e "/usr/lib/systemd/system/$unit" ] || [ -e "/lib/systemd/system/$unit" ]
+}
+
+systemd_enable_now_if_exists() {
+    unit="$1"
+    if systemd_unit_exists "$unit"; then
+        systemctl enable --now "$unit" >/dev/null 2>&1 || warn "服务 $unit 启动失败，将继续安装并在运行时降级处理。"
+        return
+    fi
+    log "未检测到 systemd 单元 $unit，跳过。"
+}
+
+systemd_existing_units() {
+    for unit in "$@"; do
+        if systemd_unit_exists "$unit"; then
+            printf ' %s' "$unit"
+        fi
+    done
+}
+
 setup_runtime_services() {
     log "正在配置 LXC 和 KVM 服务..."
 
     if is_systemd; then
-        systemctl enable --now lxcfs >/dev/null 2>&1 || true
-        systemctl enable --now lxc-net >/dev/null 2>&1 || true
-        systemctl enable --now lxc >/dev/null 2>&1 || true
-        systemctl enable --now libvirtd >/dev/null 2>&1 || true
-        systemctl enable --now virtqemud >/dev/null 2>&1 || true
-        systemctl enable --now virtqemud.socket >/dev/null 2>&1 || true
-        systemctl enable --now virtlogd.socket >/dev/null 2>&1 || true
+        systemd_enable_now_if_exists lxcfs.service
+        systemd_enable_now_if_exists lxc-net.service
+        systemd_enable_now_if_exists lxc.service
+        if systemd_unit_exists libvirtd.service; then
+            systemd_enable_now_if_exists libvirtd.service
+            log "检测到 libvirt 传统 libvirtd 服务，已使用 libvirtd 模式。"
+        else
+            systemd_enable_now_if_exists virtqemud.service
+            systemd_enable_now_if_exists virtqemud.socket
+        fi
+        systemd_enable_now_if_exists virtlogd.socket
         return
     fi
 
@@ -756,13 +788,26 @@ try_enable_project_quota() {
     root_src="$(findmnt -no SOURCE / 2>/dev/null || true)"
     root_fs="$(findmnt -no FSTYPE / 2>/dev/null || true)"
 
-    if [ "$root_fs" != "ext4" ] || [ -z "$root_src" ] || [ ! -b "$root_src" ]; then
-        warn "根文件系统 ${root_fs:-unknown} 不适合自动启用 project quota，将使用兼容模式。"
+    case "$root_fs" in
+        ext4)
+            ;;
+        xfs|btrfs|zfs|overlay|unknown|"")
+            log "根文件系统 ${root_fs:-unknown} 不需要/不适合自动启用 ext4 project quota，CLICD 将使用兼容磁盘限制模式。"
+            return
+            ;;
+        *)
+            log "根文件系统 ${root_fs:-unknown} 不在自动 project quota 支持范围，CLICD 将使用兼容磁盘限制模式。"
+            return
+            ;;
+    esac
+
+    if [ -z "$root_src" ] || [ ! -b "$root_src" ]; then
+        log "根分区来源 ${root_src:-unknown} 不是块设备，跳过 project quota 自动检查，CLICD 将使用兼容磁盘限制模式。"
         return
     fi
 
     if ! has_cmd tune2fs; then
-        warn "未找到 tune2fs，跳过 project quota 检查，将使用兼容模式。"
+        log "未找到 tune2fs，跳过 project quota 检查，CLICD 将使用兼容磁盘限制模式。"
         return
     fi
 
@@ -771,7 +816,7 @@ try_enable_project_quota() {
         return
     fi
 
-    warn "ext4 project quota 未启用，磁盘限制将回退到 loopback 镜像模式。"
+    log "ext4 project quota 未启用，CLICD 将自动回退到 loopback 镜像磁盘限制模式。"
 }
 
 download_release_if_needed() {
@@ -821,19 +866,23 @@ install_binary() {
 }
 
 install_systemd_service() {
-    cat > /etc/systemd/system/clicd.service << 'EOF'
+    libvirt_after="$(systemd_existing_units libvirtd.service virtqemud.service virtqemud.socket virtlogd.socket)"
+    libvirt_wants="$(systemd_existing_units libvirtd.service virtqemud.socket virtlogd.socket)"
+    lxc_after="$(systemd_existing_units lxc.service lxcfs.service lxc-net.service)"
+
+    cat > /etc/systemd/system/clicd.service << EOF
 [Unit]
 Description=CLICD - LXC/KVM Container Manager
-After=network-online.target lxc.service lxcfs.service libvirtd.service virtqemud.service virtqemud.socket virtlogd.socket
-Wants=network-online.target libvirtd.service virtqemud.socket virtlogd.socket
+After=network-online.target${lxc_after}${libvirt_after}
+Wants=network-online.target${libvirt_wants}
+StartLimitIntervalSec=60
+StartLimitBurst=10
 
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/clicd server
 Restart=always
 RestartSec=5
-StartLimitIntervalSec=60
-StartLimitBurst=10
 LimitNOFILE=1048576
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
