@@ -5,6 +5,7 @@ import {
   ChevronUp,
   Copy,
   Edit3,
+  Eye,
   Key,
   Plus,
   RefreshCw,
@@ -40,6 +41,20 @@ interface ApiKeyForm {
 }
 
 const BASE_URL = window.location.origin
+const SAMPLE_BASE_URL = 'https://panel.example.com'
+
+type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
+type EndpointTuple = [HttpMethod, string, string]
+
+interface EndpointDoc {
+  method: HttpMethod
+  path: string
+  desc: string
+  examplePath: string
+  body?: Record<string, unknown>
+  response: unknown
+  note?: string
+}
 
 const scopeGroups = [
   {
@@ -116,7 +131,7 @@ const defaultReadScopes = [
   'host:read',
 ]
 
-const endpointGroups = [
+const endpointGroups: Array<{ title: string; endpoints: EndpointTuple[] }> = [
   {
     title: '总览',
     endpoints: [
@@ -227,6 +242,8 @@ export default function ApiIntegration() {
   const [newKey, setNewKey] = useState('')
   const [copiedKey, setCopiedKey] = useState(false)
   const [showDocs, setShowDocs] = useState(true)
+  const [selectedEndpoint, setSelectedEndpoint] = useState<EndpointDoc | null>(null)
+  const [copiedDoc, setCopiedDoc] = useState(false)
 
   const containerNameByUUID = useMemo(() => {
     const map = new Map<string, string>()
@@ -320,6 +337,15 @@ export default function ApiIntegration() {
     if (copied) {
       setCopiedKey(true)
       setTimeout(() => setCopiedKey(false), 1600)
+    }
+  }
+
+  const copyDocCode = async () => {
+    if (!selectedEndpoint) return
+    const copied = await copyToClipboard(buildPythonExample(selectedEndpoint))
+    if (copied) {
+      setCopiedDoc(true)
+      setTimeout(() => setCopiedDoc(false), 1600)
     }
   }
 
@@ -483,10 +509,18 @@ export default function ApiIntegration() {
                 <h3 className="mb-2 text-sm font-semibold text-black">{group.title}</h3>
                 <div className="overflow-hidden rounded-lg border border-gray-200">
                   {group.endpoints.map(([method, path, desc]) => (
-                    <div key={`${method}-${path}`} className="grid gap-2 border-b border-gray-100 px-3 py-2 text-xs last:border-b-0 md:grid-cols-[72px_minmax(280px,1fr)_180px]">
+                    <div key={`${method}-${path}`} className="grid gap-2 border-b border-gray-100 px-3 py-2 text-xs last:border-b-0 md:grid-cols-[72px_minmax(220px,1fr)_180px_72px]">
                       <span className="w-fit rounded border border-blue-200 bg-blue-50 px-1.5 py-0.5 font-mono font-bold text-blue-700">{method}</span>
                       <code className="min-w-0 break-all font-mono text-gray-800">{path}</code>
                       <span className="text-gray-500">{desc}</span>
+                      <button
+                        onClick={() => setSelectedEndpoint(buildEndpointDoc(method, path, desc))}
+                        className="inline-flex w-fit items-center justify-center gap-1 rounded border border-gray-200 px-2 py-1 text-gray-600 hover:border-gray-300 hover:bg-gray-50 hover:text-black"
+                        title="查看使用范例"
+                      >
+                        <Eye className="h-3.5 w-3.5" />
+                        查看
+                      </button>
                     </div>
                   ))}
                 </div>
@@ -495,6 +529,58 @@ export default function ApiIntegration() {
           </div>
         )}
       </div>
+
+      {selectedEndpoint && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/50" onClick={() => setSelectedEndpoint(null)} />
+          <div className="relative flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-lg border border-gray-200 bg-white shadow-xl">
+            <div className="flex items-center justify-between gap-3 border-b border-gray-200 px-5 py-4">
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="rounded border border-blue-200 bg-blue-50 px-1.5 py-0.5 font-mono text-xs font-bold text-blue-700">
+                    {selectedEndpoint.method}
+                  </span>
+                  <code className="min-w-0 break-all font-mono text-sm text-gray-900">{selectedEndpoint.path}</code>
+                </div>
+                <p className="mt-1 text-xs text-gray-500">{selectedEndpoint.desc}</p>
+              </div>
+              <button onClick={() => setSelectedEndpoint(null)} className="shrink-0 rounded p-1 text-gray-400 hover:text-black" title="关闭">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-y-auto p-5">
+              <div className="grid gap-4 lg:grid-cols-2">
+                <section className="min-w-0">
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <h3 className="text-sm font-semibold text-black">Python 使用范例</h3>
+                    <button
+                      onClick={copyDocCode}
+                      className="inline-flex items-center gap-1 rounded border border-gray-200 px-2 py-1 text-xs text-gray-600 hover:bg-gray-50"
+                    >
+                      {copiedDoc ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                      {copiedDoc ? '已复制' : '复制'}
+                    </button>
+                  </div>
+                  <pre className="max-h-[52vh] overflow-auto rounded-lg bg-gray-900 p-4 text-xs text-gray-100">
+                    <code>{buildPythonExample(selectedEndpoint)}</code>
+                  </pre>
+                </section>
+
+                <section className="min-w-0">
+                  <h3 className="mb-2 text-sm font-semibold text-black">返回响应样例</h3>
+                  {selectedEndpoint.note && (
+                    <div className="mb-2 rounded border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-500">{selectedEndpoint.note}</div>
+                  )}
+                  <pre className="max-h-[52vh] overflow-auto rounded-lg bg-gray-900 p-4 text-xs text-gray-100">
+                    <code>{formatJSON(selectedEndpoint.response)}</code>
+                  </pre>
+                </section>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showForm && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -627,6 +713,383 @@ export default function ApiIntegration() {
       )}
     </div>
   )
+}
+
+const requestBodySamples: Record<string, Record<string, unknown>> = {
+  'POST /api/v1/containers/list': {},
+  'POST /api/v1/containers': {
+    name: 'demo-lxc-01',
+    virtualization: 'lxc',
+    template_id: 'debian-bookworm',
+    vcpu: 1,
+    ram_mb: 512,
+    disk_gb: 10,
+    network_bw_mbps: 0,
+    monthly_traffic_gb: 0,
+    traffic_mode: 'total',
+    traffic_in_gb: 0,
+    traffic_out_gb: 0,
+    io_speed_mbps: 0,
+    extra_ports: [8080],
+    port_mapping_count: 2,
+    snapshot_limit: 1,
+    assign_ipv6: true,
+    expires_at: '',
+  },
+  'POST /api/v1/containers/{id}/reinstall': { template_id: 'debian-bookworm' },
+  'PUT /api/v1/containers/{id}/traffic-limit': {
+    traffic_mode: 'total',
+    monthly_traffic_gb: 100,
+    traffic_in_gb: 0,
+    traffic_out_gb: 0,
+  },
+  'PUT /api/v1/containers/{id}/resource-limit': {
+    vcpu: 1,
+    ram_mb: 512,
+    io_speed_mbps: 0,
+    network_bw_mbps: 0,
+  },
+  'PUT /api/v1/containers/{id}/expiry': { expires_at: '2026-12-31 23:59:59' },
+  'POST /api/v1/containers/{id}/reset-password': { password: 'NewPass123456' },
+  'POST /api/v1/containers/{id}/port-mappings': {
+    container_port: 8080,
+    host_port: 61320,
+    protocol: 'tcp',
+    description: 'HTTP',
+  },
+  'PUT /api/v1/containers/{id}/port-mappings/{index}': {
+    container_port: 8081,
+    host_port: 61320,
+    protocol: 'tcp',
+    description: 'HTTP',
+  },
+  'POST /api/v1/containers/{id}/snapshots/schedule': {
+    enabled: true,
+    interval_hours: 24,
+    time: '03:00',
+  },
+  'PUT /api/v1/containers/{id}/snapshots/quota': { snapshot_limit: 2 },
+  'POST /api/v1/images/download': { template_id: 'debian-bookworm' },
+  'POST /api/v1/images/cancel': { template_id: 'debian-bookworm' },
+  'DELETE /api/v1/images/delete': { template_id: 'debian-bookworm' },
+  'PUT /api/v1/images/toggle': { template_id: 'debian-bookworm', enabled: true },
+  'POST /api/v1/security/check': { container_name: 'example-vm' },
+  'PUT /api/v1/security/settings': { auto_shutdown: false },
+  'POST /api/v1/swap': { action: 'resize', size_mb: 16384 },
+  'POST /api/v1/batch-create': {
+    containers: [
+      {
+        name: 'batch-lxc-01',
+        virtualization: 'lxc',
+        template_id: 'debian-bookworm',
+        vcpu: 1,
+        ram_mb: 512,
+        disk_gb: 10,
+        port_mapping_count: 2,
+        snapshot_limit: 1,
+        assign_ipv6: true,
+      },
+    ],
+  },
+  'POST /api/v1/batch-action': { action: 'restart', containers: [5], template_id: '' },
+  'POST /api/v1/ssh-ticket': { container_name: 'example-vm' },
+  'POST /api/v1/vnc-ticket': { container_name: 'kvm-demo' },
+  'POST /api/v1/sub-user/create': { container_name: 'example-vm' },
+  'POST /api/v1/sub-users/{id}/rotate-password': {},
+  'POST /api/v1/api-keys': {
+    name: 'Automation',
+    ip_whitelist: '',
+    scopes: ['dashboard:read', 'container:read'],
+    expires_at: '',
+    disabled: false,
+    container_uuids: [],
+  },
+  'PATCH /api/v1/api-keys/{id}': {
+    name: 'Automation',
+    ip_whitelist: '',
+    scopes: ['dashboard:read', 'container:read'],
+    expires_at: '',
+    disabled: false,
+    container_uuids: [],
+  },
+}
+
+const responseSamples: Record<string, unknown> = {
+  'GET /api/v1/dashboard': { success: true, data: { running: 31, stopped: 0, total_containers: 31 } },
+  'GET /api/v1/host-info': {
+    success: true,
+    data: {
+      cpu: { cores: 8, usage_pct: 1.16 },
+      ram: { total_mb: 31825, used_mb: 1275, free_mb: 30550 },
+      disk: { total_gb: 1750.49, used_gb: 123.98, free_gb: 1626.51 },
+      network: {
+        public_ipv4: '203.0.113.10',
+        public_ipv4_interface: 'eth0',
+        public_ipv6: '2001:db8:100::2',
+        public_ipv6_interface: 'eth0',
+      },
+      load: { load1: 0.01, load5: 0.03, load15: 0.01 },
+    },
+  },
+  'GET /api/v1/routing': {
+    success: true,
+    data: {
+      nat4: { used: 62, remaining: '45474', total: '45536' },
+      ipv6: { used: 31, remaining: 'large', total: 'large' },
+      nat4_mappings: [
+        { container_id: 5, container_name: 'example-vm', status: 'running', ip: '10.0.0.10', host_port: 22004, container_port: 22, protocol: 'tcp' },
+      ],
+      ipv6_assignments: [{ container_id: 5, container_name: 'example-vm', address: '2001:db8:100::1005', prefix_len: 64, interface: 'eth0' }],
+    },
+  },
+  'GET /api/v1/ipv6/status': {
+    success: true,
+    data: {
+      available: true,
+      reachable: true,
+      reason: 'usable public IPv6 prefix detected',
+      prefixes: [{ interface: 'eth0', address: '2001:db8:100::2', prefix: '2001:db8:100::/64', prefix_len: 64, gateway: '2001:db8:100::1' }],
+    },
+  },
+  'GET /api/v1/tasks': { success: true, data: [] },
+  'DELETE /api/v1/tasks/{task_id}': { success: true, message: 'Task deleted' },
+  'GET /api/v1/containers': {
+    success: true,
+    data: [
+      {
+        id: 5,
+        uuid: '00000000-0000-4000-8000-000000000005',
+        name: 'example-vm',
+        virtualization: 'lxc',
+        template: 'debian-bullseye',
+        vcpu: 1,
+        ram_mb: 512,
+        disk_gb: 10,
+        status: 'running',
+        ip: '10.0.0.10',
+        ipv6: '2001:db8:100::1005',
+        ssh_port: 22004,
+        ssh_password: '***',
+        port_mappings: [
+          { container_port: 22, host_port: 22004, protocol: 'tcp', description: 'SSH' },
+          { container_port: 20000, host_port: 20000, protocol: 'tcp', description: 'Port-20000' },
+        ],
+      },
+    ],
+  },
+  'POST /api/v1/containers/list': {
+    success: true,
+    data: [
+      { id: 5, uuid: '00000000-0000-4000-8000-000000000005', name: 'example-vm', status: 'running', ip: '10.0.0.10' },
+    ],
+  },
+  'POST /api/v1/containers': { success: true, message: 'Container created successfully' },
+  'GET /api/v1/containers/{id|uuid|name}': {
+    success: true,
+    data: {
+      id: 5,
+      uuid: '00000000-0000-4000-8000-000000000005',
+      name: 'example-vm',
+      status: 'running',
+      ip: '10.0.0.10',
+      ipv6: '2001:db8:100::1005',
+      ssh_port: 22004,
+      ssh_password: '***',
+      policy_blocked: false,
+    },
+  },
+  'POST /api/v1/containers/{id}/start': queuedTaskSample('start'),
+  'POST /api/v1/containers/{id}/stop': queuedTaskSample('stop'),
+  'POST /api/v1/containers/{id}/restart': queuedTaskSample('restart'),
+  'POST /api/v1/containers/{id}/reinstall': queuedTaskSample('reinstall'),
+  'DELETE /api/v1/containers/{id}/delete': queuedTaskSample('delete'),
+  'GET /api/v1/containers/{id}/usage': {
+    success: true,
+    data: {
+      cpu_usage_pct: 0,
+      cpu_usage_usec: 3908852,
+      memory_usage_bytes: 29331456,
+      disk_usage_bytes: 515100672,
+      network_rx_bytes: 131232,
+      network_tx_bytes: 16828,
+      load1: 0.1,
+      load5: 0.06,
+      load15: 0.01,
+    },
+  },
+  'GET /api/v1/containers/{id}/traffic': {
+    success: true,
+    data: {
+      mode: 'total',
+      limit_gb: 0,
+      in_limit_gb: 0,
+      out_limit_gb: 0,
+      total_used_bytes: 142082,
+      rx_used_bytes: 127212,
+      tx_used_bytes: 14870,
+      used_pct: 0,
+      reset_date: '2026-06',
+    },
+  },
+  'POST /api/v1/containers/{id}/traffic-reset': { success: true, message: 'Traffic reset' },
+  'PUT /api/v1/containers/{id}/traffic-limit': { success: true, message: 'Traffic limit updated' },
+  'PUT /api/v1/containers/{id}/resource-limit': { success: true, message: 'Resource limits updated' },
+  'PUT /api/v1/containers/{id}/expiry': { success: true, message: 'Expiry updated' },
+  'POST /api/v1/containers/{id}/reset-password': { success: true, message: 'SSH password reset successfully', data: { password: '***' } },
+  'POST /api/v1/containers/{id}/ipv6': { success: true, message: 'IPv6 assigned', data: { id: 5, name: 'example-vm', ipv6: '2001:db8:100::1005' } },
+  'GET /api/v1/containers/{id}/random-port': { success: true, data: { port: 61320 } },
+  'POST /api/v1/containers/{id}/port-mappings': {
+    success: true,
+    data: [
+      { container_port: 22, host_port: 22004, protocol: 'tcp', description: 'SSH' },
+      { container_port: 8080, host_port: 61320, protocol: 'tcp', description: 'HTTP' },
+    ],
+  },
+  'PUT /api/v1/containers/{id}/port-mappings/{index}': {
+    success: true,
+    data: [{ container_port: 8081, host_port: 61320, protocol: 'tcp', description: 'HTTP' }],
+  },
+  'DELETE /api/v1/containers/{id}/port-mappings/{index}': { success: true, data: [] },
+  'GET /api/v1/snapshots': { success: true, data: null },
+  'GET /api/v1/containers/{id}/snapshots': {
+    success: true,
+    data: { quota: 1, schedule: { enabled: false, interval_hours: 0, last_run: '', next_run: '', time: '', created_by: '' }, snapshots: [] },
+  },
+  'POST /api/v1/containers/{id}/snapshots': {
+    success: true,
+    data: { id: 'snap-20260608-001', container_id: 5, container_name: 'example-vm', created_at: '2026-06-08 16:00:00', created_by: 'api:Automation', scheduled: false, size_bytes: 10485760 },
+  },
+  'DELETE /api/v1/containers/{id}/snapshots/{snapshot_id}': { success: true, message: 'Snapshot deleted' },
+  'POST /api/v1/containers/{id}/snapshots/{snapshot_id}/restore': { success: true, message: 'Snapshot restored' },
+  'POST /api/v1/containers/{id}/snapshots/schedule': { success: true, data: { container: { id: 5, name: 'example-vm', snapshot_schedule_enabled: true, snapshot_schedule_interval_hours: 24, snapshot_schedule_time: '03:00' } } },
+  'PUT /api/v1/containers/{id}/snapshots/quota': { success: true, data: { quota: 2, container: { id: 5, name: 'example-vm', snapshot_limit: 2 } } },
+  'GET /api/v1/templates': {
+    success: true,
+    data: [
+      { id: 'ubuntu-noble', name: 'Ubuntu 24.04', distro: 'ubuntu', release: 'noble', arch: 'amd64', description: 'Ubuntu 24.04 LTS' },
+      { id: 'debian-bookworm', name: 'Debian 12', distro: 'debian', release: 'bookworm', arch: 'amd64', description: 'Debian 12 (Bookworm)' },
+    ],
+  },
+  'GET /api/v1/images': {
+    success: true,
+    data: [
+      { id: 'ubuntu-noble', name: 'Ubuntu 24.04', type: 'lxc', downloaded: true, enabled: true, downloading: false, progress: 0, size_bytes: 135005452 },
+    ],
+  },
+  'POST /api/v1/images/download': { success: true, message: 'Already downloaded' },
+  'POST /api/v1/images/cancel': { success: true, message: 'Cancel requested' },
+  'DELETE /api/v1/images/delete': { success: true, message: 'Deleted' },
+  'PUT /api/v1/images/toggle': { success: true, message: 'OK' },
+  'GET /api/v1/security/alerts': { success: true, data: [] },
+  'POST /api/v1/security/check': { success: true, message: 'Security check completed' },
+  'GET /api/v1/security/logs?container={name}': { success: true, data: [] },
+  'GET /api/v1/security/summary': { success: true, data: { critical: 0, high: 0, low: 0, medium: 0, total_alerts: 0 } },
+  'GET /api/v1/security/settings': { success: true, data: { auto_shutdown: false } },
+  'PUT /api/v1/security/settings': { success: true, data: { auto_shutdown: false } },
+  'GET /api/v1/swap': { success: true, data: { total_mb: 16383, used_mb: 0, free_mb: 16383, enabled: true, swap_file: '/swapfile' } },
+  'POST /api/v1/swap': { success: true, message: 'SWAP 已调整为 16384 MB', data: { total_mb: 16383, used_mb: 0, free_mb: 16383, enabled: true, swap_file: '/swapfile' } },
+  'POST /api/v1/batch-create': { success: true, data: ['task-12'] },
+  'POST /api/v1/batch-action': { success: true, data: ['task-13'] },
+  'POST /api/v1/ssh-ticket': { success: true, data: { ticket: '***60秒有效票据***' } },
+  'POST /api/v1/vnc-ticket': { success: true, data: { ticket: '***60秒有效票据***' } },
+  'POST /api/v1/sub-user/create': {
+    success: true,
+    message: 'Sub-user created',
+    data: { id: 'sub-xxxxxxxx', username: 'user-xxxxxxxx', password: '***', container_names: ['example-vm'], access_code: '********', created_at: '2026-06-08 16:00:00' },
+  },
+  'GET /api/v1/sub-users': { success: true, data: [] },
+  'POST /api/v1/sub-users/{id}/rotate-password': { success: true, data: { username: 'user-xxxxxxxx', password: '***', access_code: '********' } },
+  'GET /api/v1/sub-users/{id}/audit-logs': { success: true, data: [] },
+  'GET /api/v1/sub-users/{id}/login-logs': { success: true, data: [] },
+  'GET /api/v1/audit-logs': {
+    success: true,
+    data: [{ time: '2026-06-08 15:44:40', action: 'apikey.create', target: 'Test', detail: 'scopes=*', user: 'admin', success: true }],
+  },
+  'GET /api/v1/login-logs': {
+    success: true,
+    data: [{ time: '2026-06-08 08:24:00 UTC', username: 'admin', ip: '198.51.100.23', user_agent: 'Mozilla/5.0 ...', success: true }],
+  },
+  'GET /api/v1/api-keys': {
+    success: true,
+    data: [{ id: 'c271023f', name: 'Test', prefix: 'clicd_sk_dd9d...', ip_whitelist: '', created_at: '2026-06-08 15:44:40', last_used: '2026-06-08 15:46:10', scopes: ['*'], last_used_ip: '198.51.100.23' }],
+  },
+  'POST /api/v1/api-keys': {
+    success: true,
+    message: "API key created. Save this key now - it won't be shown again.",
+    data: { id: 'a1b2c3d4', name: 'Automation', key: 'clicd_sk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx', prefix: 'clicd_sk_xxxx...', scopes: ['dashboard:read', 'container:read'] },
+  },
+  'PATCH /api/v1/api-keys/{id}': { success: true, data: { id: 'a1b2c3d4', name: 'Automation', prefix: 'clicd_sk_xxxx...', scopes: ['dashboard:read', 'container:read'], disabled: false } },
+  'DELETE /api/v1/api-keys/{id}': { success: true, message: 'API key deleted' },
+}
+
+function queuedTaskSample(action: string) {
+  return {
+    success: true,
+    message: 'Task queued',
+    data: { task_id: 'task-10', container_name: 'example-vm', status: 'pending', action },
+  }
+}
+
+function buildEndpointDoc(method: HttpMethod, path: string, desc: string): EndpointDoc {
+  const key = `${method} ${path}`
+  return {
+    method,
+    path,
+    desc,
+    examplePath: examplePathFor(path),
+    body: requestBodySamples[key],
+    response: responseSamples[key] || defaultResponseFor(method),
+    note: endpointNoteFor(key),
+  }
+}
+
+function examplePathFor(path: string) {
+  return path
+    .replace('{id|uuid|name}', '5')
+    .replace('{id}', '5')
+    .replace('{task_id}', 'task-10')
+    .replace('{index}', '1')
+    .replace('{snapshot_id}', 'snap-20260608-001')
+    .replace('{name}', 'example-vm')
+}
+
+function endpointNoteFor(key: string) {
+  if (key.includes('/vnc-ticket')) return 'WebVNC 仅适用于 KVM 虚拟机；LXC 容器会返回 VNC console is only available for KVM VMs。'
+  if (key.includes('/containers/{id}/delete') || key.includes('/batch-action')) return '该接口会进入任务队列，请随后调用 GET /api/v1/tasks 查看执行状态。'
+  if (key.includes('/reset-password') || key.includes('/api-keys') || key.includes('/sub-user')) return '样例中的密钥、密码和票据已脱敏；创建类接口的完整密钥只在创建响应中出现一次。'
+  return ''
+}
+
+function defaultResponseFor(method: HttpMethod) {
+  if (method === 'GET') return { success: true, data: [] }
+  if (method === 'DELETE') return { success: true, message: 'Deleted' }
+  return { success: true, message: 'OK' }
+}
+
+function buildPythonExample(doc: EndpointDoc) {
+  const hasBody = doc.body !== undefined && doc.method !== 'GET'
+  const bodyJSON = hasBody ? formatJSON(doc.body) : ''
+  return [
+    'import json',
+    'import requests',
+    '',
+    `BASE_URL = "${SAMPLE_BASE_URL}"`,
+    'API_KEY = "clicd_sk_xxxx"',
+    '',
+    ...(hasBody ? [`payload = json.loads(r'''${bodyJSON}''')`, ''] : []),
+    `response = requests.${doc.method.toLowerCase()}(`,
+    `    f"{BASE_URL}${doc.examplePath}",`,
+    '    headers={"X-API-Key": API_KEY},',
+    ...(hasBody ? ['    json=payload,'] : []),
+    '    timeout=30,',
+    ')',
+    'response.raise_for_status()',
+    'print(response.json())',
+  ].join('\n')
+}
+
+function formatJSON(value: unknown) {
+  return JSON.stringify(value, null, 2)
 }
 
 function ScopeSummary({ scopes }: { scopes: string[] }) {
