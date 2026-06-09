@@ -5,14 +5,35 @@
 <h1 align="center">CLICD</h1>
 
 <p align="center">
+  <img alt="Release" src="https://img.shields.io/github/v/release/MengMengCode/CLICD?style=flat-square">
+  <img alt="Stars" src="https://img.shields.io/github/stars/MengMengCode/CLICD?style=flat-square">
+  <img alt="Forks" src="https://img.shields.io/github/forks/MengMengCode/CLICD?style=flat-square">
+  <img alt="Downloads" src="https://img.shields.io/github/downloads/MengMengCode/CLICD/total?style=flat-square">
+  <img alt="Last Commit" src="https://img.shields.io/github/last-commit/MengMengCode/CLICD?style=flat-square">
+  <img alt="License" src="https://img.shields.io/github/license/MengMengCode/CLICD.svg?style=flat-square">
+</p>
+
+<p align="center">
   <img alt="Go" src="https://img.shields.io/badge/Go-1.22-00ADD8?style=flat-square&logo=go&logoColor=white">
   <img alt="React" src="https://img.shields.io/badge/React-18-61DAFB?style=flat-square&logo=react&logoColor=111111">
   <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-5-3178C6?style=flat-square&logo=typescript&logoColor=white">
   <img alt="Vite" src="https://img.shields.io/badge/Vite-5-646CFF?style=flat-square&logo=vite&logoColor=white">
   <img alt="Tailwind CSS" src="https://img.shields.io/badge/Tailwind_CSS-3-06B6D4?style=flat-square&logo=tailwindcss&logoColor=white">
-  <img alt="LXC" src="https://img.shields.io/badge/LXC-container-111111?style=flat-square">
-  <img alt="KVM" src="https://img.shields.io/badge/KVM-virtualization-EE0000?style=flat-square&logo=linux&logoColor=white">
-  <img alt="Let's Encrypt" src="https://img.shields.io/badge/Let's_Encrypt-TLS%2FSSL-003A70?style=flat-square&logo=letsencrypt&logoColor=white">
+  <img alt="LXC" src="https://img.shields.io/badge/LXC-Supported-111111?style=flat-square">
+  <img alt="KVM" src="https://img.shields.io/badge/KVM-Supported-EE0000?style=flat-square">
+</p>
+
+<p align="center">
+  <img alt="WebSSH" src="https://img.shields.io/badge/WebSSH-Built--in-009688?style=flat-square">
+  <img alt="VNC" src="https://img.shields.io/badge/VNC-Supported-7B1FA2?style=flat-square">
+  <img alt="IPv6" src="https://img.shields.io/badge/IPv6-Native-1976D2?style=flat-square">
+  <img alt="NAT" src="https://img.shields.io/badge/NAT-Port_Forwarding-FF9800?style=flat-square">
+  <img alt="REST API" src="https://img.shields.io/badge/API-REST-4CAF50?style=flat-square">
+  <img alt="Multi User" src="https://img.shields.io/badge/Multi_User-Supported-8E24AA?style=flat-square">
+  <img alt="Traffic Control" src="https://img.shields.io/badge/Traffic-Control-795548?style=flat-square">
+  <img alt="Security Alert" src="https://img.shields.io/badge/Security-Alert-orange?style=flat-square">
+  <img alt="CLI" src="https://img.shields.io/badge/CLI-Mode-424242?style=flat-square">
+  <img alt="TLS" src="https://img.shields.io/badge/TLS-Let's_Encrypt-003A70?style=flat-square&logo=letsencrypt&logoColor=white">
 </p>
 
 CLICD is a lightweight virtualization management panel for LXC and KVM, featuring a web console, CLI management, batch operations, image management, NAT networking, IPv6 allocation, WebSSH, VNC access, resource controls, bandwidth limiting, and security alerting.
