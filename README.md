@@ -12,6 +12,7 @@
   <img alt="Tailwind CSS" src="https://img.shields.io/badge/Tailwind_CSS-3-06B6D4?style=flat-square&logo=tailwindcss&logoColor=white">
   <img alt="LXC" src="https://img.shields.io/badge/LXC-container-111111?style=flat-square">
   <img alt="KVM" src="https://img.shields.io/badge/KVM-virtualization-EE0000?style=flat-square&logo=linux&logoColor=white">
+  <img alt="Let's Encrypt" src="https://img.shields.io/badge/Let's_Encrypt-TLS%2FSSL-003A70?style=flat-square&logo=letsencrypt&logoColor=white">
 </p>
 
 CLICD 是一个面向 LXC/KVM 的轻量虚拟化管理面板，提供 Web 控制台、CLI、批量任务、镜像管理、NAT 端口、IPv6 分配、WebSSH、VNC、资源限制、流量限制和安全告警能力。它适合用来管理小型 VPS 上的 LXC 容器和 KVM 虚拟机，也适合需要批量创建和分发子用户管理链接的场景。
