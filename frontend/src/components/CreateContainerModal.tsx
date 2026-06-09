@@ -511,44 +511,46 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
             </Field>
           </div>
 
-          {/* Traffic control */}
-          <div>
-            <div className="flex items-center gap-3 mb-2">
-              <label className="text-sm font-medium text-gray-700">月流量</label>
-              <select
-                value={form.traffic_mode}
-                onChange={(e) => setForm({ ...form, traffic_mode: e.target.value })}
-                className="h-8 px-2 border border-gray-300 rounded text-xs text-gray-600 bg-white"
-              >
-                <option value="total">双向统计</option>
-                <option value="in_out">入/出分离</option>
-              </select>
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            {/* Traffic control */}
+            <div>
+              <div className="flex items-center gap-3 mb-2">
+                <label className="text-sm font-medium text-gray-700">月流量</label>
+                <select
+                  value={form.traffic_mode}
+                  onChange={(e) => setForm({ ...form, traffic_mode: e.target.value })}
+                  className="h-8 px-2 border border-gray-300 rounded text-xs text-gray-600 bg-white"
+                >
+                  <option value="total">双向统计</option>
+                  <option value="in_out">入/出分离</option>
+                </select>
+              </div>
+              {form.traffic_mode === 'total' ? (
+                <div className="flex items-center gap-2">
+                  <NumberInput value={form.monthly_traffic_gb} min={0} onChange={(value) => setForm({ ...form, monthly_traffic_gb: value })} />
+                  <span className="text-xs text-gray-400">GB (0=不限制)</span>
+                </div>
+              ) : (
+                <div className="grid grid-cols-2 gap-3">
+                  <Field label="入站 (GB)">
+                    <NumberInput value={form.traffic_in_gb} min={0} onChange={(value) => setForm({ ...form, traffic_in_gb: value || 0 })} />
+                  </Field>
+                  <Field label="出站 (GB)">
+                    <NumberInput value={form.traffic_out_gb} min={0} onChange={(value) => setForm({ ...form, traffic_out_gb: value || 0 })} />
+                  </Field>
+                </div>
+              )}
             </div>
-            {form.traffic_mode === 'total' ? (
-              <div className="flex items-center gap-2">
-                <NumberInput value={form.monthly_traffic_gb} min={0} onChange={(value) => setForm({ ...form, monthly_traffic_gb: value })} />
-                <span className="text-xs text-gray-400">GB (0=不限制)</span>
-              </div>
-            ) : (
-              <div className="grid grid-cols-2 gap-3">
-                <Field label="入站 (GB)">
-                  <NumberInput value={form.traffic_in_gb} min={0} onChange={(value) => setForm({ ...form, traffic_in_gb: value || 0 })} />
-                </Field>
-                <Field label="出站 (GB)">
-                  <NumberInput value={form.traffic_out_gb} min={0} onChange={(value) => setForm({ ...form, traffic_out_gb: value || 0 })} />
-                </Field>
-              </div>
-            )}
-          </div>
 
-          <Field label="子用户快照上限">
-            <NumberInput
-              value={form.snapshot_limit}
-              min={1}
-              max={999}
-              onChange={(value) => setForm({ ...form, snapshot_limit: Math.max(1, Math.round(value || 1)) })}
-            />
-          </Field>
+            <Field label="子用户快照上限">
+              <NumberInput
+                value={form.snapshot_limit}
+                min={1}
+                max={999}
+                onChange={(value) => setForm({ ...form, snapshot_limit: Math.max(1, Math.round(value || 1)) })}
+              />
+            </Field>
+          </div>
 
           <Field label="到期时间">
             <div className="relative">
