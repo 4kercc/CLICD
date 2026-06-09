@@ -6,7 +6,7 @@ on:
       - main
       - master
     tags:
-      - "v*"
+      - 'v*'
   pull_request:
   workflow_dispatch:
 
@@ -25,31 +25,39 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: 20
           cache: npm
-          cache-dependency-path: frontend/package-lock.json
+          cache-dependency-path: |
+            frontend/package-lock.json
+            docs/package-lock.json
 
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.22.x"
+          go-version: '1.24.5'
           cache-dependency-path: backend/go.sum
 
+      - name: Install frontend dependencies
+        run: npm ci --prefix frontend
+
+      - name: Install docs dependencies
+        run: npm ci --prefix docs
+
+      - name: Build docs
+        run: npm run build --prefix docs
+
       - name: Set version from tag
-        shell: bash
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            echo "CLICD_VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_ENV
+            echo "CLICD_VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_ENV"
           else
-            echo "CLICD_VERSION=dev" >> $GITHUB_ENV
+            echo "CLICD_VERSION=dev" >> "$GITHUB_ENV"
           fi
 
-      - name: Build
-        shell: bash
+      - name: Build CLICD
         run: bash build.sh
 
-      - name: Package
-        shell: bash
+      - name: Package CLICD
         run: |
           mkdir -p dist package/clicd-linux-amd64
           cp build/clicd package/clicd-linux-amd64/clicd
@@ -57,7 +65,24 @@ jobs:
           chmod +x package/clicd-linux-amd64/clicd package/clicd-linux-amd64/install.sh
           tar -C package -czf dist/clicd-linux-amd64.tar.gz clicd-linux-amd64
           cp build/clicd dist/clicd-linux-amd64
-          sha256sum dist/* > dist/SHA256SUMS
+
+      - name: Package Mofang module
+        run: |
+          if [ ! -f Mofang/clicd.php ]; then
+            echo "Mofang module not present; skipping package."
+            exit 0
+          fi
+
+          if ! command -v zip >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y zip
+          fi
+
+          cd Mofang
+          zip -r ../dist/clicd-mofang.zip clicd.php handlers templates -x '*.DS_Store' -x '*/.DS_Store'
+
+      - name: Generate checksums
+        run: sha256sum dist/* > dist/SHA256SUMS
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -69,7 +94,6 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
-        shell: bash
         run: |
           gh release create "$GITHUB_REF_NAME" dist/* --generate-notes || \
           gh release upload "$GITHUB_REF_NAME" dist/* --clobber
