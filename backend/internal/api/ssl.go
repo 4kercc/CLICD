@@ -17,7 +17,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -92,10 +91,12 @@ func updateSSLSettings(w http.ResponseWriter, r *http.Request) {
 	if target == "" {
 		target = detectedRequestHost(r)
 	}
-	if target == "" {
-		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "SSL target is required"})
+	normalizedTarget, err := config.NormalizeSSLCertificateTarget(target)
+	if err != nil {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: err.Error()})
 		return
 	}
+	target = normalizedTarget
 
 	next, err := resolveSSLModeCertificate(mode, target, strings.TrimSpace(req.Email), req.CertPEM, req.KeyPEM)
 	if err != nil {
@@ -220,12 +221,10 @@ func saveUploadedCertificate(certPEM, keyPEM string) (string, string, error) {
 	if _, err := tls.X509KeyPair([]byte(certPEM), []byte(keyPEM)); err != nil {
 		return "", "", fmt.Errorf("certificate/private key mismatch: %v", err)
 	}
-	dir := sslStorageDir()
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	certPath, keyPath, err := config.UploadedSSLPaths()
+	if err != nil {
 		return "", "", err
 	}
-	certPath := filepath.Join(dir, "uploaded-fullchain.pem")
-	keyPath := filepath.Join(dir, "uploaded-privkey.pem")
 	if err := os.WriteFile(certPath, []byte(certPEM+"\n"), 0600); err != nil {
 		return "", "", err
 	}
@@ -237,9 +236,11 @@ func saveUploadedCertificate(certPEM, keyPEM string) (string, string, error) {
 
 func generateSelfSignedCertificate(target string) (string, string, error) {
 	target = strings.TrimSpace(target)
-	if target == "" {
-		return "", "", fmt.Errorf("self-signed certificate target is required")
+	normalizedTarget, err := config.NormalizeSSLCertificateTarget(target)
+	if err != nil {
+		return "", "", err
 	}
+	target = normalizedTarget
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return "", "", err
@@ -273,12 +274,10 @@ func generateSelfSignedCertificate(target string) (string, string, error) {
 	if err != nil {
 		return "", "", err
 	}
-	dir := sslStorageDir()
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	certPath, keyPath, err := config.SelfSignedSSLPaths()
+	if err != nil {
 		return "", "", err
 	}
-	certPath := filepath.Join(dir, "self-signed-fullchain.pem")
-	keyPath := filepath.Join(dir, "self-signed-privkey.pem")
 	certOut := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 	keyOut := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 	if err := os.WriteFile(certPath, certOut, 0600); err != nil {
@@ -295,9 +294,11 @@ func requestLetsEncryptCertificate(target, email string) (string, string, error)
 		return "", "", fmt.Errorf("certbot is not installed on this server")
 	}
 	target = strings.TrimSpace(target)
-	if target == "" {
-		return "", "", fmt.Errorf("Let's Encrypt target is required")
+	normalizedTarget, err := config.NormalizeSSLCertificateTarget(target)
+	if err != nil {
+		return "", "", err
 	}
+	target = normalizedTarget
 	args := []string{"certonly", "--non-interactive", "--agree-tos", "--standalone"}
 	if email != "" {
 		args = append(args, "--email", email)
@@ -317,12 +318,14 @@ func requestLetsEncryptCertificate(target, email string) (string, string, error)
 	if err != nil {
 		return "", "", fmt.Errorf("Let's Encrypt request failed: %s", strings.TrimSpace(string(output)))
 	}
-	certPath := filepath.Join("/etc/letsencrypt/live", target, "fullchain.pem")
-	keyPath := filepath.Join("/etc/letsencrypt/live", target, "privkey.pem")
-	if _, err := os.Stat(certPath); err != nil {
+	certPath, keyPath, err := config.LetsEncryptSSLPaths(target)
+	if err != nil {
+		return "", "", err
+	}
+	if _, err := config.ReadableFileStat(certPath); err != nil {
 		return "", "", fmt.Errorf("Let's Encrypt certificate file not found after issuance: %s", certPath)
 	}
-	if _, err := os.Stat(keyPath); err != nil {
+	if _, err := config.ReadableFileStat(keyPath); err != nil {
 		return "", "", fmt.Errorf("Let's Encrypt private key file not found after issuance: %s", keyPath)
 	}
 	return certPath, keyPath, nil
@@ -347,11 +350,19 @@ func ensureCertbotSupportsIPCertificates() error {
 }
 
 func validateCertificatePair(certPath, keyPath string) error {
-	certPEM, err := os.ReadFile(certPath)
+	safeCertPath, err := config.ResolveSSLPath(certPath)
 	if err != nil {
 		return err
 	}
-	keyPEM, err := os.ReadFile(keyPath)
+	safeKeyPath, err := config.ResolveSSLPath(keyPath)
+	if err != nil {
+		return err
+	}
+	certPEM, err := os.ReadFile(safeCertPath)
+	if err != nil {
+		return err
+	}
+	keyPEM, err := os.ReadFile(safeKeyPath)
 	if err != nil {
 		return err
 	}
@@ -443,7 +454,11 @@ func readLeafCertificate(certPath string) (*x509.Certificate, error) {
 	if certPath == "" {
 		return nil, errors.New("certificate path is empty")
 	}
-	data, err := os.ReadFile(certPath)
+	safeCertPath, err := config.ResolveSSLPath(certPath)
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(safeCertPath)
 	if err != nil {
 		return nil, err
 	}
@@ -492,14 +507,6 @@ func firstPublicInterfaceIP() string {
 		return ip.String()
 	}
 	return ""
-}
-
-func sslStorageDir() string {
-	dataDir := config.AppConfig.DataDir
-	if dataDir == "" {
-		dataDir = "/root/.clicd"
-	}
-	return filepath.Join(dataDir, "ssl")
 }
 
 func maskExistingPath(path string) string {

@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 
 	"clicd/internal/api"
@@ -213,11 +212,26 @@ func Run() error {
 	}
 
 	if sslEnabled() {
+		certPath, keyPath, err := config.ResolveSSLConfigPaths(config.AppConfig.SSL)
+		if err != nil {
+			return err
+		}
 		server.TLSConfig = &tls.Config{
 			MinVersion: tls.VersionTLS12,
 			GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
-				cert, err := tls.LoadX509KeyPair(config.AppConfig.SSL.CertPath, config.AppConfig.SSL.KeyPath)
-				return &cert, err
+				safeCertPath, err := config.ResolveSSLPath(certPath)
+				if err != nil {
+					return nil, err
+				}
+				safeKeyPath, err := config.ResolveSSLPath(keyPath)
+				if err != nil {
+					return nil, err
+				}
+				cert, err := tls.LoadX509KeyPair(safeCertPath, safeKeyPath)
+				if err != nil {
+					return nil, err
+				}
+				return &cert, nil
 			},
 		}
 		log.Printf("CLICD Web Server SSL enabled on https://0.0.0.0:%d", config.AppConfig.Port)
@@ -229,14 +243,29 @@ func Run() error {
 
 func sslEnabled() bool {
 	ssl := config.AppConfig.SSL
-	if !ssl.Enabled || ssl.CertPath == "" || ssl.KeyPath == "" {
+	if !ssl.Enabled {
 		return false
 	}
-	if _, err := os.Stat(ssl.CertPath); err != nil {
+	certPath, keyPath, err := config.ResolveSSLConfigPaths(ssl)
+	if err != nil {
+		log.Printf("SSL paths are invalid, falling back to HTTP: %v", err)
+		return false
+	}
+	safeCertPath, err := config.ResolveSSLPath(certPath)
+	if err != nil {
+		log.Printf("SSL certificate path is not allowed, falling back to HTTP: %v", err)
+		return false
+	}
+	safeKeyPath, err := config.ResolveSSLPath(keyPath)
+	if err != nil {
+		log.Printf("SSL private key path is not allowed, falling back to HTTP: %v", err)
+		return false
+	}
+	if _, err := config.ReadableFileStat(safeCertPath); err != nil {
 		log.Printf("SSL certificate is not readable, falling back to HTTP: %v", err)
 		return false
 	}
-	if _, err := os.Stat(ssl.KeyPath); err != nil {
+	if _, err := config.ReadableFileStat(safeKeyPath); err != nil {
 		log.Printf("SSL private key is not readable, falling back to HTTP: %v", err)
 		return false
 	}
