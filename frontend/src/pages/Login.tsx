@@ -106,7 +106,7 @@ export default function Login() {
           </form>
         </div>
 
-        <p className="text-center text-xs text-gray-400 mt-6">CLICD v1.1.7</p>
+        <p className="text-center text-xs text-gray-400 mt-6">CLICD v1.1.8</p>
       </div>
     </div>
   )
