@@ -2385,7 +2385,8 @@ func runKVMSSHScript(client *ssh.Client, script string, description string, time
 	var output []byte
 	go func() {
 		var err error
-		output, err = session.CombinedOutput(script)
+		session.Stdin = strings.NewReader(script)
+		output, err = session.CombinedOutput("sh -s")
 		done <- err
 	}()
 	select {
@@ -3437,11 +3438,10 @@ func (m *Manager) allocateIPv6ForContainer(id int) (string, int, string, error) 
 }
 
 func (m *Manager) allocateIPv6AssignmentsForContainer(id int, requested []string, count int, auto bool) ([]config.IPv6Assignment, error) {
-	if count <= 0 {
-		count = 1
-	}
-	if len(requested) > count {
-		count = len(requested)
+	var err error
+	count, err = lxc.NormalizePublicIPAllocationCount(requested, count)
+	if err != nil {
+		return nil, err
 	}
 	prefixes := lxc.DetectPublicIPv6Prefixes()
 	if len(prefixes) == 0 {
@@ -3483,7 +3483,7 @@ func (m *Manager) allocateIPv6AssignmentsForContainer(id int, requested []string
 			}
 		}
 	}
-	result := make([]config.IPv6Assignment, 0, count)
+	result := []config.IPv6Assignment{}
 	selected := map[string]bool{}
 	for _, raw := range requested {
 		raw = strings.TrimSpace(raw)

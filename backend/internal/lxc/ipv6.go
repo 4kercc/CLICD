@@ -18,6 +18,7 @@ import (
 )
 
 const ipv6GatewayLinkLocal = "fe80::1"
+const MaxPublicIPAssignments = 64
 
 type IPv6PrefixInfo struct {
 	Interface string `json:"interface"`
@@ -836,11 +837,10 @@ func detectPublicIPv4LocalAddresses() []PublicIPInfo {
 }
 
 func AllocatePublicIPv4Assignments(id int, requested []string, count int, auto bool) ([]config.PublicIPv4Assignment, error) {
-	if count <= 0 {
-		count = 1
-	}
-	if len(requested) > count {
-		count = len(requested)
+	var err error
+	count, err = NormalizePublicIPAllocationCount(requested, count)
+	if err != nil {
+		return nil, err
 	}
 	candidates := DetectPublicIPv4Candidates()
 	if len(candidates) == 0 {
@@ -866,7 +866,7 @@ func AllocatePublicIPv4Assignments(id int, requested []string, count int, auto b
 		}
 	}
 
-	result := make([]config.PublicIPv4Assignment, 0, count)
+	result := []config.PublicIPv4Assignment{}
 	selected := map[string]bool{}
 	for _, raw := range requested {
 		raw = strings.TrimSpace(raw)
@@ -914,6 +914,22 @@ func AllocatePublicIPv4Assignments(id int, requested []string, count int, auto b
 		return nil, fmt.Errorf("only %d free public IPv4 address(es) are available; %d requested", len(result), count)
 	}
 	return result, nil
+}
+
+func NormalizePublicIPAllocationCount(requested []string, count int) (int, error) {
+	if len(requested) > MaxPublicIPAssignments {
+		return 0, fmt.Errorf("IP address count cannot exceed %d", MaxPublicIPAssignments)
+	}
+	if count <= 0 {
+		count = 1
+	}
+	if len(requested) > count {
+		count = len(requested)
+	}
+	if count > MaxPublicIPAssignments {
+		return 0, fmt.Errorf("IP address count cannot exceed %d", MaxPublicIPAssignments)
+	}
+	return count, nil
 }
 
 func EnsureAssignedPublicIPv4s(assignments []config.PublicIPv4Assignment) {
@@ -1210,11 +1226,35 @@ func isTunnelLikeInterface(iface string) bool {
 }
 
 func operState(iface string) string {
-	data, err := os.ReadFile("/sys/class/net/" + iface + "/operstate")
+	path, err := safeSysClassNetFile(iface, "operstate")
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return ""
 	}
 	return strings.TrimSpace(string(data))
+}
+
+func safeSysClassNetFile(iface string, filename string) (string, error) {
+	iface = strings.TrimSpace(iface)
+	filename = strings.TrimSpace(filename)
+	if iface == "" || filename == "" || len(iface) > 64 || len(filename) > 64 {
+		return "", fmt.Errorf("invalid sysfs network path")
+	}
+	if iface == "." || iface == ".." || filename == "." || filename == ".." {
+		return "", fmt.Errorf("invalid sysfs network path")
+	}
+	if strings.ContainsAny(iface, "/\\\x00") || strings.ContainsAny(filename, "/\\\x00") {
+		return "", fmt.Errorf("invalid sysfs network path")
+	}
+	base := filepath.Clean("/sys/class/net")
+	path := filepath.Clean(filepath.Join(base, iface, filename))
+	if !strings.HasPrefix(path, base+string(os.PathSeparator)) {
+		return "", fmt.Errorf("invalid sysfs network path")
+	}
+	return path, nil
 }
 
 func isPublicIPv4(addr netip.Addr) bool {
@@ -1289,11 +1329,10 @@ func (m *Manager) allocateIPv6ForContainer(id int) (string, int, string, error) 
 }
 
 func (m *Manager) allocateIPv6AssignmentsForContainer(id int, requested []string, count int, auto bool) ([]config.IPv6Assignment, error) {
-	if count <= 0 {
-		count = 1
-	}
-	if len(requested) > count {
-		count = len(requested)
+	var err error
+	count, err = NormalizePublicIPAllocationCount(requested, count)
+	if err != nil {
+		return nil, err
 	}
 	status := m.DetectIPv6Status()
 	if !status.Available {
@@ -1336,7 +1375,7 @@ func (m *Manager) allocateIPv6AssignmentsForContainer(id int, requested []string
 		}
 	}
 
-	result := make([]config.IPv6Assignment, 0, count)
+	result := []config.IPv6Assignment{}
 	selected := map[string]bool{}
 	for _, raw := range requested {
 		raw = strings.TrimSpace(raw)
