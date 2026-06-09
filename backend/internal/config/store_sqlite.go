@@ -373,6 +373,7 @@ func loadConfigFromDB() (*ClicdConfig, bool, error) {
 		NextSSHPort:          atoi(meta["next_ssh_port"]),
 		SetupComplete:        atob(meta["setup_complete"]),
 		SecurityAutoShutdown: atob(meta["security_auto_shutdown"]),
+		Language:             meta["language"],
 	}
 	if raw := strings.TrimSpace(meta["ssl"]); raw != "" {
 		_ = json.Unmarshal([]byte(raw), &cfg.SSL)
@@ -485,6 +486,7 @@ func saveMeta(tx *sql.Tx) error {
 		"next_ssh_port":          strconv.Itoa(AppConfig.NextSSHPort),
 		"setup_complete":         btoa(AppConfig.SetupComplete),
 		"security_auto_shutdown": btoa(AppConfig.SecurityAutoShutdown),
+		"language":               NormalizeLanguage(AppConfig.Language),
 		"ssl":                    string(sslJSON),
 		"ssl_certificates":       string(sslCertificatesJSON),
 		"schema_version":         "1",

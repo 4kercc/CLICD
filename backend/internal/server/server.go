@@ -72,6 +72,7 @@ func isLoopbackHost(host string) bool {
 func setupRoutes(mux *http.ServeMux) {
 	// API routes
 	mux.HandleFunc("/api/login", corsMiddleware(api.HandleLogin))
+	mux.HandleFunc("/api/language", corsMiddleware(api.HandleLanguage))
 	mux.HandleFunc("/api/check-auth", corsMiddleware(api.AuthMiddleware(api.HandleCheckAuth)))
 	mux.HandleFunc("/api/change-password", corsMiddleware(api.AdminMiddleware(api.HandleAdminPasswordChange)))
 	mux.HandleFunc("/api/change-username", corsMiddleware(api.AdminMiddleware(api.HandleAdminUsernameChange)))
@@ -119,6 +120,7 @@ func setupRoutes(mux *http.ServeMux) {
 
 	// Versioned external API routes
 	mux.HandleFunc("/api/v1/dashboard", corsMiddleware(api.AuthMiddleware(api.HandleDashboard)))
+	mux.HandleFunc("/api/v1/language", corsMiddleware(api.HandleLanguage))
 	mux.HandleFunc("/api/v1/containers", corsMiddleware(api.AuthMiddleware(api.SubUserMiddleware(api.HandleContainers))))
 	mux.HandleFunc("/api/v1/containers/list", corsMiddleware(api.AuthMiddleware(api.SubUserMiddleware(api.HandleContainerListAlias))))
 	mux.HandleFunc("/api/v1/containers/", corsMiddleware(api.AuthMiddleware(api.SubUserMiddleware(api.HandleSingleContainer))))

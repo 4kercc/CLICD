@@ -4,6 +4,7 @@ import { BrowserRouter } from 'react-router-dom'
 import App from './App'
 import { AuthProvider } from './contexts/AuthContext'
 import { ThemeProvider } from './contexts/ThemeContext'
+import { LanguageProvider } from './contexts/LanguageContext'
 import { DialogProvider } from './components/Dialog'
 import './index.css'
 
@@ -11,11 +12,13 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <BrowserRouter>
       <ThemeProvider>
-        <AuthProvider>
-          <DialogProvider>
-            <App />
-          </DialogProvider>
-        </AuthProvider>
+        <LanguageProvider>
+          <AuthProvider>
+            <DialogProvider>
+              <App />
+            </DialogProvider>
+          </AuthProvider>
+        </LanguageProvider>
       </ThemeProvider>
     </BrowserRouter>
   </React.StrictMode>,

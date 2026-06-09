@@ -714,6 +714,15 @@ export const createWebSSHTicket = (containerName: string) =>
 export const createVNCTicket = (containerName: string) =>
   api.post<APIResponse<{ ticket: string }>>('/vnc-ticket', { container_name: containerName })
 
+// Language
+export type PanelLanguage = 'zh' | 'en'
+
+export const getLanguage = () =>
+  api.get<APIResponse<{ language: PanelLanguage }>>('/language')
+
+export const updateLanguage = (language: PanelLanguage) =>
+  api.post<APIResponse<{ language: PanelLanguage }>>('/language', { language })
+
 // Version
 export const getVersion = () =>
   api.get<APIResponse<{ version: string }>>('/version')

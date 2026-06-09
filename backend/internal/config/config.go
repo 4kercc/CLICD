@@ -243,6 +243,7 @@ type ClicdConfig struct {
 	EnabledImages        []string             `json:"enabled_images"`
 	Snapshots            []Snapshot           `json:"snapshots"`
 	SecurityAutoShutdown bool                 `json:"security_auto_shutdown"`
+	Language             string               `json:"language"`
 	SSL                  SSLConfig            `json:"ssl"`
 	SSLCertificates      map[string]SSLConfig `json:"ssl_certificates"`
 }
@@ -454,10 +455,27 @@ func normalizeConfigDefaults(dataDir string) bool {
 		AppConfig.EnabledImages = make([]string, 0)
 		changed = true
 	}
+	if AppConfig.Language == "" {
+		AppConfig.Language = "zh"
+		changed = true
+	}
+	if AppConfig.Language != "zh" && AppConfig.Language != "en" {
+		AppConfig.Language = "zh"
+		changed = true
+	}
 	if normalizeSSLDefaults() {
 		changed = true
 	}
 	return changed
+}
+
+func NormalizeLanguage(language string) string {
+	switch strings.ToLower(strings.TrimSpace(language)) {
+	case "en", "en-us", "en_us", "english":
+		return "en"
+	default:
+		return "zh"
+	}
 }
 
 func normalizeSSLDefaults() bool {

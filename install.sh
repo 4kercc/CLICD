@@ -11,8 +11,218 @@ LOG_FILE="${CLICD_LOG_FILE:-/var/log/clicd-install.log}"
 INSTALL_DOWNLOAD_MARKER="${CLICD_INSTALL_DOWNLOAD_MARKER:-/tmp/clicd-install-dir.$$}"
 LIBVIRT_DEFAULT_MARKER="/var/lib/clicd/kvm/default-network.created"
 
+normalize_lang() {
+    lang="$1"
+    case "$(printf '%s' "$lang" | tr 'A-Z' 'a-z')" in
+        en|en_*|en-*) echo en ;;
+        zh|zh_*|zh-*) echo zh ;;
+        *) echo "" ;;
+    esac
+}
+
+detect_lang() {
+    normalized="$(normalize_lang "${CLICD_LANG:-}")"
+    if [ -n "$normalized" ]; then
+        echo "$normalized"
+        return
+    fi
+    normalized="$(normalize_lang "${LC_ALL:-${LC_MESSAGES:-${LANG:-}}}")"
+    if [ -n "$normalized" ]; then
+        echo "$normalized"
+        return
+    fi
+    echo zh
+}
+
+choose_language() {
+    normalized="$(normalize_lang "${CLICD_LANG:-}")"
+    if [ -n "$normalized" ]; then
+        echo "$normalized"
+        return
+    fi
+    case "$ACTION" in
+        -h|--help|help)
+            detect_lang
+            return
+            ;;
+    esac
+    if [ -t 0 ]; then
+        {
+            echo "====================================="
+            echo "  请选择语言 / Select language"
+            echo "====================================="
+            echo "  1) 简体中文"
+            echo "  2) English"
+            printf "  请输入 1/2 [1]: "
+        } >&2
+        IFS= read -r answer || answer=""
+        case "$answer" in
+            2) echo en ;;
+            *) echo zh ;;
+        esac
+        return
+    fi
+    if [ -r /dev/tty ] && [ -w /dev/tty ] && { printf '' > /dev/tty; } 2>/dev/null; then
+        {
+            echo "====================================="
+            echo "  请选择语言 / Select language"
+            echo "====================================="
+            echo "  1) 简体中文"
+            echo "  2) English"
+            printf "  请输入 1/2 [1]: "
+        } > /dev/tty
+        IFS= read -r answer < /dev/tty || answer=""
+        case "$answer" in
+            2) echo en ;;
+            *) echo zh ;;
+        esac
+        return
+    fi
+    detect_lang
+}
+
+CLICD_LANG_DETECTED="$(choose_language)"
+export CLICD_LANG="$CLICD_LANG_DETECTED"
+
+tr_msg() {
+    msg="$*"
+    [ "$CLICD_LANG_DETECTED" = "en" ] || { printf '%s' "$msg"; return; }
+    msg="$(printf '%s' "$msg" | sed \
+        -e 's/中文安装\/卸载脚本/Installer\/Uninstaller/g' \
+        -e 's/警告/Warning/g' \
+        -e 's/错误/Error/g' \
+        -e 's/安装\/卸载未完成。请查看日志：/Install\/uninstall did not complete. Check log: /g' \
+        -e 's/如果你确认这是程序问题，请提交 issue：/If this looks like a CLICD bug, please open an issue: /g' \
+        -e 's/开始：/Starting: /g' \
+        -e 's/完成：/Completed: /g' \
+        -e 's/步骤失败：/Step failed: /g' \
+        -e 's/退出码：/exit code: /g' \
+        -e 's/最近 80 行日志：/Last 80 log lines: /g' \
+        -e 's/请将上述日志和系统信息提交到：/Please submit the log above and system info to: /g' \
+        -e 's/系统检测：/System check: /g' \
+        -e 's/当前安装包仅支持/This installer only supports/g' \
+        -e 's/当前架构：/current architecture: /g' \
+        -e 's/未检测到 systemd 或 OpenRC，无法安装服务。/systemd or OpenRC was not detected; cannot install service./g' \
+        -e 's/暂不支持当前 Linux 发行版：/Unsupported Linux distribution: /g' \
+        -e 's/请提交 issue 并附上/Please open an issue with/g' \
+        -e 's/发行版/Distribution/g' \
+        -e 's/不在主要支持列表，将按检测到的软件包管理器尝试安装。/is not in the primary support list; trying the detected package manager./g' \
+        -e 's/存储检测：/Storage check: /g' \
+        -e 's/根文件系统=/root filesystem=/g' \
+        -e 's/可用空间=/available space=/g' \
+        -e 's/根分区可用空间低于 5GB，下载镜像或创建 KVM\/LXC 时可能失败。/Root partition has less than 5GB available; image downloads or KVM\/LXC creation may fail./g' \
+        -e 's/请使用 root 权限运行：/Run as root: /g' \
+        -e 's/或执行：/Or run: /g' \
+        -e 's/卸载：/Uninstall: /g' \
+        -e 's/问题反馈：/Issues: /g' \
+        -e 's/日志文件：/Log file: /g' \
+        -e 's/仓库地址：/Repository: /g' \
+        -e 's/未知操作：/Unknown action: /g' \
+        -e 's/卸载会停止并删除 CLICD 服务、配置数据库、CLICD 创建的 LXC\/KVM 实例和缓存数据。/Uninstall will stop and remove the CLICD service, configuration database, CLICD-created LXC\/KVM instances, and cached data./g' \
+        -e 's/为避免误删生产数据，脚本只会删除名称形如 ct-数字 的 LXC 容器、clicd-img-dl-\* 下载临时容器和 vm-数字 的 KVM 域。/To avoid deleting production data, the script only removes LXC containers named ct-NUMBER, temporary clicd-img-dl-* download containers, and KVM domains named vm-NUMBER./g' \
+        -e 's/如需确认卸载，请输入：YES/Type YES to confirm uninstall:/g' \
+        -e 's/已取消卸载。如需非交互卸载，请设置 CLICD_UNINSTALL_CONFIRM=1。/Uninstall cancelled. For non-interactive uninstall, set CLICD_UNINSTALL_CONFIRM=1./g' \
+        -e 's/正在卸载 CLICD.../Uninstalling CLICD.../g' \
+        -e 's/正在删除 CLICD 创建的 LXC 容器（\/var\/lib\/lxc\/ct-数字）.../Removing CLICD-created LXC containers (\/var\/lib\/lxc\/ct-NUMBER).../g' \
+        -e 's/保留 \/root\/clicd-backups，避免误删部署\/回滚备份。确认不需要后可手动删除。/Keeping \/root\/clicd-backups to avoid deleting deployment\/rollback backups. Remove it manually if no longer needed./g' \
+        -e 's/CLICD 卸载完成/CLICD uninstall complete/g' \
+        -e 's/已删除服务、二进制、SQLite\/配置数据、CLICD LXC\/KVM 实例、/Removed service, binary, SQLite\/config data, CLICD LXC\/KVM instances,/g' \
+        -e 's/CLICD 镜像缓存、防火墙规则、主机钩子、配额记录和临时文件。/CLICD image cache, firewall rules, host hooks, quota records, and temporary files./g' \
+        -e 's/已保留 \/root\/clicd-backups 和非 CLICD 的 LXC 全局缓存，避免误删生产备份\/共享镜像。/Kept \/root\/clicd-backups and non-CLICD global LXC cache to avoid deleting production backups\/shared images./g' \
+        -e 's/日志：/Log: /g' \
+        -e 's/兼容性检查/Compatibility check/g' \
+        -e 's/存储环境检查/Storage environment check/g' \
+        -e 's/安装系统依赖/Install system dependencies/g' \
+        -e 's/配置内核网络参数/Configure kernel networking/g' \
+        -e 's/配置运行时服务/Configure runtime services/g' \
+        -e 's/配置 libvirt default NAT 网络/Configure libvirt default NAT network/g' \
+        -e 's/配置 UID\/GID 映射/Configure UID\/GID mapping/g' \
+        -e 's/配置 LXC 存储权限/Configure LXC storage permissions/g' \
+        -e 's/检查 project quota/Check project quota/g' \
+        -e 's/下载发行版包/Download release package/g' \
+        -e 's/安装 CLICD 二进制/Install CLICD binary/g' \
+        -e 's/安装并启动 CLICD 服务/Install and start CLICD service/g' \
+        -e 's/已写入面板语言：/Panel language saved: /g' \
+        -e 's/写入面板语言/Save panel language/g' \
+        -e 's/面板语言写入失败，请安装后在面板右下角手动切换。/Failed to save panel language. Please switch it manually from the lower-left panel control after installation./g' \
+        -e 's/正在使用 apk 安装依赖.../Installing dependencies with apk.../g' \
+        -e 's/正在使用 apt 安装依赖.../Installing dependencies with apt.../g' \
+        -e 's/正在使用 dnf 安装依赖.../Installing dependencies with dnf.../g' \
+        -e 's/正在使用 yum 安装依赖.../Installing dependencies with yum.../g' \
+        -e 's/依赖安装后仍未找到/Still missing after dependency installation: /g' \
+        -e 's/，请检查 LXC 软件源\/安装日志。/. Check the LXC repository\/install log./g' \
+        -e 's/，请检查系统网络工具包。/. Check the system network tools package./g' \
+        -e 's/，请检查 iproute2 安装。/. Check the iproute2 installation./g' \
+        -e 's/，请检查 libvirt-client\/libvirt-clients 安装。/. Check the libvirt-client\/libvirt-clients installation./g' \
+        -e 's/，请检查 qemu-utils\/qemu-img 安装。/. Check the qemu-utils\/qemu-img installation./g' \
+        -e 's/，请检查 cloud-image-utils\/cloud-utils 安装。/. Check the cloud-image-utils\/cloud-utils installation./g' \
+        -e 's/可选依赖未安装：/Optional dependency was not installed: /g' \
+        -e 's/当前系统 /Current system /g' \
+        -e 's/ 未找到 dnf\/yum，无法安装依赖。/ does not have dnf\/yum; cannot install dependencies./g' \
+        -e 's/Windows KVM 初始化需要 genisoimage、mkisofs 或 xorriso 中任意一个。/Windows KVM initialization requires one of genisoimage, mkisofs, or xorriso./g' \
+        -e 's/未检测到 \/dev\/kvm。LXC 可用，但 KVM 虚拟机需要硬件虚拟化或嵌套虚拟化。/\/dev\/kvm was not detected. LXC is available, but KVM VMs require hardware virtualization or nested virtualization./g' \
+        -e 's/正在启用内核转发配置.../Enabling kernel forwarding settings.../g' \
+        -e 's/正在配置 LXC 和 KVM 服务.../Configuring LXC and KVM services.../g' \
+        -e 's/服务 /Service /g' \
+        -e 's/ 启动失败，将继续安装并在运行时降级处理。/ failed to start; installation will continue and runtime fallback will be used./g' \
+        -e 's/未检测到 systemd 单元 /systemd unit was not detected: /g' \
+        -e 's/，跳过。/; skipped./g' \
+        -e 's/检测到 libvirt 传统 libvirtd 服务，已使用 libvirtd 模式。/Detected the legacy libvirt libvirtd service; using libvirtd mode./g' \
+        -e 's/未检测到支持的服务管理器。CLICD 当前支持 systemd 或 OpenRC。/No supported service manager was detected. CLICD currently supports systemd or OpenRC./g' \
+        -e 's/正在检查 libvirt default NAT 网络.../Checking libvirt default NAT network.../g' \
+        -e 's/未找到 virsh，跳过 libvirt default NAT 网络检查。/virsh was not found; skipping the libvirt default NAT network check./g' \
+        -e 's/libvirt default 网络仍未启动。请执行 virsh net-info default 查看详情。/libvirt default network is still not active. Run virsh net-info default for details./g' \
+        -e 's/libvirt default NAT 网络已启用。/libvirt default NAT network is enabled./g' \
+        -e 's/正在配置 subordinate UID\/GID 范围.../Configuring subordinate UID\/GID ranges.../g' \
+        -e 's/根文件系统 /Root filesystem /g' \
+        -e 's/ 不需要\/不适合自动启用 ext4 project quota，CLICD 将使用兼容磁盘限制模式。/ does not need or is not suitable for automatic ext4 project quota; CLICD will use compatible disk limit mode./g' \
+        -e 's/ 不在自动 project quota 支持范围，CLICD 将使用兼容磁盘限制模式。/ is not supported for automatic project quota; CLICD will use compatible disk limit mode./g' \
+        -e 's/根分区来源 /Root partition source /g' \
+        -e 's/ 不是块设备，跳过 project quota 自动检查，CLICD 将使用兼容磁盘限制模式。/ is not a block device; skipping automatic project quota check and using compatible disk limit mode./g' \
+        -e 's/未找到 tune2fs，跳过 project quota 检查，CLICD 将使用兼容磁盘限制模式。/tune2fs was not found; skipping project quota check and using compatible disk limit mode./g' \
+        -e 's/检测到 ext4 project quota 已可用。/ext4 project quota is already available./g' \
+        -e 's/ext4 project quota 未启用，CLICD 将自动回退到 loopback 镜像磁盘限制模式。/ext4 project quota is not enabled; CLICD will automatically fall back to loopback image disk limit mode./g' \
+        -e 's/当前目录未找到 clicd 二进制，将下载发行版包。/No local clicd binary found; downloading release package./g' \
+        -e 's/正在下载发行版包：/Downloading release package: /g' \
+        -e 's/下载发行版包需要 curl 或 wget。/Downloading the release package requires curl or wget./g' \
+        -e 's/下载的发行版包中未找到 clicd 二进制。/The downloaded release package does not contain the clicd binary./g' \
+        -e 's/未找到 clicd 二进制，安装无法继续。/clicd binary was not found; installation cannot continue./g' \
+        -e 's/已安装二进制：/Installed binary: /g' \
+        -e 's/正在安装 CLICD 服务.../Installing CLICD service.../g' \
+        -e 's/正在清理 CLICD 防火墙和网桥规则.../Cleaning CLICD firewall and bridge rules.../g' \
+        -e 's/已清理 /Cleaned /g' \
+        -e 's/ 中的 CLICD 配额记录/ CLICD quota records/g' \
+        -e 's/跳过当前安装目录 /Skipping current installation directory /g' \
+        -e 's/，避免中断后续安装步骤。/ to avoid interrupting later installation steps./g' \
+        -e 's/ 被占用，终止占用进程后重试删除.../ is busy; killing occupying processes and retrying removal.../g' \
+        -e 's/正在删除 CLICD 使用的 LXC 镜像缓存.../Removing LXC image cache used by CLICD.../g' \
+        -e 's/正在删除 KVM 虚拟机域 /Removing KVM VM domain /g' \
+        -e 's/正在销毁 CLICD 创建的 KVM 虚拟机.../Destroying CLICD-created KVM VMs.../g' \
+        -e 's/检测到非 CLICD 虚拟机仍在使用 libvirt default 网络，已保留 default\/virbr0。/Non-CLICD VMs are still using the libvirt default network, so default\/virbr0 has been kept./g' \
+        -e 's/正在删除 CLICD 创建的 libvirt default NAT 网络.../Removing CLICD-created libvirt default NAT network.../g' \
+        -e 's/已删除 /Removed /g' \
+        -e 's/检测到 /Detected /g' \
+        -e 's/安装完成/Installation complete/g' \
+        -e 's/Web 面板/Web panel/g' \
+        -e 's/二进制/Binary/g' \
+        -e 's/安装日志/Install log/g' \
+        -e 's/服务/Service/g' \
+        -e 's/运行日志/Runtime log/g' \
+        -e 's/首次安装时的初始账号信息：/Initial account information for first installation:/g' \
+        -e 's/如果没有显示密码，说明服务器已有/If no password is shown, the server already has/g' \
+        -e 's/已有管理员密码使用 bcrypt 存储，无法反查；请使用面板内修改密码或重置配置。/Existing admin passwords are stored with bcrypt and cannot be recovered. Change it in the panel or reset configuration./g' \
+        -e 's/：/: /g' \
+        -e 's/，/, /g' \
+        -e 's/。/./g' \
+        -e 's/（/(/g' \
+        -e 's/）/)/g' \
+        -e 's/、/, /g' \
+    )"
+    printf '%s' "$msg"
+}
+
 echo "====================================="
-echo "  CLICD 中文安装/卸载脚本"
+echo "  $(tr_msg "CLICD 中文安装/卸载脚本")"
 echo "====================================="
 
 write_log_file() {
@@ -22,21 +232,26 @@ write_log_file() {
 }
 
 log() {
-    echo "[clicd] $*"
-    write_log_file "[clicd] $*"
+    msg="$(tr_msg "$*")"
+    echo "[clicd] $msg"
+    write_log_file "[clicd] $msg"
 }
 
 warn() {
-    echo "[clicd][警告] $*" >&2
-    write_log_file "[警告] $*"
+    label="$(tr_msg "警告")"
+    msg="$(tr_msg "$*")"
+    echo "[clicd][$label] $msg" >&2
+    write_log_file "[$label] $msg"
 }
 
 die() {
-    echo "[clicd][错误] $*" >&2
-    write_log_file "[错误] $*"
+    label="$(tr_msg "错误")"
+    msg="$(tr_msg "$*")"
+    echo "[clicd][$label] $msg" >&2
+    write_log_file "[$label] $msg"
     echo "" >&2
-    echo "安装/卸载未完成。请查看日志：$LOG_FILE" >&2
-    echo "如果你确认这是程序问题，请提交 issue：$ISSUE_URL" >&2
+    echo "$(tr_msg "安装/卸载未完成。请查看日志：")$LOG_FILE" >&2
+    echo "$(tr_msg "如果你确认这是程序问题，请提交 issue：")$ISSUE_URL" >&2
     exit 1
 }
 
@@ -62,11 +277,11 @@ run_step() {
     fi
     rc="$?"
     echo "" >&2
-    echo "[clicd][错误] 步骤失败：$step_name，退出码：$rc" >&2
-    echo "[clicd][错误] 最近 80 行日志：$LOG_FILE" >&2
+    echo "[clicd][$(tr_msg "错误")] $(tr_msg "步骤失败：")$(tr_msg "$step_name")$(tr_msg "，")$(tr_msg "退出码：")$rc" >&2
+    echo "[clicd][$(tr_msg "错误")] $(tr_msg "最近 80 行日志：")$LOG_FILE" >&2
     tail -n 80 "$LOG_FILE" >&2 2>/dev/null || true
     echo "" >&2
-    echo "请将上述日志和系统信息提交到：$ISSUE_URL" >&2
+    echo "$(tr_msg "请将上述日志和系统信息提交到：")$ISSUE_URL" >&2
     exit "$rc"
 }
 
@@ -104,10 +319,10 @@ check_storage_compatibility() {
 }
 
 if [ "$(id -u)" -ne 0 ]; then
-    echo "请使用 root 权限运行：sudo ./install.sh"
-    echo "或执行：curl -fsSL https://raw.githubusercontent.com/${REPO}/main/install.sh | sudo sh"
-    echo "卸载：curl -fsSL https://raw.githubusercontent.com/${REPO}/main/install.sh | sudo sh -s -- uninstall"
-    echo "问题反馈：$ISSUE_URL"
+    echo "$(tr_msg "请使用 root 权限运行：")sudo ./install.sh"
+    echo "$(tr_msg "或执行：")curl -fsSL https://raw.githubusercontent.com/${REPO}/main/install.sh | sudo sh"
+    echo "$(tr_msg "卸载：")curl -fsSL https://raw.githubusercontent.com/${REPO}/main/install.sh | sudo sh -s -- uninstall"
+    echo "$(tr_msg "问题反馈：")$ISSUE_URL"
     exit 1
 fi
 
@@ -125,6 +340,28 @@ if [ -r /etc/os-release ]; then
 fi
 
 usage() {
+    if [ "$CLICD_LANG_DETECTED" = "en" ]; then
+        cat << EOF
+Usage:
+  ./install.sh              Install or upgrade CLICD
+  ./install.sh uninstall    Uninstall CLICD (removes containers, VMs, image cache, and config data)
+
+Environment variables:
+  CLICD_REPO=owner/repo          Default: ${REPO}
+  CLICD_VERSION=latest|v1.0.0    Default: latest
+  CLICD_LANG=en|zh               Default: auto
+  CLICD_LOG_FILE=/path/file.log  Default: ${LOG_FILE}
+
+Examples:
+  curl -fsSL https://raw.githubusercontent.com/${REPO}/main/install.sh | sudo sh
+  curl -fsSL https://raw.githubusercontent.com/${REPO}/main/install.sh | sudo sh -s -- uninstall
+  curl -fsSL https://raw.githubusercontent.com/${REPO}/main/install.sh | sudo sh -s -- uninstall --yes
+
+Log: ${LOG_FILE}
+Issues: ${ISSUE_URL}
+EOF
+        return
+    fi
     cat << EOF
 用法：
   ./install.sh              安装或升级 CLICD
@@ -133,6 +370,7 @@ usage() {
 环境变量：
   CLICD_REPO=owner/repo          默认：${REPO}
   CLICD_VERSION=latest|v1.0.0    默认：latest
+  CLICD_LANG=en|zh               默认：自动检测
   CLICD_LOG_FILE=/path/file.log  默认：${LOG_FILE}
 
 示例：
@@ -598,9 +836,9 @@ confirm_uninstall() {
         return
     fi
     echo ""
-    echo "[clicd][警告] 卸载会停止并删除 CLICD 服务、配置数据库、CLICD 创建的 LXC/KVM 实例和缓存数据。" >&2
-    echo "[clicd][警告] 为避免误删生产数据，脚本只会删除名称形如 ct-数字 的 LXC 容器、clicd-img-dl-* 下载临时容器和 vm-数字 的 KVM 域。" >&2
-    echo "如需确认卸载，请输入：YES" >&2
+    echo "[clicd][$(tr_msg "警告")] $(tr_msg "卸载会停止并删除 CLICD 服务、配置数据库、CLICD 创建的 LXC/KVM 实例和缓存数据。")" >&2
+    echo "[clicd][$(tr_msg "警告")] $(tr_msg "为避免误删生产数据，脚本只会删除名称形如 ct-数字 的 LXC 容器、clicd-img-dl-* 下载临时容器和 vm-数字 的 KVM 域。")" >&2
+    echo "$(tr_msg "如需确认卸载，请输入：YES")" >&2
     if [ -r /dev/tty ]; then
         IFS= read -r answer < /dev/tty
     elif [ -t 0 ]; then
@@ -667,13 +905,13 @@ uninstall_clicd() {
 
     echo ""
     echo "====================================="
-    echo "  CLICD 卸载完成"
+    echo "  $(tr_msg "CLICD 卸载完成")"
     echo "====================================="
-    echo "  已删除服务、二进制、SQLite/配置数据、CLICD LXC/KVM 实例、"
-    echo "  CLICD 镜像缓存、防火墙规则、主机钩子、配额记录和临时文件。"
-    echo "  已保留 /root/clicd-backups 和非 CLICD 的 LXC 全局缓存，避免误删生产备份/共享镜像。"
-    echo "  日志：$LOG_FILE"
-    echo "  问题反馈：$ISSUE_URL"
+    echo "  $(tr_msg "已删除服务、二进制、SQLite/配置数据、CLICD LXC/KVM 实例、")"
+    echo "  $(tr_msg "CLICD 镜像缓存、防火墙规则、主机钩子、配额记录和临时文件。")"
+    echo "  $(tr_msg "已保留 /root/clicd-backups 和非 CLICD 的 LXC 全局缓存，避免误删生产备份/共享镜像。")"
+    echo "  $(tr_msg "日志：")$LOG_FILE"
+    echo "  $(tr_msg "问题反馈：")$ISSUE_URL"
     echo "====================================="
 }
 
@@ -1279,33 +1517,83 @@ install_service() {
     fi
 }
 
+set_panel_language() {
+    lang="$CLICD_LANG_DETECTED"
+    db="/root/.clicd/config.db"
+    if [ "$lang" != "zh" ] && [ "$lang" != "en" ]; then
+        lang="zh"
+    fi
+
+    saved=0
+    i=0
+    while [ ! -f "$db" ] && [ "$i" -lt 20 ]; do
+        i=$((i + 1))
+        sleep 1
+    done
+
+    if [ -f "$db" ] && has_cmd python3; then
+        CLICD_PANEL_LANG="$lang" CLICD_DB="$db" python3 - <<'PY' >/dev/null 2>&1 && saved=1 || saved=0
+import os
+import sqlite3
+
+db = os.environ["CLICD_DB"]
+lang = os.environ["CLICD_PANEL_LANG"]
+conn = sqlite3.connect(db)
+conn.execute("CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+conn.execute("INSERT OR REPLACE INTO app_meta(key, value) VALUES('language', ?)", (lang,))
+conn.commit()
+conn.close()
+PY
+    fi
+
+    if [ "$saved" != "1" ] && [ -f "$db" ] && has_cmd sqlite3; then
+        sqlite3 "$db" "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL); INSERT OR REPLACE INTO app_meta(key, value) VALUES('language', '$lang');" >/dev/null 2>&1 && saved=1 || saved=0
+    fi
+
+    if [ "$saved" != "1" ] && has_cmd curl; then
+        curl -k -fsS -X POST -H 'Content-Type: application/json' -d "{\"language\":\"$lang\"}" "https://127.0.0.1:8999/api/language" >/dev/null 2>&1 && saved=1 || \
+        curl -fsS -X POST -H 'Content-Type: application/json' -d "{\"language\":\"$lang\"}" "http://127.0.0.1:8999/api/language" >/dev/null 2>&1 && saved=1 || saved=0
+    fi
+
+    if [ "$saved" = "1" ]; then
+        log "已写入面板语言：$lang"
+        if has_cmd systemctl && systemctl is-active clicd >/dev/null 2>&1; then
+            systemctl restart clicd >/dev/null 2>&1 || true
+        elif has_cmd rc-service; then
+            rc-service clicd restart >/dev/null 2>&1 || true
+        fi
+    else
+        warn "面板语言写入失败，请安装后在面板右下角手动切换。"
+    fi
+}
+
 print_summary() {
     echo ""
     echo "====================================="
-    echo "  安装完成"
+    echo "  $(tr_msg "安装完成")"
     echo "====================================="
-    echo "  Web 面板：http://YOUR_SERVER_IP:8999"
-    echo "  二进制：/usr/local/bin/clicd"
-    echo "  安装日志：$LOG_FILE"
-    echo "  问题反馈：$ISSUE_URL"
+    echo "  $(tr_msg "Web 面板：")http://YOUR_SERVER_IP:8999"
+    echo "  $(tr_msg "二进制：")/usr/local/bin/clicd"
+    echo "  $(tr_msg "安装日志：")$LOG_FILE"
+    echo "  $(tr_msg "问题反馈：")$ISSUE_URL"
     if is_systemd; then
-        echo "  服务：systemctl {start|stop|restart|status} clicd"
-        echo "  运行日志：journalctl -u clicd -f"
+        echo "  $(tr_msg "服务：")systemctl {start|stop|restart|status} clicd"
+        echo "  $(tr_msg "运行日志：")journalctl -u clicd -f"
     elif is_openrc; then
-        echo "  服务：rc-service clicd {start|stop|restart|status}"
-        echo "  运行日志：tail -f /var/log/clicd.log /var/log/clicd.err"
+        echo "  $(tr_msg "服务：")rc-service clicd {start|stop|restart|status}"
+        echo "  $(tr_msg "运行日志：")tail -f /var/log/clicd.log /var/log/clicd.err"
     fi
     echo "====================================="
     echo ""
-    echo "首次安装时的初始账号信息："
+    echo "$(tr_msg "首次安装时的初始账号信息：")"
     if is_systemd; then
         journalctl -u clicd --no-pager -n 80 | grep -E "Username:|Password:" || true
     else
         grep -E "Username:|Password:" /var/log/clicd.log /var/log/clicd.err 2>/dev/null || true
     fi
     echo ""
-    echo "如果没有显示密码，说明服务器已有 /root/.clicd/config.db。"
-    echo "已有管理员密码使用 bcrypt 存储，无法反查；请使用面板内修改密码或重置配置。"
+    echo "$(tr_msg "如果没有显示密码，说明服务器已有") /root/.clicd/config.db."
+    echo "$(tr_msg "已有管理员密码使用 bcrypt 存储，无法反查；请使用面板内修改密码或重置配置。")"
 }
 
 run_step "兼容性检查" check_os_compatibility
@@ -1315,10 +1603,11 @@ run_step "配置内核网络参数" configure_kernel_networking
 run_step "配置运行时服务" setup_runtime_services
 run_step "配置 libvirt default NAT 网络" setup_default_libvirt_network
 run_step "配置 UID/GID 映射" setup_subids
-run_step "Configure LXC storage permissions" configure_lxc_storage_access
+run_step "配置 LXC 存储权限" configure_lxc_storage_access
 run_step "检查 project quota" try_enable_project_quota
 run_step "下载发行版包" download_release_if_needed
 run_step "安装 CLICD 二进制" install_binary
 run_step "安装并启动 CLICD 服务" install_service
+run_step "写入面板语言" set_panel_language
 sleep 2
 print_summary

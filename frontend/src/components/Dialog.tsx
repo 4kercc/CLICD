@@ -1,5 +1,6 @@
 import { useState, useCallback, createContext, useContext, ReactNode } from 'react'
 import { AlertTriangle, CheckCircle, X } from 'lucide-react'
+import { useLanguage } from '../contexts/LanguageContext'
 
 type DialogType = 'confirm' | 'alert'
 
@@ -20,6 +21,7 @@ const DialogContext = createContext<DialogContextType | undefined>(undefined)
 
 export function DialogProvider({ children }: { children: ReactNode }) {
   const [dialog, setDialog] = useState<DialogState>({ open: false, type: 'alert', title: '', message: '' })
+  const { t } = useLanguage()
 
   const confirm = useCallback((title: string, message: string) => {
     return new Promise<boolean>((resolve) => {
@@ -50,7 +52,7 @@ export function DialogProvider({ children }: { children: ReactNode }) {
               }`}>
                 {dialog.type === 'confirm' ? <AlertTriangle className="w-4 h-4" /> : <CheckCircle className="w-4 h-4" />}
               </div>
-              <h3 className="text-sm font-semibold text-black flex-1">{dialog.title}</h3>
+              <h3 className="text-sm font-semibold text-black flex-1">{t(dialog.title)}</h3>
               {dialog.type === 'alert' && (
                 <button onClick={() => close(true)} className="p-1 text-gray-400 hover:text-black rounded">
                   <X className="w-4 h-4" />
@@ -58,7 +60,7 @@ export function DialogProvider({ children }: { children: ReactNode }) {
               )}
             </div>
             <div className="px-5 py-4">
-              <p className="text-sm text-gray-600">{dialog.message}</p>
+              <p className="text-sm text-gray-600">{t(dialog.message)}</p>
             </div>
             <div className="flex justify-end gap-2 px-5 py-3 bg-gray-50 border-t border-gray-100">
               {dialog.type === 'confirm' && (
@@ -66,7 +68,7 @@ export function DialogProvider({ children }: { children: ReactNode }) {
                   onClick={() => close(false)}
                   className="px-4 py-2 text-sm text-gray-700 hover:bg-gray-200 rounded-md transition-colors"
                 >
-                  取消
+                  {t('取消')}
                 </button>
               )}
               <button
@@ -77,7 +79,7 @@ export function DialogProvider({ children }: { children: ReactNode }) {
                     : 'bg-black text-white hover:bg-gray-800'
                 }`}
               >
-                {dialog.type === 'confirm' ? '确认' : '确定'}
+                {dialog.type === 'confirm' ? t('确认') : t('确定')}
               </button>
             </div>
           </div>

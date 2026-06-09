@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -26,18 +27,170 @@ const (
 	libvirtDefaultNetworkMarker = "/var/lib/clicd/kvm/default-network.created"
 )
 
+var cliEnglish = detectCLIEnglish()
+
+var cliTranslations = map[string]string{
+	"重新加载配置失败":          "Failed to reload config",
+	"请选择操作":             "Select an action",
+	"再见":                "Goodbye",
+	"无效选择":              "Invalid choice",
+	"CLICD - LXC 容器管理器": "CLICD - LXC Container Manager",
+	"Web 面板":            "Web panel",
+	"端口":                "port",
+	"运行中":               "running",
+	"已停止":               "stopped",
+	"当前版本":              "Current version",
+	"查看容器列表":            "List containers",
+	"创建容器":              "Create container",
+	"开机容器":              "Start container",
+	"关机容器":              "Stop container",
+	"重启容器":              "Restart container",
+	"删除容器":              "Delete container",
+	"重装容器系统":            "Reinstall container OS",
+	"重置 Web 管理员密码":      "Reset web admin password",
+	"启动":                "Start",
+	"停止":                "Stop",
+	"导入现有 LXC 容器":       "Import existing LXC containers",
+	"检查并升级 CLICD":       "Check and upgrade CLICD",
+	"卸载 CLICD":          "Uninstall CLICD",
+	"系统信息":              "System info",
+	"退出":                "Exit",
+	"获取容器列表失败":          "Failed to get container list",
+	"暂无容器":              "No containers",
+	"容器":                "Container",
+	"名称":                "Name",
+	"状态":                "Status",
+	"镜像":                "Image",
+	"内存(MB)":            "Memory(MB)",
+	"磁盘(GB)":            "Disk(GB)",
+	"容器名称":              "Container name",
+	"容器名称不能为空":          "Container name cannot be empty",
+	"可用镜像":              "Available images",
+	"镜像选择无效":            "Invalid image selection",
+	"内存 (MB)":           "Memory (MB)",
+	"磁盘 (GB)":           "Disk (GB)",
+	"网络带宽 (Mbps)":       "Network bandwidth (Mbps)",
+	"月流量 (GB)":          "Monthly traffic (GB)",
+	"IO 速度 (MB/s)":      "IO speed (MB/s)",
+	"额外 NAT 端口，多个用逗号分隔": "Extra NAT ports, comma-separated",
+	"正在创建容器":            "Creating container",
+	"创建失败":              "Create failed",
+	"创建成功":              "created successfully",
+	"端口未分配":             "port not assigned",
+	"密码已保存，请在 Web 面板中查看或重置": "Password saved. View or reset it in the web panel",
+	"开机失败":      "Start failed",
+	"已开机":       "started",
+	"关机失败":      "Stop failed",
+	"已关机":       "stopped",
+	"重启失败":      "Restart failed",
+	"已重启":       "restarted",
+	"开机":        "start",
+	"关机":        "stop",
+	"重启":        "restart",
+	"删除":        "delete",
+	"重装":        "reinstall",
+	"确认删除容器":    "Delete container",
+	"输入 yes 继续": "type yes to continue",
+	"已取消":       "Cancelled",
+	"删除失败":      "Delete failed",
+	"已删除":       "deleted",
+	"确认重装容器":    "Reinstall container",
+	"重装失败":      "Reinstall failed",
+	"已重装":       "reinstalled",
+	"新的管理员密码（至少 6 位）": "New admin password (at least 6 characters)",
+	"密码至少需要 6 位":      "Password must be at least 6 characters",
+	"确认密码":            "Confirm password",
+	"两次输入的密码不一致":      "Passwords do not match",
+	"管理员密码已重置。":       "Admin password has been reset.",
+	"按 Enter 返回菜单":    "Press Enter to return to menu",
+	"选择要":             "Select a container to ",
+	"的容器":             "",
+	"选择无效":            "Invalid selection",
+	"主机名":             "Hostname",
+	"管理员用户":           "Admin user",
+	"容器总数":            "Total containers",
+	"切换语言":            "Switch language",
+	"当前语言":            "Current language",
+	"请选择语言":           "Select language",
+	"语言已切换为":          "Language switched to",
+	"保存语言失败":          "Failed to save language",
+	"简体中文":            "Simplified Chinese",
+	"重置失败":            "Reset failed",
+	"停止 Web 面板失败":     "Failed to stop web panel",
+	"Web 面板已停止，LXC 容器不会受影响。": "Web panel stopped. LXC containers are not affected.",
+	"启动 Web 面板失败":            "Failed to start web panel",
+	"Web 面板已启动":              "Web panel started",
+	"升级只会替换 /usr/local/bin/clicd，并保留 /root/.clicd 里的配置、容器数据和任务记录。": "The upgrade only replaces /usr/local/bin/clicd and keeps configuration, container data, and task records under /root/.clicd.",
+	"升级需要 root 权限。请使用: sudo clicd cli":                             "Upgrade requires root privileges. Use: sudo clicd cli",
+	"检查仓库":             "Checking repository",
+	"检查 GitHub 最新版本失败": "Failed to check the latest GitHub version",
+	"GitHub Release 没有 tag_name，无法判断最新版本。": "GitHub Release has no tag_name, so the latest version cannot be determined.",
+	"最新版本": "Latest version",
+	"发布页面": "Release page",
+	"最新 Release 没有找到 clicd-linux-amd64.tar.gz，无法自动升级。": "The latest release does not contain clicd-linux-amd64.tar.gz, so automatic upgrade is unavailable.",
+	"当前已经是最新版本。":                                       "The current version is already the latest.",
+	"是否仍然重新安装最新版本？输入 reinstall 继续":                     "Reinstall the latest version anyway? Type reinstall to continue",
+	"输入 upgrade 开始升级":                                  "Type upgrade to start upgrade",
+	"已取消。":                                             "Cancelled.",
+	"升级失败":                                             "Upgrade failed",
+	"升级完成":                                             "Upgrade completed",
+	"原有数据已保留，Web 服务已重启。":                               "Existing data has been kept and the web service has been restarted.",
+	"GitHub API 返回":                                    "GitHub API returned",
+	"GitHub API 被限流，已切换到备用检查方式。":                       "GitHub API rate limit reached; switched to fallback check.",
+	"GitHub API 不可用，已切换到备用检查方式。":                       "GitHub API is unavailable; switched to fallback check.",
+	"GitHub releases/latest 返回":                        "GitHub releases/latest returned",
+	"无法从 GitHub releases/latest 跳转结果解析最新版本":            "Unable to parse the latest version from the GitHub releases/latest redirect",
+	"正在下载升级包...":                                       "Downloading upgrade package...",
+	"正在解压升级包...":                                       "Extracting upgrade package...",
+	"解压失败":                                             "Extraction failed",
+	"备份旧二进制失败":                                         "Failed to back up old binary",
+	"旧版本已备份":                                           "Old version backed up",
+	"正在替换二进制...":                                       "Replacing binary...",
+	"停止 Web 服务失败，继续尝试替换":                               "Failed to stop web service; continuing replacement attempt",
+	"二进制已替换，但重启 Web 服务失败":                              "Binary was replaced, but restarting the web service failed",
+	"下载失败，HTTP":                                        "Download failed, HTTP",
+	"升级包内未找到 clicd 二进制":                                "No clicd binary found in the upgrade package",
+	"将 /var/lib/lxc 里的容器导入 CLICD 配置。":                  "Import containers under /var/lib/lxc into CLICD configuration.",
+	"导入后会保留真实 LXC 名称，Web 和 CLI 都能管理同一个容器。": "After import, real LXC names are kept and both Web and CLI can manage the same containers.",
+	"导入失败":            "Import failed",
+	"没有发现新的 ct-* 容器。": "No new ct-* containers found.",
+	"已导入":             "Imported",
+	"个容器":             "containers",
+	"将删除 CLICD 服务和 /usr/local/bin/clicd。": "This will remove the CLICD service and /usr/local/bin/clicd.",
+	"同时会删除 /root/.clicd、/var/lib/lxc、/var/lib/clicd、镜像缓存、备份、临时文件、/swapfile 和 CLICD 网络规则。": "It will also remove /root/.clicd, /var/lib/lxc, /var/lib/clicd, image caches, backups, temporary files, /swapfile, and CLICD network rules.",
+	"卸载需要 root 权限。":                "Uninstall requires root privileges.",
+	"请运行: sudo clicd cli --no-web": "Run: sudo clicd cli --no-web",
+	"输入 uninstall 继续卸载":            "Type uninstall to continue uninstalling",
+	"CLICD 已卸载。":                   "CLICD has been uninstalled.",
+	"服务、二进制、配置、容器/虚拟机、本地镜像、缓存、备份、临时文件和 CLICD 网络规则均已删除。":         "Service, binary, configuration, containers/VMs, local images, cache, backups, temporary files, and CLICD network rules have been removed.",
+	"检测到非 CLICD 虚拟机仍在使用 libvirt default 网络，已保留 default/virbr0。": "Non-CLICD VMs are still using the libvirt default network, so default/virbr0 has been kept.",
+	"Web 面板重载跳过":        "Web panel reload skipped",
+	"Web 面板已重载并应用配置变更。": "Web panel reloaded and configuration changes applied.",
+	"读取容器状态失败":          "Failed to read container status",
+	"CLICD 版本":          "CLICD version",
+	"Web 端口":            "Web port",
+	"LXC 版本":            "LXC version",
+	"暂无可用容器":            "No available containers",
+	"忽略无效端口":            "Ignoring invalid port",
+	"？":                 "? ",
+	"。":                 ". ",
+	"，":                 ", ",
+	"：":                 ": ",
+}
+
 // Run starts the CLI interface.
 func Run() {
 	reader := bufio.NewReader(os.Stdin)
 
 	for {
 		if _, err := config.InitConfig(); err != nil {
-			fmt.Printf("重新加载配置失败: %v\n", err)
+			cliPrintf("重新加载配置失败: %v\n", err)
 			waitEnter(reader)
 		}
+		refreshCLILanguage()
 		clearScreen()
 		printMenu()
-		fmt.Print("\n请选择操作 [1-12,0/q]: ")
+		cliPrint("\n请选择操作 [1-12,l,0/q]: ")
 		input, _ := reader.ReadString('\n')
 		input = strings.TrimSpace(input)
 
@@ -94,11 +247,15 @@ func Run() {
 			clearScreen()
 			cliShowInfo()
 			waitEnter(reader)
+		case "l", "lang", "language":
+			clearScreen()
+			cliSwitchLanguage(reader)
+			waitEnter(reader)
 		case "q", "exit", "quit":
-			fmt.Println("再见")
+			cliPrintln("再见")
 			return
 		default:
-			fmt.Println("无效选择")
+			cliPrintln("无效选择")
 		}
 	}
 }
@@ -108,49 +265,86 @@ func printMenu() {
 	if isWebPanelRunning() {
 		webStatus = "停止"
 	}
-	fmt.Println()
-	fmt.Println("  ==========================================")
-	fmt.Println("       CLICD - LXC 容器管理器")
-	fmt.Println("  ==========================================")
-	fmt.Println()
-	fmt.Printf("  Web 面板: %s (端口 %d)\n", func() string {
+	cliPrintln("")
+	cliPrintln("  ==========================================")
+	cliPrintln("       CLICD - LXC 容器管理器")
+	cliPrintln("  ==========================================")
+	cliPrintln("")
+	cliPrintf("  Web 面板: %s (端口 %d)\n", func() string {
 		if isWebPanelRunning() {
 			return "运行中"
 		}
 		return "已停止"
 	}(), config.AppConfig.Port)
-	fmt.Printf("  当前版本: %s\n", version.Current())
-	fmt.Println()
-	fmt.Println("  1. 查看容器列表")
-	fmt.Println("  2. 创建容器")
-	fmt.Println("  3. 开机容器")
-	fmt.Println("  4. 关机容器")
-	fmt.Println("  5. 重启容器")
-	fmt.Println("  6. 删除容器")
-	fmt.Println("  7. 重装容器系统")
-	fmt.Println("  8. 重置 Web 管理员密码")
-	fmt.Printf("  9. %s Web 面板\n", webStatus)
-	fmt.Println("  10. 导入现有 LXC 容器")
-	fmt.Println("  11. 检查并升级 CLICD")
-	fmt.Println("  12. 卸载 CLICD")
-	fmt.Println("  0. 系统信息")
-	fmt.Println("  q. 退出")
+	cliPrintf("  当前版本: %s\n", version.Current())
+	cliPrintln("")
+	cliPrintln("  1. 查看容器列表")
+	cliPrintln("  2. 创建容器")
+	cliPrintln("  3. 开机容器")
+	cliPrintln("  4. 关机容器")
+	cliPrintln("  5. 重启容器")
+	cliPrintln("  6. 删除容器")
+	cliPrintln("  7. 重装容器系统")
+	cliPrintln("  8. 重置 Web 管理员密码")
+	cliPrintf("  9. %s Web 面板\n", webStatus)
+	cliPrintln("  10. 导入现有 LXC 容器")
+	cliPrintln("  11. 检查并升级 CLICD")
+	cliPrintln("  12. 卸载 CLICD")
+	cliPrintln("  0. 系统信息")
+	cliPrintln("  l. 切换语言")
+	cliPrintln("  q. 退出")
+}
+
+func cliSwitchLanguage(reader *bufio.Reader) {
+	cliPrintf("\n--- %s ---\n", cliT("切换语言"))
+	cliPrintf("%s: %s\n", cliT("当前语言"), cliLanguageLabel(config.NormalizeLanguage(config.AppConfig.Language)))
+	cliPrintln("  1. 简体中文")
+	cliPrintln("  2. English")
+	choice := promptString(reader, "请选择语言 [1/2]", func() string {
+		if config.NormalizeLanguage(config.AppConfig.Language) == "en" {
+			return "2"
+		}
+		return "1"
+	}())
+
+	next := "zh"
+	switch strings.ToLower(strings.TrimSpace(choice)) {
+	case "2", "en", "english":
+		next = "en"
+	case "1", "zh", "cn", "chinese":
+		next = "zh"
+	default:
+		cliPrintln("无效选择")
+		return
+	}
+
+	config.AppConfig.Language = next
+	if err := config.SaveConfig(); err != nil {
+		cliPrintf("保存语言失败: %v\n", err)
+		return
+	}
+	_ = os.Setenv("CLICD_LANG", next)
+	refreshCLILanguage()
+	cliPrintf("%s: %s\n", cliT("语言已切换为"), cliLanguageLabel(next))
+	if isWebPanelRunning() {
+		restartWebPanelForConfigChange()
+	}
 }
 
 func cliListContainers() {
 	containers, err := manager.ListContainers()
 	if err != nil {
-		fmt.Printf("获取容器列表失败: %v\n", err)
+		cliPrintf("获取容器列表失败: %v\n", err)
 		return
 	}
 
 	if len(containers) == 0 {
-		fmt.Println("\n暂无容器")
+		cliPrintln("\n暂无容器")
 		return
 	}
 
 	fmt.Println()
-	fmt.Printf("%-18s %-10s %-18s %-6s %-10s %-10s %-16s\n", "名称", "状态", "镜像", "vCPU", "内存(MB)", "磁盘(GB)", "SSH")
+	fmt.Printf("%-18s %-10s %-18s %-6s %-10s %-10s %-16s\n", cliT("名称"), cliT("状态"), cliT("镜像"), "vCPU", cliT("内存(MB)"), cliT("磁盘(GB)"), "SSH")
 	fmt.Println(strings.Repeat("-", 94))
 	for _, c := range containers {
 		ssh := "-"
@@ -163,23 +357,23 @@ func cliListContainers() {
 }
 
 func cliCreateContainer(reader *bufio.Reader) {
-	fmt.Println("\n--- 创建容器 ---")
+	cliPrintln("\n--- 创建容器 ---")
 
 	name := promptString(reader, "容器名称", "")
 	if name == "" {
-		fmt.Println("容器名称不能为空")
+		cliPrintln("容器名称不能为空")
 		return
 	}
 
 	templates := lxc.GetTemplates()
-	fmt.Println("\n可用镜像:")
+	cliPrintln("\n可用镜像:")
 	for i, template := range templates {
 		fmt.Printf("  %d. %s\n", i+1, template.Name)
 	}
 
 	tmplIdx := promptInt(reader, fmt.Sprintf("镜像 [1-%d]", len(templates)), 1)
 	if tmplIdx < 1 || tmplIdx > len(templates) {
-		fmt.Println("镜像选择无效")
+		cliPrintln("镜像选择无效")
 		return
 	}
 
@@ -195,16 +389,16 @@ func cliCreateContainer(reader *bufio.Reader) {
 		ExtraPorts:       promptPortList(reader, "额外 NAT 端口，多个用逗号分隔"),
 	}
 
-	fmt.Printf("\n正在创建容器 %s ...\n", name)
+	cliPrintf("\n正在创建容器 %s ...\n", name)
 	if err := manager.CreateContainer(cfg); err != nil {
-		fmt.Printf("创建失败: %v\n", err)
+		cliPrintf("创建失败: %v\n", err)
 		return
 	}
 
 	container := config.FindContainerByName(name)
-	fmt.Printf("容器 %s 创建成功\n", name)
+	cliPrintf("容器 %s 创建成功\n", name)
 	if container != nil {
-		fmt.Print(formatSSHAccess(container.SSHPort))
+		cliPrint(formatSSHAccess(container.SSHPort))
 	}
 	restartWebPanelForConfigChange()
 }
@@ -222,10 +416,10 @@ func cliStartContainer(reader *bufio.Reader) {
 		return
 	}
 	if err := manager.StartContainer(id); err != nil {
-		fmt.Printf("开机失败: %v\n", err)
+		cliPrintf("开机失败: %v\n", err)
 		return
 	}
-	fmt.Printf("容器 %s 已开机\n", name)
+	cliPrintf("容器 %s 已开机\n", name)
 }
 
 func cliStopContainer(reader *bufio.Reader) {
@@ -234,10 +428,10 @@ func cliStopContainer(reader *bufio.Reader) {
 		return
 	}
 	if err := manager.StopContainer(id); err != nil {
-		fmt.Printf("关机失败: %v\n", err)
+		cliPrintf("关机失败: %v\n", err)
 		return
 	}
-	fmt.Printf("容器 %s 已关机\n", name)
+	cliPrintf("容器 %s 已关机\n", name)
 }
 
 func cliRestartContainer(reader *bufio.Reader) {
@@ -246,10 +440,10 @@ func cliRestartContainer(reader *bufio.Reader) {
 		return
 	}
 	if err := manager.RestartContainer(id); err != nil {
-		fmt.Printf("重启失败: %v\n", err)
+		cliPrintf("重启失败: %v\n", err)
 		return
 	}
-	fmt.Printf("容器 %s 已重启\n", name)
+	cliPrintf("容器 %s 已重启\n", name)
 }
 
 func cliDeleteContainer(reader *bufio.Reader) {
@@ -259,14 +453,14 @@ func cliDeleteContainer(reader *bufio.Reader) {
 	}
 	confirm := promptString(reader, fmt.Sprintf("确认删除容器 %s？输入 yes 继续", name), "no")
 	if strings.ToLower(confirm) != "yes" {
-		fmt.Println("已取消")
+		cliPrintln("已取消")
 		return
 	}
 	if err := manager.DestroyContainer(id); err != nil {
-		fmt.Printf("删除失败: %v\n", err)
+		cliPrintf("删除失败: %v\n", err)
 		return
 	}
-	fmt.Printf("容器 %s 已删除\n", name)
+	cliPrintf("容器 %s 已删除\n", name)
 	restartWebPanelForConfigChange()
 }
 
@@ -277,66 +471,66 @@ func cliReinstallContainer(reader *bufio.Reader) {
 	}
 
 	templates := lxc.GetTemplates()
-	fmt.Println("\n可用镜像:")
+	cliPrintln("\n可用镜像:")
 	for i, template := range templates {
 		fmt.Printf("  %d. %s\n", i+1, template.Name)
 	}
 
 	tmplIdx := promptInt(reader, fmt.Sprintf("镜像 [1-%d]", len(templates)), 1)
 	if tmplIdx < 1 || tmplIdx > len(templates) {
-		fmt.Println("镜像选择无效")
+		cliPrintln("镜像选择无效")
 		return
 	}
 
 	confirm := promptString(reader, fmt.Sprintf("确认重装容器 %s？输入 yes 继续", name), "no")
 	if strings.ToLower(confirm) != "yes" {
-		fmt.Println("已取消")
+		cliPrintln("已取消")
 		return
 	}
 
 	if err := manager.ReinstallContainer(id, templates[tmplIdx-1].ID); err != nil {
-		fmt.Printf("重装失败: %v\n", err)
+		cliPrintf("重装失败: %v\n", err)
 		return
 	}
-	fmt.Printf("容器 %s 已重装\n", name)
+	cliPrintf("容器 %s 已重装\n", name)
 	restartWebPanelForConfigChange()
 }
 
 func cliResetPassword(reader *bufio.Reader) {
 	newPass := promptString(reader, "新的管理员密码（至少 6 位）", "")
 	if len(newPass) < 6 {
-		fmt.Println("密码至少需要 6 位")
+		cliPrintln("密码至少需要 6 位")
 		return
 	}
 	confirm := promptString(reader, "确认密码", "")
 	if newPass != confirm {
-		fmt.Println("两次输入的密码不一致")
+		cliPrintln("两次输入的密码不一致")
 		return
 	}
 
 	if err := config.ResetAdminPassword(newPass); err != nil {
-		fmt.Printf("重置失败: %v\n", err)
+		cliPrintf("重置失败: %v\n", err)
 		return
 	}
-	fmt.Println("管理员密码已重置。")
+	cliPrintln("管理员密码已重置。")
 	restartWebPanelForConfigChange()
 }
 
 func cliToggleWebPanel() {
 	if isWebPanelRunning() {
 		if err := stopService("clicd"); err != nil {
-			fmt.Printf("停止 Web 面板失败: %v\n", err)
+			cliPrintf("停止 Web 面板失败: %v\n", err)
 			return
 		}
-		fmt.Println("Web 面板已停止，LXC 容器不会受影响。")
+		cliPrintln("Web 面板已停止，LXC 容器不会受影响。")
 		return
 	}
 
 	if err := startService("clicd"); err != nil {
-		fmt.Printf("启动 Web 面板失败: %v\n", err)
+		cliPrintf("启动 Web 面板失败: %v\n", err)
 		return
 	}
-	fmt.Println("Web 面板已启动")
+	cliPrintln("Web 面板已启动")
 }
 
 type githubRelease struct {
@@ -350,11 +544,11 @@ type githubRelease struct {
 }
 
 func cliUpgradeSystem(reader *bufio.Reader) {
-	fmt.Println("\n--- 检查并升级 CLICD ---")
-	fmt.Println("升级只会替换 /usr/local/bin/clicd，并保留 /root/.clicd 里的配置、容器数据和任务记录。")
+	cliPrintln("\n--- 检查并升级 CLICD ---")
+	cliPrintln("升级只会替换 /usr/local/bin/clicd，并保留 /root/.clicd 里的配置、容器数据和任务记录。")
 
 	if os.Geteuid() != 0 {
-		fmt.Println("升级需要 root 权限。请使用: sudo clicd cli")
+		cliPrintln("升级需要 root 权限。请使用: sudo clicd cli")
 		return
 	}
 
@@ -363,51 +557,51 @@ func cliUpgradeSystem(reader *bufio.Reader) {
 		repo = version.Repo
 	}
 	current := version.Current()
-	fmt.Printf("当前版本: %s\n", current)
-	fmt.Printf("检查仓库: https://github.com/%s\n", repo)
+	cliPrintf("当前版本: %s\n", current)
+	cliPrintf("检查仓库: https://github.com/%s\n", repo)
 
 	release, err := fetchLatestRelease(repo)
 	if err != nil {
-		fmt.Printf("检查 GitHub 最新版本失败: %v\n", err)
+		cliPrintf("检查 GitHub 最新版本失败: %v\n", err)
 		return
 	}
 	latest := strings.TrimSpace(release.TagName)
 	if latest == "" {
-		fmt.Println("GitHub Release 没有 tag_name，无法判断最新版本。")
+		cliPrintln("GitHub Release 没有 tag_name，无法判断最新版本。")
 		return
 	}
-	fmt.Printf("最新版本: %s\n", latest)
+	cliPrintf("最新版本: %s\n", latest)
 	if release.HTMLURL != "" {
-		fmt.Printf("发布页面: %s\n", release.HTMLURL)
+		cliPrintf("发布页面: %s\n", release.HTMLURL)
 	}
 
 	assetURL := findReleaseAsset(release, "clicd-linux-amd64.tar.gz")
 	if assetURL == "" {
-		fmt.Println("最新 Release 没有找到 clicd-linux-amd64.tar.gz，无法自动升级。")
+		cliPrintln("最新 Release 没有找到 clicd-linux-amd64.tar.gz，无法自动升级。")
 		return
 	}
 
 	if sameVersion(current, latest) {
-		fmt.Println("当前已经是最新版本。")
+		cliPrintln("当前已经是最新版本。")
 		confirm := promptString(reader, "是否仍然重新安装最新版本？输入 reinstall 继续", "no")
 		if strings.ToLower(confirm) != "reinstall" {
-			fmt.Println("已取消。")
+			cliPrintln("已取消。")
 			return
 		}
 	} else {
 		confirm := promptString(reader, "输入 upgrade 开始升级", "no")
 		if strings.ToLower(confirm) != "upgrade" {
-			fmt.Println("已取消。")
+			cliPrintln("已取消。")
 			return
 		}
 	}
 
 	if err := upgradeFromReleaseAsset(assetURL, latest); err != nil {
-		fmt.Printf("升级失败: %v\n", err)
+		cliPrintf("升级失败: %v\n", err)
 		return
 	}
-	fmt.Printf("升级完成: %s -> %s\n", current, latest)
-	fmt.Println("原有数据已保留，Web 服务已重启。")
+	cliPrintf("升级完成: %s -> %s\n", current, latest)
+	cliPrintln("原有数据已保留，Web 服务已重启。")
 }
 
 func fetchLatestRelease(repo string) (*githubRelease, error) {
@@ -434,9 +628,9 @@ func fetchLatestRelease(repo string) (*githubRelease, error) {
 		apiErr := fmt.Errorf("GitHub API 返回 %s: %s", resp.Status, strings.TrimSpace(string(body)))
 		if fallback, fallbackErr := fetchLatestReleaseFallback(repo); fallbackErr == nil {
 			if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
-				fmt.Println("GitHub API 被限流，已切换到备用检查方式。")
+				cliPrintln("GitHub API 被限流，已切换到备用检查方式。")
 			} else {
-				fmt.Println("GitHub API 不可用，已切换到备用检查方式。")
+				cliPrintln("GitHub API 不可用，已切换到备用检查方式。")
 			}
 			return fallback, nil
 		}
@@ -530,12 +724,12 @@ func upgradeFromReleaseAsset(assetURL, latest string) error {
 	defer os.RemoveAll(tmpDir)
 
 	archivePath := filepath.Join(tmpDir, "clicd-linux-amd64.tar.gz")
-	fmt.Println("正在下载升级包...")
+	cliPrintln("正在下载升级包...")
 	if err := downloadFile(assetURL, archivePath); err != nil {
 		return err
 	}
 
-	fmt.Println("正在解压升级包...")
+	cliPrintln("正在解压升级包...")
 	if out, err := exec.Command("tar", "-xzf", archivePath, "-C", tmpDir).CombinedOutput(); err != nil {
 		return fmt.Errorf("解压失败: %v, output: %s", err, string(out))
 	}
@@ -555,12 +749,12 @@ func upgradeFromReleaseAsset(assetURL, latest string) error {
 		if err != nil {
 			return fmt.Errorf("备份旧二进制失败: %w", err)
 		}
-		fmt.Printf("旧版本已备份: %s\n", backupPath)
+		cliPrintf("旧版本已备份: %s\n", backupPath)
 	}
 
-	fmt.Println("正在替换二进制...")
+	cliPrintln("正在替换二进制...")
 	if err := stopService("clicd"); err != nil {
-		fmt.Printf("停止 Web 服务失败，继续尝试替换: %v\n", err)
+		cliPrintf("停止 Web 服务失败，继续尝试替换: %v\n", err)
 	}
 	tmpBin := clicdNewBinaryPath
 	if err := copyFileToUpgradeTemp(newBinary, 0755); err != nil {
@@ -715,21 +909,21 @@ func isWebPanelRunning() bool {
 }
 
 func cliImportExistingContainers() {
-	fmt.Println("\n--- 导入现有 LXC 容器 ---")
-	fmt.Println("将 /var/lib/lxc 里的容器导入 CLICD 配置。")
-	fmt.Println("导入后会保留真实 LXC 名称，Web 和 CLI 都能管理同一个容器。")
+	cliPrintln("\n--- 导入现有 LXC 容器 ---")
+	cliPrintln("将 /var/lib/lxc 里的容器导入 CLICD 配置。")
+	cliPrintln("导入后会保留真实 LXC 名称，Web 和 CLI 都能管理同一个容器。")
 
 	imported, err := manager.ImportExistingClicdContainers()
 	if err != nil {
-		fmt.Printf("导入失败: %v\n", err)
+		cliPrintf("导入失败: %v\n", err)
 		return
 	}
 	if len(imported) == 0 {
-		fmt.Println("没有发现新的 ct-* 容器。")
+		cliPrintln("没有发现新的 ct-* 容器。")
 		return
 	}
 
-	fmt.Printf("已导入 %d 个容器:\n", len(imported))
+	cliPrintf("已导入 %d 个容器:\n", len(imported))
 	for _, c := range imported {
 		fmt.Printf("  [%d] %s [%s]\n", c.ID, c.Name, c.Status)
 	}
@@ -737,19 +931,19 @@ func cliImportExistingContainers() {
 }
 
 func cliUninstall(reader *bufio.Reader) {
-	fmt.Println("\n--- 卸载 CLICD ---")
-	fmt.Println("将删除 CLICD 服务和 /usr/local/bin/clicd。")
-	fmt.Println("同时会删除 /root/.clicd、/var/lib/lxc、/var/lib/clicd、镜像缓存、备份、临时文件、/swapfile 和 CLICD 网络规则。")
+	cliPrintln("\n--- 卸载 CLICD ---")
+	cliPrintln("将删除 CLICD 服务和 /usr/local/bin/clicd。")
+	cliPrintln("同时会删除 /root/.clicd、/var/lib/lxc、/var/lib/clicd、镜像缓存、备份、临时文件、/swapfile 和 CLICD 网络规则。")
 
 	if os.Geteuid() != 0 {
-		fmt.Println("卸载需要 root 权限。")
-		fmt.Println("请运行: sudo clicd cli --no-web")
+		cliPrintln("卸载需要 root 权限。")
+		cliPrintln("请运行: sudo clicd cli --no-web")
 		return
 	}
 
 	confirm := promptString(reader, "输入 uninstall 继续卸载", "no")
 	if strings.ToLower(confirm) != "uninstall" {
-		fmt.Println("已取消")
+		cliPrintln("已取消")
 		return
 	}
 
@@ -776,8 +970,8 @@ func cliUninstall(reader *bufio.Reader) {
 	reloadSysctl()
 
 	fmt.Println()
-	fmt.Println("CLICD 已卸载。")
-	fmt.Println("服务、二进制、配置、容器/虚拟机、本地镜像、缓存、备份、临时文件和 CLICD 网络规则均已删除。")
+	cliPrintln("CLICD 已卸载。")
+	cliPrintln("服务、二进制、配置、容器/虚拟机、本地镜像、缓存、备份、临时文件和 CLICD 网络规则均已删除。")
 }
 
 func destroyAllLXCContainers() {
@@ -847,7 +1041,7 @@ func removeCLICDLibvirtDefaultNetwork() {
 		return
 	}
 	if libvirtDefaultUsedByNonCLICDDomain() {
-		fmt.Println("检测到非 CLICD 虚拟机仍在使用 libvirt default 网络，已保留 default/virbr0。")
+		cliPrintln("检测到非 CLICD 虚拟机仍在使用 libvirt default 网络，已保留 default/virbr0。")
 		return
 	}
 	fmt.Println("Removing CLICD-created libvirt default network...")
@@ -1242,10 +1436,10 @@ func shellQuote(value string) string {
 
 func restartWebPanelForConfigChange() {
 	if err := restartService("clicd"); err != nil {
-		fmt.Printf("Web 面板重载跳过: %v\n", err)
+		cliPrintf("Web 面板重载跳过: %v\n", err)
 		return
 	}
-	fmt.Println("Web 面板已重载并应用配置变更。")
+	cliPrintln("Web 面板已重载并应用配置变更。")
 }
 
 func stopService(name string) error {
@@ -1281,7 +1475,7 @@ func restartService(name string) error {
 func cliShowInfo() {
 	containers, err := manager.ListContainers()
 	if err != nil {
-		fmt.Printf("读取容器状态失败: %v\n", err)
+		cliPrintf("读取容器状态失败: %v\n", err)
 	}
 
 	total := len(containers)
@@ -1292,44 +1486,44 @@ func cliShowInfo() {
 		}
 	}
 
-	fmt.Println("\n--- 系统信息 ---")
-	fmt.Printf("CLICD 版本: %s\n", version.Current())
-	fmt.Printf("Web 端口: %d\n", config.AppConfig.Port)
-	fmt.Printf("管理员用户: %s\n", config.AppConfig.AdminUser)
-	fmt.Printf("容器总数: %d\n", total)
-	fmt.Printf("运行中: %d\n", running)
-	fmt.Printf("已停止: %d\n", total-running)
+	cliPrintln("\n--- 系统信息 ---")
+	cliPrintf("CLICD 版本: %s\n", version.Current())
+	cliPrintf("Web 端口: %d\n", config.AppConfig.Port)
+	cliPrintf("管理员用户: %s\n", config.AppConfig.AdminUser)
+	cliPrintf("容器总数: %d\n", total)
+	cliPrintf("运行中: %d\n", running)
+	cliPrintf("已停止: %d\n", total-running)
 
 	if hostname, err := os.Hostname(); err == nil {
-		fmt.Printf("主机名: %s\n", hostname)
+		cliPrintf("主机名: %s\n", hostname)
 	}
 
 	cmd := exec.Command("lxc-info", "--version")
 	output, err := cmd.Output()
 	if err == nil {
-		fmt.Printf("LXC 版本: %s", string(output))
+		cliPrintf("LXC 版本: %s", string(output))
 	}
 }
 
 func selectContainer(reader *bufio.Reader, action string) (int, string) {
 	containers, err := manager.ListContainers()
 	if err != nil {
-		fmt.Printf("获取容器列表失败: %v\n", err)
+		cliPrintf("获取容器列表失败: %v\n", err)
 		return 0, ""
 	}
 	if len(containers) == 0 {
-		fmt.Println("暂无可用容器")
+		cliPrintln("暂无可用容器")
 		return 0, ""
 	}
 
-	fmt.Printf("\n--- 选择要%s的容器 ---\n", action)
+	cliPrintf("\n--- 选择要%s的容器 ---\n", cliT(action))
 	for i, container := range containers {
 		fmt.Printf("  %d. [%d] %s [%s]\n", i+1, container.ID, container.Name, container.Status)
 	}
 
 	idx := promptInt(reader, "容器", 0)
 	if idx < 1 || idx > len(containers) {
-		fmt.Println("选择无效")
+		cliPrintln("选择无效")
 		return 0, ""
 	}
 
@@ -1338,6 +1532,7 @@ func selectContainer(reader *bufio.Reader, action string) (int, string) {
 }
 
 func promptString(reader *bufio.Reader, label string, fallback string) string {
+	label = cliT(label)
 	if fallback == "" {
 		fmt.Printf("%s: ", label)
 	} else {
@@ -1375,7 +1570,7 @@ func clearScreen() {
 }
 
 func waitEnter(reader *bufio.Reader) {
-	fmt.Print("\n按 Enter 返回菜单...")
+	cliPrint("\n按 Enter 返回菜单...")
 	reader.ReadString('\n')
 }
 
@@ -1389,10 +1584,95 @@ func promptPortList(reader *bufio.Reader, label string) []int {
 	for _, part := range strings.Split(input, ",") {
 		value, err := strconv.Atoi(strings.TrimSpace(part))
 		if err != nil || value <= 0 || value > 65535 {
-			fmt.Printf("忽略无效端口: %s\n", strings.TrimSpace(part))
+			cliPrintf("忽略无效端口: %s\n", strings.TrimSpace(part))
 			continue
 		}
 		ports = append(ports, value)
 	}
 	return ports
+}
+
+func detectCLIEnglish() bool {
+	lang := strings.ToLower(strings.TrimSpace(os.Getenv("CLICD_LANG")))
+	if lang == "en" || strings.HasPrefix(lang, "en_") || strings.HasPrefix(lang, "en-") {
+		return true
+	}
+	if lang == "zh" || strings.HasPrefix(lang, "zh_") || strings.HasPrefix(lang, "zh-") {
+		return false
+	}
+	if config.AppConfig != nil {
+		return config.NormalizeLanguage(config.AppConfig.Language) == "en"
+	}
+	env := strings.ToLower(os.Getenv("LC_ALL") + " " + os.Getenv("LC_MESSAGES") + " " + os.Getenv("LANG"))
+	return strings.Contains(env, "en_") || strings.Contains(env, "en-") || strings.Contains(env, "english")
+}
+
+func refreshCLILanguage() {
+	cliEnglish = detectCLIEnglish()
+}
+
+func cliLanguageLabel(language string) string {
+	if config.NormalizeLanguage(language) == "en" {
+		return "English"
+	}
+	return cliT("简体中文")
+}
+
+func cliT(text string) string {
+	if !cliEnglish {
+		return text
+	}
+	translated := text
+	keys := make([]string, 0, len(cliTranslations))
+	for zh := range cliTranslations {
+		keys = append(keys, zh)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if len(keys[i]) == len(keys[j]) {
+			return keys[i] < keys[j]
+		}
+		return len(keys[i]) > len(keys[j])
+	})
+	for _, zh := range keys {
+		en := cliTranslations[zh]
+		translated = strings.ReplaceAll(translated, zh, en)
+	}
+	return translated
+}
+
+func cliPrint(args ...interface{}) {
+	if cliEnglish {
+		for i, arg := range args {
+			if s, ok := arg.(string); ok {
+				args[i] = cliT(s)
+			}
+		}
+	}
+	fmt.Print(args...)
+}
+
+func cliPrintln(args ...interface{}) {
+	if cliEnglish {
+		for i, arg := range args {
+			if s, ok := arg.(string); ok {
+				args[i] = cliT(s)
+			}
+		}
+	}
+	fmt.Println(args...)
+}
+
+func cliPrintf(format string, args ...interface{}) {
+	if cliEnglish {
+		for i, arg := range args {
+			if s, ok := arg.(string); ok {
+				args[i] = cliT(s)
+				continue
+			}
+			if err, ok := arg.(error); ok {
+				args[i] = cliT(err.Error())
+			}
+		}
+	}
+	fmt.Printf(cliT(format), args...)
 }

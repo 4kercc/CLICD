@@ -19,6 +19,7 @@ import {
   UserCog,
 } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
+import { useLanguage } from '../contexts/LanguageContext'
 import { useTheme } from '../contexts/ThemeContext'
 import { getVersion } from '../services/api'
 import AppIcon from './AppIcon'
@@ -45,11 +46,23 @@ function GitHubIcon({ className = '' }: { className?: string }) {
   )
 }
 
+function LanguageIcon({ className = '' }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <path
+        d="M213.333333 640v85.333333a85.333333 85.333333 0 0 0 78.933334 85.12L298.666667 810.666667h128v85.333333H298.666667a170.666667 170.666667 0 0 1-170.666667-170.666667v-85.333333h85.333333z m554.666667-213.333333l187.733333 469.333333h-91.946666l-51.242667-128h-174.506667l-51.157333 128h-91.904L682.666667 426.666667h85.333333z m-42.666667 123.093333L672.128 682.666667h106.325333L725.333333 549.76zM341.333333 85.333333v85.333334h170.666667v298.666666H341.333333v128H256v-128H85.333333V170.666667h170.666667V85.333333h85.333333z m384 42.666667a170.666667 170.666667 0 0 1 170.666667 170.666667v85.333333h-85.333333V298.666667a85.333333 85.333333 0 0 0-85.333334-85.333334h-128V128h128zM256 256H170.666667v128h85.333333V256z m170.666667 0H341.333333v128h85.333334V256z"
+        fill="currentColor"
+      />
+    </svg>
+  )
+}
+
 export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
   const navigate = useNavigate()
   const location = useLocation()
   const { logout, isSubUser } = useAuth()
   const { theme, toggleTheme } = useTheme()
+  const { language, toggleLanguage, t } = useLanguage()
   const [version, setVersion] = useState('')
 
   useEffect(() => {
@@ -99,7 +112,7 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
         <button
           onClick={onToggle}
           className="p-1 rounded hover:bg-gray-100 text-gray-500 dark:hover:bg-gray-800 dark:text-gray-400"
-          title="切换侧边栏"
+          title={t('切换侧边栏')}
         >
           {collapsed ? (
             <ChevronRight className="w-4 h-4" />
@@ -253,18 +266,28 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
 
       <div className="border-t border-gray-200 dark:border-gray-700 p-2 space-y-1">
         {/* Theme Toggle */}
-        <button
-          onClick={toggleTheme}
-          className="w-full flex items-center gap-3 px-3 py-2.5 rounded-md text-sm text-gray-600 hover:bg-gray-100 transition-colors dark:text-gray-400 dark:hover:bg-gray-800"
-          title={theme === 'dark' ? '切换亮色模式' : '切换暗黑模式'}
-        >
-          {theme === 'dark' ? (
-            <Sun className="w-4 h-4" />
-          ) : (
-            <Moon className="w-4 h-4" />
-          )}
-          {!collapsed && <span>{theme === 'dark' ? '亮色模式' : '暗黑模式'}</span>}
-        </button>
+        <div className={collapsed ? 'space-y-1' : 'flex items-center gap-1'}>
+          <button
+            onClick={toggleTheme}
+            className={`${collapsed ? 'w-full justify-center' : 'flex-1'} flex items-center gap-3 px-3 py-2.5 rounded-md text-sm text-gray-600 hover:bg-gray-100 transition-colors dark:text-gray-400 dark:hover:bg-gray-800`}
+            title={t(theme === 'dark' ? '切换亮色模式' : '切换暗黑模式')}
+          >
+            {theme === 'dark' ? (
+              <Sun className="w-4 h-4" />
+            ) : (
+              <Moon className="w-4 h-4" />
+            )}
+            {!collapsed && <span>{theme === 'dark' ? '亮色模式' : '暗黑模式'}</span>}
+          </button>
+
+          <button
+            onClick={() => { void toggleLanguage() }}
+            className={`${collapsed ? 'w-full' : 'w-10'} flex items-center justify-center rounded-md px-2 py-2.5 text-sm text-gray-600 hover:bg-gray-100 transition-colors dark:text-gray-400 dark:hover:bg-gray-800`}
+            title={language === 'en' ? '切换中文' : 'Switch to English'}
+          >
+            <LanguageIcon className="h-4 w-4" />
+          </button>
+        </div>
 
         {/* Version */}
         {version && (

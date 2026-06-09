@@ -107,8 +107,33 @@ func isWebPanelSystemdRunning() bool {
 func startWebPanelSystemd() {
 	cmd := exec.Command("systemctl", "start", "clicd")
 	if err := cmd.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "警告: 自动启动 Web 面板失败: %v\n", err)
+		fmt.Fprintf(os.Stderr, "%s: %v\n", mainT("警告: 自动启动 Web 面板失败"), err)
 	} else {
-		fmt.Println("Web 面板已自动启动")
+		fmt.Println(mainT("Web 面板已自动启动"))
 	}
+}
+
+func mainT(text string) string {
+	if !mainEnglish() {
+		return text
+	}
+	switch text {
+	case "警告: 自动启动 Web 面板失败":
+		return "Warning: failed to auto-start web panel"
+	case "Web 面板已自动启动":
+		return "Web panel auto-started"
+	default:
+		return text
+	}
+}
+
+func mainEnglish() bool {
+	lang := strings.ToLower(strings.TrimSpace(os.Getenv("CLICD_LANG")))
+	if lang == "en" || strings.HasPrefix(lang, "en_") || strings.HasPrefix(lang, "en-") {
+		return true
+	}
+	if lang == "zh" || strings.HasPrefix(lang, "zh_") || strings.HasPrefix(lang, "zh-") {
+		return false
+	}
+	return config.AppConfig != nil && config.NormalizeLanguage(config.AppConfig.Language) == "en"
 }

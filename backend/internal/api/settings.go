@@ -20,6 +20,34 @@ type LoginLog struct {
 
 var loginLogs = make([]LoginLog, 0)
 
+// HandleLanguage returns or updates the global panel language.
+func HandleLanguage(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		jsonResponse(w, http.StatusOK, APIResponse{Success: true, Data: map[string]string{
+			"language": config.NormalizeLanguage(config.AppConfig.Language),
+		}})
+	case http.MethodPost, http.MethodPut:
+		var req struct {
+			Language string `json:"language"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Invalid request body"})
+			return
+		}
+		config.AppConfig.Language = config.NormalizeLanguage(req.Language)
+		if err := config.SaveConfig(); err != nil {
+			jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: "Failed to save language"})
+			return
+		}
+		jsonResponse(w, http.StatusOK, APIResponse{Success: true, Data: map[string]string{
+			"language": config.AppConfig.Language,
+		}})
+	default:
+		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
+	}
+}
+
 // RecordLoginLog adds a login attempt to the log (persisted to config)
 func RecordLoginLog(username, ip, userAgent string, success bool) {
 	config.AddLoginLog(username, ip, userAgent, success)
