@@ -374,6 +374,12 @@ func loadConfigFromDB() (*ClicdConfig, bool, error) {
 		SetupComplete:        atob(meta["setup_complete"]),
 		SecurityAutoShutdown: atob(meta["security_auto_shutdown"]),
 	}
+	if raw := strings.TrimSpace(meta["ssl"]); raw != "" {
+		_ = json.Unmarshal([]byte(raw), &cfg.SSL)
+	}
+	if raw := strings.TrimSpace(meta["ssl_certificates"]); raw != "" {
+		_ = json.Unmarshal([]byte(raw), &cfg.SSLCertificates)
+	}
 
 	if cfg.Containers, err = loadContainers(); err != nil {
 		return nil, false, err
@@ -466,6 +472,8 @@ func saveConfigToDB() error {
 }
 
 func saveMeta(tx *sql.Tx) error {
+	sslJSON, _ := json.Marshal(AppConfig.SSL)
+	sslCertificatesJSON, _ := json.Marshal(AppConfig.SSLCertificates)
 	values := map[string]string{
 		"admin_user":             AppConfig.AdminUser,
 		"admin_pass_hash":        AppConfig.AdminPassHash,
@@ -477,6 +485,8 @@ func saveMeta(tx *sql.Tx) error {
 		"next_ssh_port":          strconv.Itoa(AppConfig.NextSSHPort),
 		"setup_complete":         btoa(AppConfig.SetupComplete),
 		"security_auto_shutdown": btoa(AppConfig.SecurityAutoShutdown),
+		"ssl":                    string(sslJSON),
+		"ssl_certificates":       string(sslCertificatesJSON),
 		"schema_version":         "1",
 		"updated_at":             time.Now().Format("2006-01-02 15:04:05"),
 	}

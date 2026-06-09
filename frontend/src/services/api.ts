@@ -317,6 +317,47 @@ export interface AuditLog {
 export const getLoginLogs = () =>
   api.get<APIResponse<LoginLog[]>>('/login-logs')
 
+export interface SSLCertificateInfo {
+  subject: string
+  issuer: string
+  dns_names: string[]
+  ip_names: string[]
+  not_before: string
+  not_after: string
+  valid: boolean
+}
+
+export interface SSLSettings {
+  enabled: boolean
+  mode: 'disabled' | 'letsencrypt' | 'self_signed' | 'uploaded'
+  target: string
+  email?: string
+  cert_path?: string
+  key_path?: string
+  last_issued_at?: string
+  last_error?: string
+  detected_host?: string
+  certificate?: SSLCertificateInfo
+  mode_certificates?: Record<string, SSLSettings>
+  needs_restart?: boolean
+}
+
+export interface UpdateSSLSettingsRequest {
+  enabled: boolean
+  mode: 'disabled' | 'letsencrypt' | 'self_signed' | 'uploaded'
+  target?: string
+  email?: string
+  cert_pem?: string
+  key_pem?: string
+  apply_now?: boolean
+}
+
+export const getSSLSettings = () =>
+  api.get<APIResponse<SSLSettings>>('/ssl')
+
+export const updateSSLSettings = (data: UpdateSSLSettingsRequest) =>
+  api.put<APIResponse<SSLSettings>>('/ssl', data)
+
 // Containers
 export const getContainers = () =>
   api.get<APIResponse<Container[]>>('/containers')

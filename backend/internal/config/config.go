@@ -205,26 +205,46 @@ type Snapshot struct {
 	SizeBytes     int64  `json:"size_bytes"`
 }
 
+const (
+	SSLModeDisabled    = "disabled"
+	SSLModeLetsEncrypt = "letsencrypt"
+	SSLModeSelfSigned  = "self_signed"
+	SSLModeUploaded    = "uploaded"
+)
+
+type SSLConfig struct {
+	Enabled      bool   `json:"enabled"`
+	Mode         string `json:"mode"`
+	Target       string `json:"target"`
+	Email        string `json:"email,omitempty"`
+	CertPath     string `json:"cert_path,omitempty"`
+	KeyPath      string `json:"key_path,omitempty"`
+	LastIssuedAt string `json:"last_issued_at,omitempty"`
+	LastError    string `json:"last_error,omitempty"`
+}
+
 // ClicdConfig is the main configuration structure
 type ClicdConfig struct {
-	AdminUser            string          `json:"admin_user"`
-	AdminPassHash        string          `json:"admin_pass_hash"`
-	JWTSecret            string          `json:"jwt_secret"`
-	Port                 int             `json:"port"`
-	DataDir              string          `json:"data_dir"`
-	Containers           []Container     `json:"containers"`
-	NextContainerID      int             `json:"next_container_id"`
-	NextVNCPort          int             `json:"next_vnc_port"`
-	NextSSHPort          int             `json:"next_ssh_port"`
-	SetupComplete        bool            `json:"setup_complete"`
-	SubUsers             []SubUser       `json:"sub_users"`
-	ApiKeys              []ApiKeyConfig  `json:"api_keys"`
-	AuditLogs            []AuditLog      `json:"audit_logs"`
-	Tasks                []SavedTask     `json:"tasks"`
-	LoginLogs            []SavedLoginLog `json:"login_logs"`
-	EnabledImages        []string        `json:"enabled_images"`
-	Snapshots            []Snapshot      `json:"snapshots"`
-	SecurityAutoShutdown bool            `json:"security_auto_shutdown"`
+	AdminUser            string               `json:"admin_user"`
+	AdminPassHash        string               `json:"admin_pass_hash"`
+	JWTSecret            string               `json:"jwt_secret"`
+	Port                 int                  `json:"port"`
+	DataDir              string               `json:"data_dir"`
+	Containers           []Container          `json:"containers"`
+	NextContainerID      int                  `json:"next_container_id"`
+	NextVNCPort          int                  `json:"next_vnc_port"`
+	NextSSHPort          int                  `json:"next_ssh_port"`
+	SetupComplete        bool                 `json:"setup_complete"`
+	SubUsers             []SubUser            `json:"sub_users"`
+	ApiKeys              []ApiKeyConfig       `json:"api_keys"`
+	AuditLogs            []AuditLog           `json:"audit_logs"`
+	Tasks                []SavedTask          `json:"tasks"`
+	LoginLogs            []SavedLoginLog      `json:"login_logs"`
+	EnabledImages        []string             `json:"enabled_images"`
+	Snapshots            []Snapshot           `json:"snapshots"`
+	SecurityAutoShutdown bool                 `json:"security_auto_shutdown"`
+	SSL                  SSLConfig            `json:"ssl"`
+	SSLCertificates      map[string]SSLConfig `json:"ssl_certificates"`
 }
 
 var configPath string
@@ -302,8 +322,11 @@ func InitConfig() (*ClicdConfig, error) {
 	}
 	if ok {
 		AppConfig = cfg
-		normalizeConfigDefaults(dataDir)
+		changed := normalizeConfigDefaults(dataDir)
 		if migrateLoadedConfig() {
+			changed = true
+		}
+		if changed {
 			if err := SaveConfig(); err != nil {
 				return nil, err
 			}
@@ -318,9 +341,8 @@ func InitConfig() (*ClicdConfig, error) {
 	if ok {
 		AppConfig = legacy
 		normalizeConfigDefaults(dataDir)
-		if migrateLoadedConfig() {
-			// Save below persists normalized legacy data into SQLite.
-		}
+		migrateLoadedConfig()
+		// Always save legacy JSON data into SQLite.
 		if err := SaveConfig(); err != nil {
 			return nil, err
 		}
@@ -371,51 +393,127 @@ func InitConfig() (*ClicdConfig, error) {
 	return AppConfig, nil
 }
 
-func normalizeConfigDefaults(dataDir string) {
+func normalizeConfigDefaults(dataDir string) bool {
+	changed := false
 	if AppConfig.Port == 0 {
 		AppConfig.Port = 8999
+		changed = true
 	}
 	if AppConfig.NextVNCPort == 0 {
 		AppConfig.NextVNCPort = 5900
+		changed = true
 	}
 	if AppConfig.NextSSHPort == 0 {
 		AppConfig.NextSSHPort = 22000
+		changed = true
 	}
 	if AppConfig.NextContainerID == 0 {
 		AppConfig.NextContainerID = 1
+		changed = true
 	}
 	if AppConfig.DataDir == "" {
 		AppConfig.DataDir = dataDir
+		changed = true
 	}
 	if AppConfig.Containers == nil {
 		AppConfig.Containers = make([]Container, 0)
+		changed = true
 	}
 	if AppConfig.Snapshots == nil {
 		AppConfig.Snapshots = make([]Snapshot, 0)
+		changed = true
 	}
 	if AppConfig.SubUsers == nil {
 		AppConfig.SubUsers = make([]SubUser, 0)
+		changed = true
 	}
 	if AppConfig.ApiKeys == nil {
 		AppConfig.ApiKeys = make([]ApiKeyConfig, 0)
+		changed = true
 	} else {
 		for i := range AppConfig.ApiKeys {
 			if len(AppConfig.ApiKeys[i].Scopes) == 0 {
 				AppConfig.ApiKeys[i].Scopes = []string{"*"}
+				changed = true
 			}
 		}
 	}
 	if AppConfig.AuditLogs == nil {
 		AppConfig.AuditLogs = make([]AuditLog, 0)
+		changed = true
 	}
 	if AppConfig.Tasks == nil {
 		AppConfig.Tasks = make([]SavedTask, 0)
+		changed = true
 	}
 	if AppConfig.LoginLogs == nil {
 		AppConfig.LoginLogs = make([]SavedLoginLog, 0)
+		changed = true
 	}
 	if AppConfig.EnabledImages == nil {
 		AppConfig.EnabledImages = make([]string, 0)
+		changed = true
+	}
+	if normalizeSSLDefaults() {
+		changed = true
+	}
+	return changed
+}
+
+func normalizeSSLDefaults() bool {
+	changed := false
+	previousMode := AppConfig.SSL.Mode
+	AppConfig.SSL.Mode = NormalizeSSLMode(AppConfig.SSL.Mode)
+	if AppConfig.SSL.Mode != previousMode {
+		changed = true
+	}
+	if AppConfig.SSL.Mode == SSLModeDisabled {
+		if AppConfig.SSL.Enabled {
+			changed = true
+		}
+		AppConfig.SSL.Enabled = false
+	}
+	if AppConfig.SSLCertificates == nil {
+		AppConfig.SSLCertificates = map[string]SSLConfig{}
+		changed = true
+	}
+	for mode, cert := range AppConfig.SSLCertificates {
+		cert.Mode = NormalizeSSLMode(cert.Mode)
+		if cert.Mode == SSLModeDisabled {
+			delete(AppConfig.SSLCertificates, mode)
+			changed = true
+			continue
+		}
+		if AppConfig.SSLCertificates[cert.Mode] != cert {
+			changed = true
+		}
+		AppConfig.SSLCertificates[cert.Mode] = cert
+		if mode != cert.Mode {
+			delete(AppConfig.SSLCertificates, mode)
+			changed = true
+		}
+	}
+	if AppConfig.SSL.Mode != SSLModeDisabled && AppConfig.SSL.CertPath != "" && AppConfig.SSL.KeyPath != "" {
+		cert := AppConfig.SSL
+		cert.Enabled = false
+		if AppConfig.SSLCertificates[cert.Mode] != cert {
+			changed = true
+		}
+		AppConfig.SSLCertificates[cert.Mode] = cert
+	}
+	return changed
+}
+
+func NormalizeSSLMode(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case SSLModeLetsEncrypt:
+		return SSLModeLetsEncrypt
+	case SSLModeSelfSigned:
+		return SSLModeSelfSigned
+	case SSLModeUploaded:
+		return SSLModeUploaded
+	default:
+		return SSLModeDisabled
 	}
 }
 

@@ -50,6 +50,7 @@ func main() {
 
 		// Start security scanner
 		api.InitScanner()
+		api.StartSSLRenewalMonitor()
 
 		// Ensure iptables FORWARD rules allow managed bridge traffic.
 		lxc.EnsureForwardRules("lxcbr0")

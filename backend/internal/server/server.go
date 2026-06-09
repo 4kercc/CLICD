@@ -1,11 +1,13 @@
 package server
 
 import (
+	"crypto/tls"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 
 	"clicd/internal/api"
@@ -75,6 +77,7 @@ func setupRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/change-password", corsMiddleware(api.AdminMiddleware(api.HandleAdminPasswordChange)))
 	mux.HandleFunc("/api/change-username", corsMiddleware(api.AdminMiddleware(api.HandleAdminUsernameChange)))
 	mux.HandleFunc("/api/login-logs", corsMiddleware(api.AdminMiddleware(api.HandleLoginLogs)))
+	mux.HandleFunc("/api/ssl", corsMiddleware(api.AdminMiddleware(api.HandleSSLSettings)))
 	mux.HandleFunc("/api/containers", corsMiddleware(api.AuthMiddleware(api.SubUserMiddleware(api.HandleContainers))))
 	mux.HandleFunc("/api/containers/list", corsMiddleware(api.AuthMiddleware(api.SubUserMiddleware(api.HandleContainerListAlias))))
 	mux.HandleFunc("/api/containers/", corsMiddleware(api.AuthMiddleware(api.SubUserMiddleware(api.HandleSingleContainer))))
@@ -141,6 +144,7 @@ func setupRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/sub-users/", corsMiddleware(api.AuthMiddleware(api.HandleSubUserAction)))
 	mux.HandleFunc("/api/v1/audit-logs", corsMiddleware(api.AuthMiddleware(api.HandleAuditLogs)))
 	mux.HandleFunc("/api/v1/login-logs", corsMiddleware(api.AuthMiddleware(api.HandleLoginLogs)))
+	mux.HandleFunc("/api/v1/ssl", corsMiddleware(api.AdminMiddleware(api.HandleSSLSettings)))
 	mux.HandleFunc("/api/v1/security/alerts", corsMiddleware(api.AuthMiddleware(api.ScopeMiddleware("security:read", api.HandleSecurityAlerts))))
 	mux.HandleFunc("/api/v1/security/check", corsMiddleware(api.AuthMiddleware(api.ScopeMiddleware("security:check", api.HandleSecurityCheck))))
 	mux.HandleFunc("/api/v1/security/logs", corsMiddleware(api.AuthMiddleware(api.ScopeMiddleware("security:read", api.HandleSecurityLogs))))
@@ -208,5 +212,33 @@ func Run() error {
 		Handler: mux,
 	}
 
+	if sslEnabled() {
+		server.TLSConfig = &tls.Config{
+			MinVersion: tls.VersionTLS12,
+			GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+				cert, err := tls.LoadX509KeyPair(config.AppConfig.SSL.CertPath, config.AppConfig.SSL.KeyPath)
+				return &cert, err
+			},
+		}
+		log.Printf("CLICD Web Server SSL enabled on https://0.0.0.0:%d", config.AppConfig.Port)
+		return server.ListenAndServeTLS("", "")
+	}
+
 	return server.ListenAndServe()
+}
+
+func sslEnabled() bool {
+	ssl := config.AppConfig.SSL
+	if !ssl.Enabled || ssl.CertPath == "" || ssl.KeyPath == "" {
+		return false
+	}
+	if _, err := os.Stat(ssl.CertPath); err != nil {
+		log.Printf("SSL certificate is not readable, falling back to HTTP: %v", err)
+		return false
+	}
+	if _, err := os.Stat(ssl.KeyPath); err != nil {
+		log.Printf("SSL private key is not readable, falling back to HTTP: %v", err)
+		return false
+	}
+	return true
 }
