@@ -1,7 +1,7 @@
 package version
 
 var (
-	Version = "1.1.12"
+	Version = "1.1.13"
 	Repo    = "MengMengCode/CLICD"
 )
 
