@@ -1,10 +1,10 @@
-# API 集成
+# API Integration
 
-CLICD 继续兼容旧版 `/api` 接口，已有对接无需修改。新接入推荐使用 `/api/v1` 接口，下面的清单均为 v1；容器列表推荐 `GET /api/v1/containers`。
+CLICD remains compatible with legacy `/api` endpoints, so existing integrations do not need to change. New integrations should use `/api/v1`; the list below is all v1, and the recommended container list endpoint is `GET /api/v1/containers`.
 
-## 认证
+## Authentication
 
-API Key 可在“API 集成”页面创建和管理。请求时支持两种写法：
+API keys can be created and managed from the API Integration page. Requests support either of these headers:
 
 ```bash
 curl -H "X-API-Key: YOUR_API_KEY" https://panel.example.com/api/v1/containers
@@ -14,9 +14,9 @@ curl -H "X-API-Key: YOUR_API_KEY" https://panel.example.com/api/v1/containers
 curl -H "Authorization: Bearer YOUR_API_KEY" https://panel.example.com/api/v1/dashboard
 ```
 
-## 响应结构
+## Response Shape
 
-所有接口保持统一响应包裹：
+All APIs use the same response envelope:
 
 ```json
 {
@@ -26,13 +26,13 @@ curl -H "Authorization: Bearer YOUR_API_KEY" https://panel.example.com/api/v1/da
 }
 ```
 
-对接时建议只读取业务所需字段。新增能力会优先追加可选字段，不会要求已有插件改掉现有字段名。
+Integrations should read only the business fields they need. New capabilities are added as optional fields where possible, without requiring existing plugins to rename current fields.
 
-## 创建与重装
+## Creation and Reinstall
 
-创建容器、批量创建、重装和批量重装已支持 NAT、公网 IPv4、IPv6 混合网络，以及 Linux SSH 登录方式配置。公网 IPv4/IPv6 地址池可通过 `GET /api/v1/routing` 查看，并可通过 `PUT /api/v1/routing` 更新。
+Container creation, batch creation, reinstall, and batch reinstall support mixed NAT, public IPv4, IPv6 networking, plus Linux SSH login configuration. Public IPv4/IPv6 pools can be viewed with `GET /api/v1/routing` and updated with `PUT /api/v1/routing`.
 
-创建容器示例：
+Create container example:
 
 ```json
 {
@@ -57,22 +57,22 @@ curl -H "Authorization: Bearer YOUR_API_KEY" https://panel.example.com/api/v1/da
 }
 ```
 
-字段说明：
+Field notes:
 
-| 字段 | 说明 |
+| Field | Description |
 | --- | --- |
-| `assign_nat` | 是否分配 NAT 端口映射；不传时保持默认 NAT 行为。 |
-| `assign_ipv4` | 是否分配公网 IPv4。 |
-| `ipv4_count` | 自动分配公网 IPv4 数量。 |
-| `public_ipv4s` | 指定公网 IPv4 地址列表。 |
-| `assign_ipv6` | 是否分配 IPv6。 |
-| `ipv6_count` | 自动分配 IPv6 数量。 |
-| `ipv6_addresses` | 指定 IPv6 地址列表。 |
-| `ssh_auth_mode` | Linux 创建支持 `auto_password`、`password`、`key`；重装额外支持 `keep`。 |
-| `ssh_password` | `password` 模式下的自定义密码；8-64 位，至少包含字母和数字，不能包含空白字符。 |
-| `ssh_public_key` | `key` 模式下的一行 SSH 公钥。 |
+| `assign_nat` | Whether to allocate NAT port mappings. If omitted, default NAT behavior is preserved. |
+| `assign_ipv4` | Whether to allocate public IPv4. |
+| `ipv4_count` | Number of public IPv4 addresses to allocate automatically. |
+| `public_ipv4s` | Explicit public IPv4 address list. |
+| `assign_ipv6` | Whether to allocate IPv6. |
+| `ipv6_count` | Number of IPv6 addresses to allocate automatically. |
+| `ipv6_addresses` | Explicit IPv6 address list. |
+| `ssh_auth_mode` | Linux creation supports `auto_password`, `password`, and `key`; reinstall also supports `keep`. |
+| `ssh_password` | Custom password for `password` mode. It must be 8-64 characters, include letters and digits, and contain no whitespace. |
+| `ssh_public_key` | One-line SSH public key for `key` mode. |
 
-重装示例：
+Reinstall example:
 
 ```json
 {
@@ -83,11 +83,11 @@ curl -H "Authorization: Bearer YOUR_API_KEY" https://panel.example.com/api/v1/da
 }
 ```
 
-`keep` 仅用于重装，表示沿用当前 SSH 密码。Windows KVM 镜像会忽略 Linux SSH 公钥相关字段。
+`keep` is only for reinstall and keeps the current SSH password. Windows KVM images ignore Linux SSH public key fields.
 
-## Python 示例
+## Python Example
 
-获取容器列表：
+Fetch containers:
 
 ```python
 import requests
@@ -106,7 +106,7 @@ resp.raise_for_status()
 print(resp.json())
 ```
 
-创建端口映射：
+Create a port mapping:
 
 ```python
 import requests
@@ -132,103 +132,103 @@ resp.raise_for_status()
 print(resp.json())
 ```
 
-## 接口清单
+## Endpoint List
 
-### 总览
+### Overview
 
-| 方法 | 路径 | 说明 |
+| Method | Path | Description |
 | --- | --- | --- |
-| GET | `/api/v1/dashboard` | 控制面板统计 |
-| GET | `/api/v1/host-info` | 主机资源 |
-| GET | `/api/v1/routing` | NAT/IPv4/IPv6 路由 |
-| PUT | `/api/v1/routing` | 更新公网 IPv4/IPv6 池 |
-| POST | `/api/v1/routing/ipv4-scan` | 扫描公网 IPv4 段 |
-| GET | `/api/v1/ipv6/status` | IPv6 状态 |
-| GET | `/api/v1/tasks` | 任务队列 |
-| DELETE | `/api/v1/tasks/{task_id}` | 删除任务 |
+| GET | `/api/v1/dashboard` | Dashboard statistics |
+| GET | `/api/v1/host-info` | Host resources |
+| GET | `/api/v1/routing` | NAT/IPv4/IPv6 routing |
+| PUT | `/api/v1/routing` | Update public IPv4/IPv6 pools |
+| POST | `/api/v1/routing/ipv4-scan` | Scan a public IPv4 segment |
+| GET | `/api/v1/ipv6/status` | IPv6 status |
+| GET | `/api/v1/tasks` | Task queue |
+| DELETE | `/api/v1/tasks/{task_id}` | Delete a task |
 
-### 容器
+### Containers
 
-| 方法 | 路径 | 说明 |
+| Method | Path | Description |
 | --- | --- | --- |
-| GET | `/api/v1/containers` | 容器列表 |
-| POST | `/api/v1/containers/list` | 容器列表兼容 POST 写法 |
-| POST | `/api/v1/containers` | 创建容器 |
-| GET | `/api/v1/containers/{id|uuid|name}` | 容器详情 |
-| POST | `/api/v1/containers/{id}/start` | 开机 |
-| POST | `/api/v1/containers/{id}/stop` | 关机 |
-| POST | `/api/v1/containers/{id}/restart` | 重启 |
-| POST | `/api/v1/containers/{id}/reinstall` | 重装 |
-| DELETE | `/api/v1/containers/{id}/delete` | 删除 |
-| GET | `/api/v1/containers/{id}/usage` | 资源用量 |
-| GET | `/api/v1/containers/{id}/traffic` | 流量统计 |
-| POST | `/api/v1/containers/{id}/traffic-reset` | 重置流量 |
-| PUT | `/api/v1/containers/{id}/traffic-limit` | 调整流量限制 |
-| PUT | `/api/v1/containers/{id}/resource-limit` | 调整资源限制 |
-| PUT | `/api/v1/containers/{id}/expiry` | 调整到期时间 |
-| POST | `/api/v1/containers/{id}/reset-password` | 重置 SSH 密码 |
-| POST | `/api/v1/containers/{id}/ipv6` | 分配 IPv6 |
+| GET | `/api/v1/containers` | Container list |
+| POST | `/api/v1/containers/list` | Compatible POST form for container list |
+| POST | `/api/v1/containers` | Create container |
+| GET | `/api/v1/containers/{id|uuid|name}` | Container details |
+| POST | `/api/v1/containers/{id}/start` | Start |
+| POST | `/api/v1/containers/{id}/stop` | Stop |
+| POST | `/api/v1/containers/{id}/restart` | Restart |
+| POST | `/api/v1/containers/{id}/reinstall` | Reinstall |
+| DELETE | `/api/v1/containers/{id}/delete` | Delete |
+| GET | `/api/v1/containers/{id}/usage` | Resource usage |
+| GET | `/api/v1/containers/{id}/traffic` | Traffic statistics |
+| POST | `/api/v1/containers/{id}/traffic-reset` | Reset traffic |
+| PUT | `/api/v1/containers/{id}/traffic-limit` | Update traffic limits |
+| PUT | `/api/v1/containers/{id}/resource-limit` | Update resource limits |
+| PUT | `/api/v1/containers/{id}/expiry` | Update expiration time |
+| POST | `/api/v1/containers/{id}/reset-password` | Reset SSH password |
+| POST | `/api/v1/containers/{id}/ipv6` | Assign IPv6 |
 
-### 端口与快照
+### Ports and Snapshots
 
-| 方法 | 路径 | 说明 |
+| Method | Path | Description |
 | --- | --- | --- |
-| GET | `/api/v1/containers/{id}/random-port` | 随机可用端口 |
-| POST | `/api/v1/containers/{id}/port-mappings` | 添加端口映射 |
-| PUT | `/api/v1/containers/{id}/port-mappings/{index}` | 更新端口映射 |
-| DELETE | `/api/v1/containers/{id}/port-mappings/{index}` | 删除端口映射 |
-| GET | `/api/v1/snapshots` | 快照总览 |
-| GET | `/api/v1/containers/{id}/snapshots` | 容器快照 |
-| POST | `/api/v1/containers/{id}/snapshots` | 创建快照 |
-| DELETE | `/api/v1/containers/{id}/snapshots/{snapshot_id}` | 删除快照 |
-| POST | `/api/v1/containers/{id}/snapshots/{snapshot_id}/restore` | 恢复快照 |
-| POST | `/api/v1/containers/{id}/snapshots/schedule` | 计划快照 |
-| PUT | `/api/v1/containers/{id}/snapshots/quota` | 快照配额 |
+| GET | `/api/v1/containers/{id}/random-port` | Random available port |
+| POST | `/api/v1/containers/{id}/port-mappings` | Add port mapping |
+| PUT | `/api/v1/containers/{id}/port-mappings/{index}` | Update port mapping |
+| DELETE | `/api/v1/containers/{id}/port-mappings/{index}` | Delete port mapping |
+| GET | `/api/v1/snapshots` | Snapshot overview |
+| GET | `/api/v1/containers/{id}/snapshots` | Container snapshots |
+| POST | `/api/v1/containers/{id}/snapshots` | Create snapshot |
+| DELETE | `/api/v1/containers/{id}/snapshots/{snapshot_id}` | Delete snapshot |
+| POST | `/api/v1/containers/{id}/snapshots/{snapshot_id}/restore` | Restore snapshot |
+| POST | `/api/v1/containers/{id}/snapshots/schedule` | Schedule snapshots |
+| PUT | `/api/v1/containers/{id}/snapshots/quota` | Snapshot quota |
 
-### 平台管理
+### Platform Management
 
-| 方法 | 路径 | 说明 |
+| Method | Path | Description |
 | --- | --- | --- |
-| GET | `/api/v1/templates` | 模板列表 |
-| GET | `/api/v1/images` | 镜像管理列表 |
-| POST | `/api/v1/images/download` | 下载镜像 |
-| POST | `/api/v1/images/cancel` | 取消镜像下载 |
-| DELETE | `/api/v1/images/delete` | 删除镜像缓存 |
-| PUT | `/api/v1/images/toggle` | 启用/禁用镜像 |
-| GET | `/api/v1/security/alerts` | 安全告警 |
-| POST | `/api/v1/security/check` | 立即安全检查 |
-| GET | `/api/v1/security/logs?container={name}` | 安全连接日志 |
-| GET | `/api/v1/security/summary` | 安全汇总 |
-| GET | `/api/v1/security/settings` | 安全设置 |
-| PUT | `/api/v1/security/settings` | 更新安全设置 |
-| GET | `/api/v1/swap` | Swap 信息 |
-| POST | `/api/v1/swap` | 调整 Swap |
-| POST | `/api/v1/batch-create` | 批量创建容器 |
-| POST | `/api/v1/batch-action` | 批量开关机/删除/重装 |
-| POST | `/api/v1/ssh-ticket` | 创建 WebSSH 票据 |
-| POST | `/api/v1/vnc-ticket` | 创建 WebVNC 票据 |
+| GET | `/api/v1/templates` | Template list |
+| GET | `/api/v1/images` | Image management list |
+| POST | `/api/v1/images/download` | Download image |
+| POST | `/api/v1/images/cancel` | Cancel image download |
+| DELETE | `/api/v1/images/delete` | Delete image cache |
+| PUT | `/api/v1/images/toggle` | Enable or disable image |
+| GET | `/api/v1/security/alerts` | Security alerts |
+| POST | `/api/v1/security/check` | Run security check |
+| GET | `/api/v1/security/logs?container={name}` | Security connection logs |
+| GET | `/api/v1/security/summary` | Security summary |
+| GET | `/api/v1/security/settings` | Security settings |
+| PUT | `/api/v1/security/settings` | Update security settings |
+| GET | `/api/v1/swap` | Swap information |
+| POST | `/api/v1/swap` | Adjust Swap |
+| POST | `/api/v1/batch-create` | Batch create containers |
+| POST | `/api/v1/batch-action` | Batch power action, delete, or reinstall |
+| POST | `/api/v1/ssh-ticket` | Create WebSSH ticket |
+| POST | `/api/v1/vnc-ticket` | Create WebVNC ticket |
 
-### 账号与日志
+### Accounts and Logs
 
-| 方法 | 路径 | 说明 |
+| Method | Path | Description |
 | --- | --- | --- |
-| POST | `/api/v1/sub-user/create` | 创建子用户链接 |
-| GET | `/api/v1/sub-users` | 子用户列表 |
-| POST | `/api/v1/sub-users/{id}/rotate-password` | 轮换子用户密码 |
-| GET | `/api/v1/sub-users/{id}/audit-logs` | 子用户操作日志 |
-| GET | `/api/v1/sub-users/{id}/login-logs` | 子用户登录日志 |
-| GET | `/api/v1/audit-logs` | 操作日志 |
-| GET | `/api/v1/login-logs` | 登录日志 |
-| GET | `/api/v1/api-keys` | API Key 列表 |
-| POST | `/api/v1/api-keys` | 创建 API Key |
-| PATCH | `/api/v1/api-keys/{id}` | 更新 API Key |
-| DELETE | `/api/v1/api-keys/{id}` | 删除 API Key |
+| POST | `/api/v1/sub-user/create` | Create sub-user link |
+| GET | `/api/v1/sub-users` | Sub-user list |
+| POST | `/api/v1/sub-users/{id}/rotate-password` | Rotate sub-user password |
+| GET | `/api/v1/sub-users/{id}/audit-logs` | Sub-user audit logs |
+| GET | `/api/v1/sub-users/{id}/login-logs` | Sub-user login logs |
+| GET | `/api/v1/audit-logs` | Audit logs |
+| GET | `/api/v1/login-logs` | Login logs |
+| GET | `/api/v1/api-keys` | API key list |
+| POST | `/api/v1/api-keys` | Create API key |
+| PATCH | `/api/v1/api-keys/{id}` | Update API key |
+| DELETE | `/api/v1/api-keys/{id}` | Delete API key |
 
-## 返回样例
+## Response Samples
 
-以下样例按接口路径分组。真实环境中的资源数值、任务 ID、容器 ID、时间、IP 和密钥会不同，示例中的密码、票据和 API Key 均已脱敏。
+The samples below are grouped by endpoint path. Resource numbers, task IDs, container IDs, timestamps, IP addresses, and keys will differ in real environments. Passwords, tickets, and API keys are masked.
 
-### 总览
+### Overview
 
 ```json
 {
@@ -315,7 +315,7 @@ print(resp.json())
 }
 ```
 
-### 容器
+### Containers
 
 ```json
 {
@@ -449,7 +449,7 @@ print(resp.json())
 }
 ```
 
-### 端口与快照
+### Ports and Snapshots
 
 ```json
 {
@@ -522,7 +522,7 @@ print(resp.json())
 }
 ```
 
-### 平台管理
+### Platform Management
 
 ```json
 {
@@ -598,16 +598,16 @@ print(resp.json())
   },
   "POST /api/v1/ssh-ticket": {
     "success": true,
-    "data": { "ticket": "***60秒有效票据***" }
+    "data": { "ticket": "***60 seconds valid***" }
   },
   "POST /api/v1/vnc-ticket": {
     "success": true,
-    "data": { "ticket": "***60秒有效票据***" }
+    "data": { "ticket": "***60 seconds valid***" }
   }
 }
 ```
 
-### 账号与日志
+### Accounts and Logs
 
 ```json
 {

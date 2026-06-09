@@ -63,8 +63,10 @@ const scopeGroups = [
       ['dashboard:read', '控制面板'],
       ['host:read', '主机资源'],
       ['routing:read', '路由信息'],
+      ['routing:write', '路由配置'],
       ['ipv6:read', 'IPv6 状态'],
       ['task:read', '任务列表'],
+      ['task:delete', '删除任务'],
       ['image:read', '镜像列表'],
     ],
   },
@@ -137,7 +139,9 @@ const endpointGroups: Array<{ title: string; endpoints: EndpointTuple[] }> = [
     endpoints: [
       ['GET', '/api/v1/dashboard', '控制面板统计'],
       ['GET', '/api/v1/host-info', '主机资源'],
-      ['GET', '/api/v1/routing', 'NAT/IPv6 路由'],
+      ['GET', '/api/v1/routing', 'NAT/IPv4/IPv6 路由'],
+      ['PUT', '/api/v1/routing', '更新公网 IPv4/IPv6 池'],
+      ['POST', '/api/v1/routing/ipv4-scan', '扫描公网 IPv4 段'],
       ['GET', '/api/v1/ipv6/status', 'IPv6 状态'],
       ['GET', '/api/v1/tasks', '任务队列'],
       ['DELETE', '/api/v1/tasks/{task_id}', '删除任务'],
@@ -147,7 +151,7 @@ const endpointGroups: Array<{ title: string; endpoints: EndpointTuple[] }> = [
     title: '容器',
     endpoints: [
       ['GET', '/api/v1/containers', '容器列表'],
-      ['POST', '/api/v1/containers/list', '容器列表（兼容旧接口）'],
+      ['POST', '/api/v1/containers/list', '容器列表（兼容 POST 写法）'],
       ['POST', '/api/v1/containers', '创建容器'],
       ['GET', '/api/v1/containers/{id|uuid|name}', '容器详情'],
       ['POST', '/api/v1/containers/{id}/start', '开机'],
@@ -501,7 +505,6 @@ export default function ApiIntegration() {
             <div className="rounded-lg bg-gray-900 p-4 font-mono text-xs text-gray-100">
               <div>curl -X GET {BASE_URL}/api/v1/containers -H "X-API-Key: clicd_sk_xxxx"</div>
               <div className="mt-2 text-gray-400">curl -X GET {BASE_URL}/api/v1/dashboard -H "Authorization: Bearer clicd_sk_xxxx"</div>
-              <div className="mt-2 text-amber-300">旧版 /api/containers/list 已兼容，但新接入请使用 GET /api/v1/containers</div>
             </div>
 
             {endpointGroups.map(group => (
@@ -732,8 +735,14 @@ const requestBodySamples: Record<string, Record<string, unknown>> = {
     io_speed_mbps: 0,
     extra_ports: [8080],
     port_mapping_count: 2,
+    assign_nat: true,
     snapshot_limit: 1,
+    assign_ipv4: false,
+    ipv4_count: 1,
+    public_ipv4s: [],
     assign_ipv6: true,
+    ipv6_count: 1,
+    ipv6_addresses: [],
     ssh_auth_mode: 'auto_password',
     ssh_password: '',
     ssh_public_key: '',
@@ -781,6 +790,32 @@ const requestBodySamples: Record<string, Record<string, unknown>> = {
   'POST /api/v1/images/cancel': { template_id: 'debian-bookworm' },
   'DELETE /api/v1/images/delete': { template_id: 'debian-bookworm' },
   'PUT /api/v1/images/toggle': { template_id: 'debian-bookworm', enabled: true },
+  'PUT /api/v1/routing': {
+    items: [
+      {
+        address: '203.0.113.10',
+        interface: 'eth0',
+        prefix_len: 32,
+        gateway: '203.0.113.1',
+      },
+    ],
+    ipv6_prefixes: [
+      {
+        address: '2001:db8:100::2',
+        prefix: '2001:db8:100::/64',
+        prefix_len: 64,
+        interface: 'eth0',
+        gateway: '2001:db8:100::1',
+      },
+    ],
+  },
+  'POST /api/v1/routing/ipv4-scan': {
+    cidr: '203.0.113.0/29',
+    interface: 'eth0',
+    gateway: '203.0.113.1',
+    verify: true,
+    limit: 64,
+  },
   'POST /api/v1/security/check': { container_name: 'example-vm' },
   'PUT /api/v1/security/settings': { auto_shutdown: false },
   'POST /api/v1/swap': { action: 'resize', size_mb: 16384 },
@@ -793,15 +828,28 @@ const requestBodySamples: Record<string, Record<string, unknown>> = {
         vcpu: 1,
         ram_mb: 512,
         disk_gb: 10,
+        assign_nat: true,
         port_mapping_count: 2,
         snapshot_limit: 1,
+        assign_ipv4: false,
+        ipv4_count: 1,
+        public_ipv4s: [],
         assign_ipv6: true,
+        ipv6_count: 1,
+        ipv6_addresses: [],
         ssh_auth_mode: 'key',
         ssh_public_key: 'ssh-ed25519 AAAA... user@example',
       },
     ],
   },
-  'POST /api/v1/batch-action': { action: 'restart', containers: [5], template_id: '' },
+  'POST /api/v1/batch-action': {
+    action: 'reinstall',
+    containers: [5],
+    template_id: 'debian-bookworm',
+    ssh_auth_mode: 'keep',
+    ssh_password: '',
+    ssh_public_key: '',
+  },
   'POST /api/v1/ssh-ticket': { container_name: 'example-vm' },
   'POST /api/v1/vnc-ticket': { container_name: 'kvm-demo' },
   'POST /api/v1/sub-user/create': { container_name: 'example-vm' },
@@ -845,12 +893,29 @@ const responseSamples: Record<string, unknown> = {
     success: true,
     data: {
       nat4: { used: 62, remaining: '45474', total: '45536' },
+      ipv4: { used: 1, remaining: '3', total: '4' },
       ipv6: { used: 31, remaining: 'large', total: 'large' },
+      public_ipv4_addresses: [{ address: '203.0.113.10', interface: 'eth0', prefix_len: 32, gateway: '203.0.113.1' }],
+      ipv4_assignments: [{ container_id: 5, container_name: 'example-vm', address: '203.0.113.10', interface: 'eth0', prefix_len: 32, gateway: '203.0.113.1' }],
       nat4_mappings: [
         { container_id: 5, container_name: 'example-vm', status: 'running', ip: '10.0.0.10', host_port: 22004, container_port: 22, protocol: 'tcp' },
       ],
       ipv6_assignments: [{ container_id: 5, container_name: 'example-vm', address: '2001:db8:100::1005', prefix_len: 64, interface: 'eth0' }],
     },
+  },
+  'PUT /api/v1/routing': {
+    success: true,
+    data: {
+      ipv4: { used: 1, remaining: '3', total: '4' },
+      public_ipv4_addresses: [{ address: '203.0.113.10', interface: 'eth0', prefix_len: 32, gateway: '203.0.113.1' }],
+      ipv6_prefixes: [{ interface: 'eth0', address: '2001:db8:100::2', prefix: '2001:db8:100::/64', prefix_len: 64, gateway: '2001:db8:100::1' }],
+    },
+  },
+  'POST /api/v1/routing/ipv4-scan': {
+    success: true,
+    data: [
+      { address: '203.0.113.10', interface: 'eth0', prefix_len: 32, gateway: '203.0.113.1', status: 'available', usable: true, reason: '' },
+    ],
   },
   'GET /api/v1/ipv6/status': {
     success: true,
@@ -1064,10 +1129,29 @@ function examplePathFor(path: string) {
 }
 
 function endpointNoteFor(key: string) {
-  if (key.includes('/vnc-ticket')) return 'WebVNC 仅适用于 KVM 虚拟机；LXC 容器会返回 VNC console is only available for KVM VMs。'
-  if (key.includes('/containers/{id}/delete') || key.includes('/batch-action')) return '该接口会进入任务队列，请随后调用 GET /api/v1/tasks 查看执行状态。'
-  if (key.includes('/reset-password') || key.includes('/api-keys') || key.includes('/sub-user')) return '样例中的密钥、密码和票据已脱敏；创建类接口的完整密钥只在创建响应中出现一次。'
-  return ''
+  const notes: string[] = []
+  if (key === 'POST /api/v1/containers') {
+    notes.push('Linux 创建支持 ssh_auth_mode=auto_password|password|key；公网 IPv4、IPv6 与 NAT 可通过 assign_nat、assign_ipv4、assign_ipv6 组合使用。')
+  }
+  if (key === 'POST /api/v1/containers/{id}/reinstall') {
+    notes.push('重装支持 ssh_auth_mode=keep|auto_password|password|key；keep 仅用于重装，未传 SSH 字段时保持原有行为。')
+  }
+  if (key === 'POST /api/v1/batch-create') {
+    notes.push('批量创建的单个 containers[] 项支持与 POST /api/v1/containers 相同的网络和 SSH 认证字段。')
+  }
+  if (key === 'POST /api/v1/batch-action') {
+    notes.push('action=reinstall 时可追加 template_id、ssh_auth_mode、ssh_password、ssh_public_key；其他 action 会忽略这些重装字段。')
+  }
+  if (key === 'PUT /api/v1/routing') {
+    notes.push('更新公网地址池需要 routing:write；已分配给容器的地址不能从池中移除。')
+  }
+  if (key === 'POST /api/v1/routing/ipv4-scan') {
+    notes.push('扫描公网 IPv4 段需要 routing:write；verify=true 时会尝试校验地址可用性。')
+  }
+  if (key.includes('/vnc-ticket')) notes.push('WebVNC 仅适用于 KVM 虚拟机；LXC 容器会返回 VNC console is only available for KVM VMs。')
+  if (key.includes('/containers/{id}/delete') || key.includes('/batch-action')) notes.push('该接口会进入任务队列，请随后调用 GET /api/v1/tasks 查看执行状态。')
+  if (key.includes('/reset-password') || key.includes('/api-keys') || key.includes('/sub-user')) notes.push('样例中的密钥、密码和票据已脱敏；创建类接口的完整密钥只在创建响应中出现一次。')
+  return notes.join(' ')
 }
 
 function defaultResponseFor(method: HttpMethod) {

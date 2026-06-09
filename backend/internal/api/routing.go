@@ -110,7 +110,8 @@ func HandleRoutingIPv4Scan(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleRoutingGet(w http.ResponseWriter, r *http.Request) {
-	if !requireScope(w, r, "routing:read") {
+	if !hasAnyScope(r, "routing:read", "routing:write") {
+		jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "Insufficient API key scope"})
 		return
 	}
 

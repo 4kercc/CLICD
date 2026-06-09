@@ -25,6 +25,14 @@ POST /api/v1/containers
 POST /api/v1/batch-create
 ```
 
+Linux 容器和 Linux KVM 虚拟机创建时支持配置 SSH 登录方式：
+
+- `auto_password`：自动生成 root SSH 密码。
+- `password`：使用自定义 `ssh_password`。
+- `key`：写入一行 `ssh_public_key`，仍会保留可用于 WebSSH 的密码。
+
+网络分配可以按需组合 NAT、公网 IPv4 和 IPv6。API 字段保持为 `assign_nat`、`assign_ipv4`、`public_ipv4s`、`assign_ipv6`、`ipv6_addresses` 等可选字段，未传时沿用默认行为。
+
 ## 生命周期操作
 
 ```http
@@ -36,6 +44,8 @@ DELETE /api/v1/containers/{id}/delete
 ```
 
 开关机、重装、删除等操作会进入任务队列。调用后可通过 `GET /api/v1/tasks` 查看执行状态。
+
+重装 Linux 系统时可传 `ssh_auth_mode`、`ssh_password`、`ssh_public_key`。`ssh_auth_mode=keep` 表示沿用当前 SSH 密码；不传这些字段时保持旧行为。
 
 ## 资源与流量
 
