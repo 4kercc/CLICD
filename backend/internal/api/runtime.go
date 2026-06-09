@@ -38,6 +38,26 @@ func createByRuntime(cfg lxc.ContainerConfig) error {
 	return lxcManager.CreateContainer(cfg)
 }
 
+func validateCreateSSHAuth(cfg lxc.ContainerConfig) error {
+	if cfg.Virtualization == config.VirtualizationKVM && kvm.IsWindowsImage(cfg.TemplateID) {
+		return nil
+	}
+	_, err := lxc.ResolveCreateSSHAccess(cfg)
+	return err
+}
+
+func validateReinstallSSHAuth(c *config.Container, templateID string, cfg lxc.ContainerConfig) error {
+	if c != nil && c.IsKVM() && kvm.IsWindowsImage(templateID) {
+		return nil
+	}
+	currentPassword := ""
+	if c != nil {
+		currentPassword = c.SSHPassword
+	}
+	_, err := lxc.ResolveReinstallSSHAccess(currentPassword, cfg)
+	return err
+}
+
 func startByRuntime(id int) error {
 	c := config.FindContainer(id)
 	if c != nil && c.IsKVM() {
@@ -70,12 +90,12 @@ func destroyByRuntime(id int) error {
 	return lxcManager.DestroyContainer(id)
 }
 
-func reinstallByRuntime(id int, templateID string) error {
+func reinstallByRuntime(id int, templateID string, authConfig ...lxc.ContainerConfig) error {
 	c := config.FindContainer(id)
 	if c != nil && c.IsKVM() {
-		return kvmManager.ReinstallContainer(id, templateID)
+		return kvmManager.ReinstallContainer(id, templateID, authConfig...)
 	}
-	return lxcManager.ReinstallContainer(id, templateID)
+	return lxcManager.ReinstallContainer(id, templateID, authConfig...)
 }
 
 func resetPasswordByRuntime(id int, password string) (string, error) {

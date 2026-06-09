@@ -138,7 +138,16 @@ export interface CreateContainerRequest {
   assign_ipv6: boolean
   ipv6_count?: number
   ipv6_addresses?: string[]
+  ssh_auth_mode?: string
+  ssh_password?: string
+  ssh_public_key?: string
   expires_at: string
+}
+
+export interface ReinstallContainerOptions {
+  ssh_auth_mode?: string
+  ssh_password?: string
+  ssh_public_key?: string
 }
 
 export interface IPv6PrefixInfo {
@@ -426,8 +435,8 @@ export const stopContainer = (id: ContainerIdentifier) =>
 export const restartContainer = (id: ContainerIdentifier) =>
   api.post<APIResponse>(`/containers/${id}/restart`)
 
-export const reinstallContainer = (id: ContainerIdentifier, templateId: string) =>
-  api.post<APIResponse>(`/containers/${id}/reinstall`, { template_id: templateId })
+export const reinstallContainer = (id: ContainerIdentifier, templateId: string, options?: ReinstallContainerOptions) =>
+  api.post<APIResponse>(`/containers/${id}/reinstall`, { template_id: templateId, ...(options || {}) })
 
 export const resetSSHPassword = (id: ContainerIdentifier, password?: string) =>
   api.post<APIResponse<{ password: string }>>(`/containers/${id}/reset-password`, password ? { password } : {})

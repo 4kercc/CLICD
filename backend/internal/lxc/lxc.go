@@ -241,6 +241,9 @@ type ContainerConfig struct {
 	AssignIPv6       bool     `json:"assign_ipv6"`
 	IPv6Count        int      `json:"ipv6_count,omitempty"`
 	IPv6Addresses    []string `json:"ipv6_addresses,omitempty"`
+	SSHAuthMode      string   `json:"ssh_auth_mode,omitempty"`
+	SSHPassword      string   `json:"ssh_password,omitempty"`
+	SSHPublicKey     string   `json:"ssh_public_key,omitempty"`
 	ExpiresAt        string   `json:"expires_at"`
 }
 
@@ -269,6 +272,10 @@ func (m *Manager) CreateContainer(cfg ContainerConfig) error {
 	}
 	if config.FindContainerByName(cfg.Name) != nil {
 		return fmt.Errorf("container name already exists: %s", cfg.Name)
+	}
+	sshAccess, err := ResolveCreateSSHAccess(cfg)
+	if err != nil {
+		return err
 	}
 
 	// Allocate ID and build LXC name
@@ -329,7 +336,7 @@ func (m *Manager) CreateContainer(cfg ContainerConfig) error {
 		}
 	}
 
-	sshPassword := generateRandomString(16)
+	sshPassword := sshAccess.Password
 
 	sshPort := 0
 	portMappings := []config.PortMapping{}
@@ -419,6 +426,13 @@ func (m *Manager) CreateContainer(cfg ContainerConfig) error {
 	}
 	if err := m.preconfigureSSH(rootfsPath, cfg.TemplateID); err != nil {
 		fmt.Printf("Warning: failed to pre-configure SSH in %s: %v\n", lxcName, err)
+	}
+	if sshAccess.PublicKey != "" {
+		if err := m.installRootAuthorizedKey(rootfsPath, sshAccess.PublicKey); err != nil {
+			_ = m.cleanupContainerStorage(lxcName)
+			config.RemoveContainer(id)
+			return fmt.Errorf("failed to install SSH public key: %v", err)
+		}
 	}
 
 	if err := m.shiftRootfsForUnprivileged(lxcName); err != nil {
@@ -1931,6 +1945,7 @@ ssh-keygen -A >/dev/null 2>&1 || true
 
 cat >/etc/ssh/sshd_config.d/99-clicd.conf <<'EOF'
 PermitRootLogin yes
+PubkeyAuthentication yes
 PasswordAuthentication yes
 KbdInteractiveAuthentication no
 ChallengeResponseAuthentication no
@@ -1938,6 +1953,7 @@ UsePAM no
 EOF
 
 set_sshd_option PermitRootLogin yes
+set_sshd_option PubkeyAuthentication yes
 set_sshd_option PasswordAuthentication yes
 set_sshd_option KbdInteractiveAuthentication no
 set_sshd_option ChallengeResponseAuthentication no
@@ -2099,6 +2115,45 @@ func (m *Manager) setRootfsPassword(rootfsPath, password string) error {
 	if err != nil {
 		return fmt.Errorf("%v, output: %s", err, string(output))
 	}
+	return nil
+}
+
+func (m *Manager) installRootAuthorizedKey(rootfsPath, publicKey string) error {
+	key, err := NormalizeSSHPublicKey(publicKey)
+	if err != nil {
+		return err
+	}
+	if key == "" {
+		return nil
+	}
+	sshDir := filepath.Join(rootfsPath, "root", ".ssh")
+	if err := os.MkdirAll(sshDir, 0700); err != nil {
+		return err
+	}
+	authPath := filepath.Join(sshDir, "authorized_keys")
+	existing, _ := os.ReadFile(authPath)
+	lines := strings.Split(string(existing), "\n")
+	for _, line := range lines {
+		if strings.TrimSpace(line) == key {
+			_ = os.Chmod(sshDir, 0700)
+			_ = os.Chmod(authPath, 0600)
+			_ = os.Chown(sshDir, 0, 0)
+			_ = os.Chown(authPath, 0, 0)
+			return nil
+		}
+	}
+	content := strings.TrimRight(string(existing), "\r\n")
+	if content != "" {
+		content += "\n"
+	}
+	content += key + "\n"
+	if err := os.WriteFile(authPath, []byte(content), 0600); err != nil {
+		return err
+	}
+	_ = os.Chmod(sshDir, 0700)
+	_ = os.Chmod(authPath, 0600)
+	_ = os.Chown(sshDir, 0, 0)
+	_ = os.Chown(authPath, 0, 0)
 	return nil
 }
 
@@ -2499,7 +2554,7 @@ func copyRootfsContents(src, dst string) error {
 }
 
 // ReinstallContainer reinstalls the container OS
-func (m *Manager) ReinstallContainer(id int, templateID string) error {
+func (m *Manager) ReinstallContainer(id int, templateID string, authConfig ...ContainerConfig) error {
 	c := config.FindContainer(id)
 	if c == nil {
 		return fmt.Errorf("container not found: %d", id)
@@ -2508,6 +2563,14 @@ func (m *Manager) ReinstallContainer(id int, templateID string) error {
 	tmpl := FindTemplate(templateID)
 	if tmpl == nil {
 		return fmt.Errorf("template not found: %s", templateID)
+	}
+	authCfg := ContainerConfig{SSHAuthMode: SSHAuthKeep}
+	if len(authConfig) > 0 {
+		authCfg = authConfig[0]
+	}
+	sshAccess, err := ResolveReinstallSSHAccess(c.SSHPassword, authCfg)
+	if err != nil {
+		return err
 	}
 
 	lxcName := c.LxcName()
@@ -2562,11 +2625,14 @@ func (m *Manager) ReinstallContainer(id int, templateID string) error {
 			fmt.Printf("Warning: failed to install IPv6 init in %s after reinstall: %v\n", lxcName, err)
 		}
 	}
-	if c.SSHPassword == "" {
-		c.SSHPassword = generateRandomString(16)
-	}
+	c.SSHPassword = sshAccess.Password
 	if err := m.preconfigureSSH(rootfsPath, templateID); err != nil {
 		fmt.Printf("Warning: failed to pre-configure SSH in %s after reinstall: %v\n", lxcName, err)
+	}
+	if sshAccess.PublicKey != "" {
+		if err := m.installRootAuthorizedKey(rootfsPath, sshAccess.PublicKey); err != nil {
+			return fmt.Errorf("failed to install SSH public key: %v", err)
+		}
 	}
 	if err := m.shiftRootfsForUnprivileged(lxcName); err != nil {
 		return err

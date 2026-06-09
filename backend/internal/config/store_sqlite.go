@@ -43,6 +43,9 @@ type savedTaskConfig struct {
 	AssignIPv6       bool     `json:"assign_ipv6"`
 	IPv6Count        int      `json:"ipv6_count,omitempty"`
 	IPv6Addresses    []string `json:"ipv6_addresses,omitempty"`
+	SSHAuthMode      string   `json:"ssh_auth_mode,omitempty"`
+	SSHPassword      string   `json:"ssh_password,omitempty"`
+	SSHPublicKey     string   `json:"ssh_public_key,omitempty"`
 	ExpiresAt        string   `json:"expires_at"`
 }
 
@@ -285,6 +288,9 @@ func ensureSchema() error {
 			cfg_assign_ipv6 INTEGER,
 			cfg_ipv6_count INTEGER,
 			cfg_ipv6_addresses TEXT,
+			cfg_ssh_auth_mode TEXT,
+			cfg_ssh_password TEXT,
+			cfg_ssh_public_key TEXT,
 			cfg_expires_at TEXT
 		)`,
 		`CREATE TABLE IF NOT EXISTS task_extra_ports (
@@ -344,6 +350,9 @@ func ensureSchemaMigrations() error {
 		{"tasks", "cfg_assign_nat", "INTEGER"},
 		{"tasks", "cfg_ipv6_count", "INTEGER"},
 		{"tasks", "cfg_ipv6_addresses", "TEXT"},
+		{"tasks", "cfg_ssh_auth_mode", "TEXT"},
+		{"tasks", "cfg_ssh_password", "TEXT"},
+		{"tasks", "cfg_ssh_public_key", "TEXT"},
 		{"port_mappings", "host_ip", "TEXT"},
 		{"container_public_ipv4s", "prefix_len", "INTEGER"},
 		{"container_public_ipv4s", "gateway", "TEXT"},
@@ -660,14 +669,15 @@ func saveTasksDB(tx *sql.Tx) error {
 			cfg_network_bw_mbps, cfg_monthly_traffic_gb, cfg_traffic_mode, cfg_traffic_in_gb,
 			cfg_traffic_out_gb, cfg_io_speed_mbps, cfg_port_mapping_count, cfg_assign_nat, cfg_snapshot_limit,
 			cfg_assign_ipv4, cfg_ipv4_count, cfg_public_ipv4s, cfg_assign_ipv6, cfg_ipv6_count, cfg_ipv6_addresses,
-			cfg_expires_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			cfg_ssh_auth_mode, cfg_ssh_password, cfg_ssh_public_key, cfg_expires_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			task.ID, task.Type, task.ContainerID, task.ContainerName, task.Status, task.Error, task.CreatedAt, task.TemplateID, task.User, task.IP, task.UserAgent,
 			cfg.Name, cfg.Virtualization, cfg.TemplateID, cfg.VCPU, cfg.CPUPercent, cfg.RAMMB, cfg.DiskGB,
 			cfg.NetworkBWMbps, cfg.MonthlyTrafficGB, cfg.TrafficMode, cfg.TrafficInGB,
 			cfg.TrafficOutGB, cfg.IOSpeedMBps, cfg.PortMappingCount, boolPtrInt(cfg.AssignNAT), cfg.SnapshotLimit,
 			boolInt(cfg.AssignIPv4), cfg.IPv4Count, encodeStringSlice(cfg.PublicIPv4s),
-			boolInt(cfg.AssignIPv6), cfg.IPv6Count, encodeStringSlice(cfg.IPv6Addresses), cfg.ExpiresAt,
+			boolInt(cfg.AssignIPv6), cfg.IPv6Count, encodeStringSlice(cfg.IPv6Addresses),
+			cfg.SSHAuthMode, cfg.SSHPassword, cfg.SSHPublicKey, cfg.ExpiresAt,
 		); err != nil {
 			return err
 		}
@@ -939,7 +949,7 @@ func loadTasks() ([]SavedTask, error) {
 		cfg_network_bw_mbps, cfg_monthly_traffic_gb, cfg_traffic_mode, cfg_traffic_in_gb,
 		cfg_traffic_out_gb, cfg_io_speed_mbps, cfg_port_mapping_count, cfg_assign_nat, cfg_snapshot_limit,
 		cfg_assign_ipv4, cfg_ipv4_count, cfg_public_ipv4s, cfg_assign_ipv6, cfg_ipv6_count, cfg_ipv6_addresses,
-		cfg_expires_at
+		cfg_ssh_auth_mode, cfg_ssh_password, cfg_ssh_public_key, cfg_expires_at
 		FROM tasks ORDER BY created_at, id`)
 	if err != nil {
 		return nil, err
@@ -952,13 +962,15 @@ func loadTasks() ([]SavedTask, error) {
 		var cfg savedTaskConfig
 		var assignIPv4, assignIPv6 int
 		var ip, userAgent, publicIPv4s, ipv6Addresses sql.NullString
+		var sshAuthMode, sshPassword, sshPublicKey sql.NullString
 		var assignNAT, ipv4Count, ipv6Count sql.NullInt64
 		if err := rows.Scan(
 			&t.ID, &t.Type, &t.ContainerID, &t.ContainerName, &t.Status, &t.Error, &t.CreatedAt, &t.TemplateID, &t.User, &ip, &userAgent,
 			&cfg.Name, &cfg.Virtualization, &cfg.TemplateID, &cfg.VCPU, &cfg.CPUPercent, &cfg.RAMMB, &cfg.DiskGB,
 			&cfg.NetworkBWMbps, &cfg.MonthlyTrafficGB, &cfg.TrafficMode, &cfg.TrafficInGB,
 			&cfg.TrafficOutGB, &cfg.IOSpeedMBps, &cfg.PortMappingCount, &assignNAT, &cfg.SnapshotLimit,
-			&assignIPv4, &ipv4Count, &publicIPv4s, &assignIPv6, &ipv6Count, &ipv6Addresses, &cfg.ExpiresAt,
+			&assignIPv4, &ipv4Count, &publicIPv4s, &assignIPv6, &ipv6Count, &ipv6Addresses,
+			&sshAuthMode, &sshPassword, &sshPublicKey, &cfg.ExpiresAt,
 		); err != nil {
 			return nil, err
 		}
@@ -978,6 +990,9 @@ func loadTasks() ([]SavedTask, error) {
 			cfg.IPv6Count = int(ipv6Count.Int64)
 		}
 		cfg.IPv6Addresses = decodeStringSlice(ipv6Addresses.String)
+		cfg.SSHAuthMode = sshAuthMode.String
+		cfg.SSHPassword = sshPassword.String
+		cfg.SSHPublicKey = sshPublicKey.String
 		result = append(result, t)
 		configs = append(configs, cfg)
 	}

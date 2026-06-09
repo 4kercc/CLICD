@@ -75,6 +75,10 @@ func (q *TaskQueue) enqueueTask(task *Task) {
 }
 
 func (q *TaskQueue) Enqueue(containerID int, containerName string, taskType TaskType, templateID string, cfg *lxc.ContainerConfig) []string {
+	return q.EnqueueWithAudit(containerID, containerName, taskType, templateID, cfg, "admin", "", "")
+}
+
+func (q *TaskQueue) EnqueueWithAudit(containerID int, containerName string, taskType TaskType, templateID string, cfg *lxc.ContainerConfig, user string, ip string, userAgent string) []string {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -88,6 +92,9 @@ func (q *TaskQueue) Enqueue(containerID int, containerName string, taskType Task
 		Status:        "pending",
 		CreatedAt:     time.Now().Format("2006-01-02 15:04:05"),
 		TemplateID:    templateID,
+		User:          user,
+		IP:            ip,
+		UserAgent:     userAgent,
 	}
 	if cfg != nil {
 		task.Config = *cfg
@@ -343,7 +350,11 @@ func (q *TaskQueue) opWorker() {
 					}
 				}
 			case TaskReinstall:
-				err = reinstallByRuntime(task.ContainerID, task.TemplateID)
+				if lxc.HasSSHAuthOptions(task.Config) {
+					err = reinstallByRuntime(task.ContainerID, task.TemplateID, task.Config)
+				} else {
+					err = reinstallByRuntime(task.ContainerID, task.TemplateID)
+				}
 			}
 		}
 
@@ -472,6 +483,7 @@ func HandleSingleTaskAction(w http.ResponseWriter, r *http.Request, id int, acti
 
 	var taskType TaskType
 	var templateID string
+	var taskConfig *lxc.ContainerConfig
 	switch action {
 	case "start":
 		taskType = TaskStart
@@ -483,7 +495,10 @@ func HandleSingleTaskAction(w http.ResponseWriter, r *http.Request, id int, acti
 		taskType = TaskDelete
 	case "reinstall":
 		var req struct {
-			TemplateID string `json:"template_id"`
+			TemplateID   string `json:"template_id"`
+			SSHAuthMode  string `json:"ssh_auth_mode,omitempty"`
+			SSHPassword  string `json:"ssh_password,omitempty"`
+			SSHPublicKey string `json:"ssh_public_key,omitempty"`
 		}
 		json.NewDecoder(r.Body).Decode(&req)
 		templateID = req.TemplateID
@@ -501,13 +516,26 @@ func HandleSingleTaskAction(w http.ResponseWriter, r *http.Request, id int, acti
 			jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "Template is not enabled or downloaded"})
 			return
 		}
+		authCfg := lxc.ContainerConfig{
+			TemplateID:   templateID,
+			SSHAuthMode:  req.SSHAuthMode,
+			SSHPassword:  req.SSHPassword,
+			SSHPublicKey: req.SSHPublicKey,
+		}
+		if lxc.HasSSHAuthOptions(authCfg) {
+			if err := validateReinstallSSHAuth(c, templateID, authCfg); err != nil {
+				jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: err.Error()})
+				return
+			}
+			taskConfig = &authCfg
+		}
 		taskType = TaskReinstall
 	default:
 		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Unknown action"})
 		return
 	}
 
-	ids := globalQueue.EnqueueBatchWithAudit(taskType, []int{id}, templateID, user, ip, userAgent)
+	ids := globalQueue.EnqueueWithAudit(id, name, taskType, templateID, taskConfig, user, ip, userAgent)
 	jsonResponse(w, http.StatusAccepted, APIResponse{
 		Success: true,
 		Message: "Task queued",
@@ -614,6 +642,10 @@ func HandleBatchCreate(w http.ResponseWriter, r *http.Request) {
 			jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: name + ": " + err.Error()})
 			return
 		}
+		if err := validateCreateSSHAuth(req.Containers[i]); err != nil {
+			jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: name + ": " + err.Error()})
+			return
+		}
 		requestNames[name] = true
 	}
 	ids := globalQueue.EnqueueBatchCreateWithAudit(req.Containers, requestActor(r), clientIP(r), r.UserAgent())
@@ -631,9 +663,12 @@ func HandleBatchAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Action     string `json:"action"`
-		Containers []int  `json:"containers"`
-		TemplateID string `json:"template_id,omitempty"`
+		Action       string `json:"action"`
+		Containers   []int  `json:"containers"`
+		TemplateID   string `json:"template_id,omitempty"`
+		SSHAuthMode  string `json:"ssh_auth_mode,omitempty"`
+		SSHPassword  string `json:"ssh_password,omitempty"`
+		SSHPublicKey string `json:"ssh_public_key,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Invalid request body"})
@@ -642,6 +677,7 @@ func HandleBatchAction(w http.ResponseWriter, r *http.Request) {
 
 	var taskType TaskType
 	var requiredScope string
+	var taskConfig *lxc.ContainerConfig
 	switch req.Action {
 	case "start":
 		taskType = TaskStart
@@ -664,6 +700,15 @@ func HandleBatchAction(w http.ResponseWriter, r *http.Request) {
 			jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "Template is not enabled or downloaded"})
 			return
 		}
+		authCfg := lxc.ContainerConfig{
+			TemplateID:   req.TemplateID,
+			SSHAuthMode:  req.SSHAuthMode,
+			SSHPassword:  req.SSHPassword,
+			SSHPublicKey: req.SSHPublicKey,
+		}
+		if lxc.HasSSHAuthOptions(authCfg) {
+			taskConfig = &authCfg
+		}
 		taskType = TaskReinstall
 		requiredScope = "container:reinstall"
 	default:
@@ -679,9 +724,28 @@ func HandleBatchAction(w http.ResponseWriter, r *http.Request) {
 			jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "Access denied to one or more containers"})
 			return
 		}
+		if taskConfig != nil {
+			if err := validateReinstallSSHAuth(c, req.TemplateID, *taskConfig); err != nil {
+				jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: c.Name + ": " + err.Error()})
+				return
+			}
+		}
 	}
 
-	ids := globalQueue.EnqueueBatchWithAudit(taskType, req.Containers, req.TemplateID, requestActor(r), clientIP(r), r.UserAgent())
+	var ids []string
+	if taskConfig != nil {
+		for _, id := range req.Containers {
+			c := config.FindContainer(id)
+			name := ""
+			if c != nil {
+				name = c.Name
+			}
+			queued := globalQueue.EnqueueWithAudit(id, name, taskType, req.TemplateID, taskConfig, requestActor(r), clientIP(r), r.UserAgent())
+			ids = append(ids, queued...)
+		}
+	} else {
+		ids = globalQueue.EnqueueBatchWithAudit(taskType, req.Containers, req.TemplateID, requestActor(r), clientIP(r), r.UserAgent())
+	}
 	jsonResponse(w, http.StatusAccepted, APIResponse{Success: true, Data: ids})
 }
 

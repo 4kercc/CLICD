@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import { CalendarClock, X } from 'lucide-react'
+import { CalendarClock, RefreshCw, X } from 'lucide-react'
 import { batchCreate, getIPv6Status, getEnabledImages, getHostInfo, CreateContainerRequest, HostInfo, IPv6Status, Template } from '../services/api'
 import { useDialog } from './Dialog'
 import { useLanguage, type Language } from '../contexts/LanguageContext'
+import { generateSSHPassword, sshPasswordError, sshPublicKeyError, type SSHAuthMode } from '../utils/sshAuth'
 
 interface CreateContainerModalProps {
   isOpen: boolean
@@ -35,6 +36,9 @@ const defaultForm: CreateContainerRequest = {
   assign_ipv6: false,
   ipv6_count: 1,
   ipv6_addresses: [],
+  ssh_auth_mode: 'auto_password',
+  ssh_password: '',
+  ssh_public_key: '',
   expires_at: '',
 }
 
@@ -94,6 +98,8 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
   const resourceErrors = validateResourceInputs(form, maxVCPU, maxRAMMB, maxDiskGB)
   const natEnabled = form.assign_nat !== false
   const natPortCount = natEnabled ? Math.max(2, form.port_mapping_count || 2) : 0
+  const linuxTemplate = !isWindowsTemplate(form.template_id)
+  const sshAuthMode = (form.ssh_auth_mode || 'auto_password') as SSHAuthMode
 
   const autoPorts = useMemo(() => {
     if (!natEnabled) return []
@@ -145,6 +151,12 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
 
     if (!form.assign_ipv4 && !form.assign_ipv6 && form.assign_nat === false) {
       dialog.alert('提示', '请勾选任意一个可用网络')
+      return
+    }
+
+    const authError = validateSSHAuthInputs(form)
+    if (authError) {
+      dialog.alert('登录方式有误', authError)
       return
     }
 
@@ -253,6 +265,55 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
             )}
 
           </Field>
+
+          {linuxTemplate && (
+            <div className="rounded-md border border-gray-200 bg-white px-3 py-3 text-sm">
+              <div className="mb-2 font-medium text-gray-800">登录方式</div>
+              <div className="grid grid-cols-3 gap-2">
+                {([
+                  ['auto_password', '自动生成密码'],
+                  ['password', '自定义密码'],
+                  ['key', 'SSH Key'],
+                ] as Array<[SSHAuthMode, string]>).map(([mode, label]) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => setForm({ ...form, ssh_auth_mode: mode })}
+                    className={`rounded-md border px-3 py-2 text-xs font-medium transition-colors ${sshAuthMode === mode ? 'border-black bg-black text-white' : 'border-gray-300 text-gray-700 hover:bg-gray-50'}`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              {sshAuthMode === 'password' && (
+                <div className="mt-3 flex gap-2">
+                  <input
+                    type="text"
+                    value={form.ssh_password || ''}
+                    onChange={(event) => setForm({ ...form, ssh_password: event.target.value })}
+                    className={inputClass}
+                    placeholder="RootPass123"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setForm({ ...form, ssh_password: generateSSHPassword() })}
+                    className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-gray-300 text-gray-600 hover:bg-gray-50"
+                    title="生成密码"
+                  >
+                    <RefreshCw className="h-4 w-4" />
+                  </button>
+                </div>
+              )}
+              {sshAuthMode === 'key' && (
+                <textarea
+                  value={form.ssh_public_key || ''}
+                  onChange={(event) => setForm({ ...form, ssh_public_key: event.target.value })}
+                  className={`${inputClass} mt-3 min-h-20 resize-y font-mono text-xs`}
+                  placeholder="ssh-ed25519 AAAA..."
+                />
+              )}
+            </div>
+          )}
 
           <div className={`rounded-md border px-3 py-2 text-sm ${ipv4Available ? 'border-gray-200 bg-white' : 'border-gray-200 bg-gray-50 text-gray-400'}`}>
             <label className="flex items-start gap-3">
@@ -620,6 +681,8 @@ function normalizeCreateForm(form: CreateContainerRequest): CreateContainerReque
   const wantsNAT = normalized.assign_nat !== false
   const wantsIPv4 = !!normalized.assign_ipv4
   const wantsIPv6 = !!normalized.assign_ipv6
+  const linuxTemplate = !isWindowsTemplate(normalized.template_id)
+  const sshAuthMode = linuxTemplate ? (normalized.ssh_auth_mode || 'auto_password') : 'auto_password'
   return {
     ...normalized,
     vcpu: normalized.virtualization === 'kvm' ? Math.round(normalized.vcpu) : normalizeLXCvCPU(normalized.vcpu),
@@ -633,8 +696,20 @@ function normalizeCreateForm(form: CreateContainerRequest): CreateContainerReque
     assign_ipv6: wantsIPv6,
     ipv6_count: wantsIPv6 ? clampInt(normalized.ipv6_count || 1, 1, 64, 1) : 0,
     ipv6_addresses: wantsIPv6 ? (normalized.ipv6_addresses || []) : [],
+    ssh_auth_mode: sshAuthMode,
+    ssh_password: linuxTemplate && sshAuthMode === 'password' ? (normalized.ssh_password || '').trim() : '',
+    ssh_public_key: linuxTemplate && sshAuthMode === 'key' ? (normalized.ssh_public_key || '').trim() : '',
     snapshot_limit: clampInt(normalized.snapshot_limit, 1, undefined, 3),
   }
+}
+
+function validateSSHAuthInputs(form: CreateContainerRequest) {
+  if (isWindowsTemplate(form.template_id)) return ''
+  const mode = form.ssh_auth_mode || 'auto_password'
+  if (mode === 'password') return sshPasswordError((form.ssh_password || '').trim())
+  if (mode === 'key') return sshPublicKeyError(form.ssh_public_key || '')
+  if (mode !== 'auto_password') return '请选择登录方式'
+  return ''
 }
 
 function applyTemplateDefaults(form: CreateContainerRequest): CreateContainerRequest {

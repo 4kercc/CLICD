@@ -406,6 +406,15 @@ func (m *Manager) defineContainer(id int, vmName string, cfg lxc.ContainerConfig
 	seedPath := filepath.Join(m.instanceDir(vmName), "seed.iso")
 	mac := randomMAC()
 	sshPassword := generateRandomString(16)
+	sshPublicKey := ""
+	if !IsWindowsImage(image.ID) {
+		sshAccess, err := lxc.ResolveCreateSSHAccess(cfg)
+		if err != nil {
+			return nil, err
+		}
+		sshPassword = sshAccess.Password
+		sshPublicKey = sshAccess.PublicKey
+	}
 	publicIPv4s, err := lxc.AllocatePublicIPv4Assignments(id, cfg.PublicIPv4s, cfg.IPv4Count, cfg.AssignIPv4)
 	if err != nil {
 		return nil, err
@@ -455,7 +464,7 @@ func (m *Manager) defineContainer(id int, vmName string, cfg lxc.ContainerConfig
 		if err := createOverlayDisk(ImagePath(image.ID), diskPath, cfg.DiskGB); err != nil {
 			return nil, err
 		}
-		if err := createSeedISO(seedPath, vmName, cfg.Name, sshPassword, mac, ipv6List, *image); err != nil {
+		if err := createSeedISO(seedPath, vmName, cfg.Name, sshPassword, sshPublicKey, mac, ipv6List, *image); err != nil {
 			return nil, err
 		}
 		xml = domainXML(vmName, int(cfg.VCPU), cfg.RAMMB, diskPath, seedPath, mac, cfg.IOSpeedMBps, cfg.NetworkBWMbps, image.Desktop != "")
@@ -677,7 +686,7 @@ func (m *Manager) DestroyContainer(id int) error {
 	return nil
 }
 
-func (m *Manager) ReinstallContainer(id int, templateID string) error {
+func (m *Manager) ReinstallContainer(id int, templateID string, authConfig ...lxc.ContainerConfig) error {
 	c := config.FindContainer(id)
 	if c == nil {
 		return fmt.Errorf("container not found: %d", id)
@@ -708,6 +717,19 @@ func (m *Manager) ReinstallContainer(id int, templateID string) error {
 		PortMappingCount: c.PortMappingLimit,
 		SnapshotLimit:    c.SnapshotLimit,
 		ExpiresAt:        c.ExpiresAt,
+	}
+	if len(authConfig) > 0 && lxc.HasSSHAuthOptions(authConfig[0]) && !IsWindowsImage(templateID) {
+		sshAccess, err := lxc.ResolveReinstallSSHAccess(c.SSHPassword, authConfig[0])
+		if err != nil {
+			return err
+		}
+		if sshAccess.PublicKey != "" {
+			cfg.SSHAuthMode = lxc.SSHAuthKey
+			cfg.SSHPublicKey = sshAccess.PublicKey
+		} else {
+			cfg.SSHAuthMode = lxc.SSHAuthPassword
+		}
+		cfg.SSHPassword = sshAccess.Password
 	}
 	next, err := m.defineContainer(id, name, cfg, false)
 	if err != nil {
@@ -1788,14 +1810,20 @@ func shellQuoteWindows(value string) string {
 	return `"` + strings.ReplaceAll(value, `"`, `\"`) + `"`
 }
 
-func createSeedISO(seedPath, instanceID, hostname, password, mac string, ipv6s []string, image Image) error {
-	guestSetup := kvmSSHSetupScript(password)
+func createSeedISO(seedPath, instanceID, hostname, password, publicKey, mac string, ipv6s []string, image Image) error {
+	guestSetup := kvmSSHSetupScript(password, publicKey)
 	if desktopSetup := kvmDesktopSetupScript(image); desktopSetup != "" {
 		guestSetup += "\n" + desktopSetup
 	}
 	ipv6s = normalizeKVMIPv6List(ipv6s)
 	if len(ipv6s) > 0 {
 		guestSetup += "\n" + kvmIPv6SetupScript(ipv6s)
+	}
+	authorizedKeys := ""
+	if publicKey != "" {
+		authorizedKeys = fmt.Sprintf(`
+    ssh_authorized_keys:
+      - %s`, yamlSingleQuote(publicKey))
 	}
 	setupScript := indentScript(guestSetup, 4)
 	userData := fmt.Sprintf(`#cloud-config
@@ -1812,11 +1840,11 @@ chpasswd:
       type: text
 users:
   - name: root
-    lock_passwd: false
+    lock_passwd: false%s
 runcmd:
   - |
 %s
-`, hostname, password, setupScript)
+`, hostname, password, authorizedKeys, setupScript)
 	metaData := fmt.Sprintf("instance-id: %s\nlocal-hostname: %s\n", instanceID, hostname)
 	ipv6Block := ""
 	if len(ipv6s) > 0 {
@@ -1905,6 +1933,10 @@ func indentScript(script string, spaces int) string {
 		lines[i] = prefix + line
 	}
 	return strings.Join(lines, "\n")
+}
+
+func yamlSingleQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
 
 func isKVMDesktopTemplate(templateID string) bool {
@@ -2368,9 +2400,14 @@ func runKVMSSHScript(client *ssh.Client, script string, description string, time
 	}
 }
 
-func kvmSSHSetupScript(password string) string {
+func kvmSSHSetupScript(password string, publicKeys ...string) string {
+	publicKey := ""
+	if len(publicKeys) > 0 {
+		publicKey = strings.TrimSpace(publicKeys[0])
+	}
 	return `set -u
 ROOT_PASSWORD=` + shellQuote(password) + `
+SSH_PUBLIC_KEY=` + shellQuote(publicKey) + `
 export DEBIAN_FRONTEND=noninteractive
 if command -v apt-get >/dev/null 2>&1; then
 	if ! command -v sshd >/dev/null 2>&1 || ! command -v qemu-ga >/dev/null 2>&1; then
@@ -2397,6 +2434,7 @@ fi
 mkdir -p /etc/ssh/sshd_config.d
 cat > /etc/ssh/sshd_config.d/99-clicd-root.conf <<'EOF'
 PermitRootLogin yes
+PubkeyAuthentication yes
 PasswordAuthentication yes
 KbdInteractiveAuthentication yes
 ChallengeResponseAuthentication yes
@@ -2404,10 +2442,20 @@ EOF
 if [ -f /etc/ssh/sshd_config ]; then
 	grep -q '^PermitRootLogin ' /etc/ssh/sshd_config && sed -i 's/^PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config || printf '\nPermitRootLogin yes\n' >> /etc/ssh/sshd_config
 	grep -q '^#PermitRootLogin ' /etc/ssh/sshd_config && sed -i 's/^#PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config || true
+	grep -q '^PubkeyAuthentication ' /etc/ssh/sshd_config && sed -i 's/^PubkeyAuthentication .*/PubkeyAuthentication yes/' /etc/ssh/sshd_config || printf '\nPubkeyAuthentication yes\n' >> /etc/ssh/sshd_config
+	grep -q '^#PubkeyAuthentication ' /etc/ssh/sshd_config && sed -i 's/^#PubkeyAuthentication .*/PubkeyAuthentication yes/' /etc/ssh/sshd_config || true
 	grep -q '^PasswordAuthentication ' /etc/ssh/sshd_config && sed -i 's/^PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config || printf '\nPasswordAuthentication yes\n' >> /etc/ssh/sshd_config
 	grep -q '^#PasswordAuthentication ' /etc/ssh/sshd_config && sed -i 's/^#PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config || true
 	grep -q '^KbdInteractiveAuthentication ' /etc/ssh/sshd_config && sed -i 's/^KbdInteractiveAuthentication .*/KbdInteractiveAuthentication yes/' /etc/ssh/sshd_config || printf '\nKbdInteractiveAuthentication yes\n' >> /etc/ssh/sshd_config
 	grep -q '^#KbdInteractiveAuthentication ' /etc/ssh/sshd_config && sed -i 's/^#KbdInteractiveAuthentication .*/KbdInteractiveAuthentication yes/' /etc/ssh/sshd_config || true
+fi
+if [ -n "$SSH_PUBLIC_KEY" ]; then
+	mkdir -p /root/.ssh
+	touch /root/.ssh/authorized_keys
+	grep -qxF "$SSH_PUBLIC_KEY" /root/.ssh/authorized_keys 2>/dev/null || printf '%s\n' "$SSH_PUBLIC_KEY" >> /root/.ssh/authorized_keys
+	chmod 700 /root/.ssh
+	chmod 600 /root/.ssh/authorized_keys
+	chown -R root:root /root/.ssh 2>/dev/null || true
 fi
 if command -v chpasswd >/dev/null 2>&1; then
 	printf 'root:%s\n' "$ROOT_PASSWORD" | chpasswd || true

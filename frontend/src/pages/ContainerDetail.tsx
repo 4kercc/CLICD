@@ -78,6 +78,7 @@ import ResourceStatsPanel, {
   StatsRangeKey,
   statsRanges,
 } from '../components/ResourceStatsPanel'
+import { generateSSHPassword, sshPasswordError, sshPublicKeyError, type ReinstallSSHAuthMode } from '../utils/sshAuth'
 
 const PUBLIC_HOST = window.location.hostname
 const inputClass = 'w-full px-3 py-2 border border-gray-300 rounded-md text-sm text-black bg-white focus:outline-none focus:ring-2 focus:ring-black focus:border-black'
@@ -135,6 +136,9 @@ export default function ContainerDetail() {
   const [showReinstall, setShowReinstall] = useState(false)
   const [templates, setTemplates] = useState<Template[]>([])
   const [selectedTemplate, setSelectedTemplate] = useState('')
+  const [reinstallAuthMode, setReinstallAuthMode] = useState<ReinstallSSHAuthMode>('keep')
+  const [reinstallPasswordDraft, setReinstallPasswordDraft] = useState('')
+  const [reinstallPublicKeyDraft, setReinstallPublicKeyDraft] = useState('')
   const [reinstalling, setReinstalling] = useState(false)
   const [traffic, setTraffic] = useState<TrafficInfo | null>(null)
   const [subUser, setSubUser] = useState<SubUser | null>(null)
@@ -413,6 +417,9 @@ export default function ContainerDetail() {
         setTemplates(res.data.data)
         setSelectedTemplate(res.data.data[0]?.id || '')
       }
+      setReinstallAuthMode('keep')
+      setReinstallPasswordDraft('')
+      setReinstallPublicKeyDraft('')
       setShowReinstall(true)
     } catch (err) {
       console.error(err)
@@ -434,9 +441,28 @@ export default function ContainerDetail() {
 
   const handleReinstall = async () => {
     if (!containerIdentifier || !selectedTemplate) return
+    const linuxTemplate = !isWindowsTemplate(selectedTemplate)
+    if (linuxTemplate && reinstallAuthMode === 'password') {
+      const validationError = sshPasswordError(reinstallPasswordDraft.trim())
+      if (validationError) {
+        await dialog.alert('密码格式不正确', validationError)
+        return
+      }
+    }
+    if (linuxTemplate && reinstallAuthMode === 'key') {
+      const validationError = sshPublicKeyError(reinstallPublicKeyDraft)
+      if (validationError) {
+        await dialog.alert('SSH Key 格式不正确', validationError)
+        return
+      }
+    }
     setReinstalling(true)
     try {
-      await reinstallContainer(containerIdentifier, selectedTemplate)
+      await reinstallContainer(containerIdentifier, selectedTemplate, linuxTemplate ? {
+        ssh_auth_mode: reinstallAuthMode,
+        ssh_password: reinstallAuthMode === 'password' ? reinstallPasswordDraft.trim() : '',
+        ssh_public_key: reinstallAuthMode === 'key' ? reinstallPublicKeyDraft.trim() : '',
+      } : undefined)
       setShowReinstall(false)
       setShowSSH(false)
       setShowVNC(false)
@@ -450,23 +476,12 @@ export default function ContainerDetail() {
   }
 
   const generateResetPassword = () => {
-    const letters = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
-    const digits = '23456789'
-    const symbols = '!@#$%*-_+='
-    const all = letters + digits + symbols
-    const pick = (chars: string) => chars[secureRandomInt(chars.length)]
-    let password = pick(letters) + pick(digits)
-    while (password.length < 16) password += pick(all)
-    setResetPasswordDraft(secureShuffle(password.split('')).join(''))
+    setResetPasswordDraft(generateSSHPassword())
     setResetPasswordResult('')
   }
 
   const resetPasswordError = (password: string) => {
-    if (password.length < 8 || password.length > 64) return '密码长度必须为 8-64 位'
-    if (/\s/.test(password)) return '密码不能包含空白字符'
-    if (!/[A-Za-z]/.test(password)) return '密码至少需要包含字母'
-    if (!/\d/.test(password)) return '密码至少需要包含数字'
-    return ''
+    return sshPasswordError(password)
   }
 
   const handleResetPassword = async () => {
@@ -740,6 +755,7 @@ export default function ContainerDetail() {
   const isRunning = container.status === 'running'
   const isKVM = (container.virtualization || 'lxc') === 'kvm'
   const isWindows = container.template?.includes('windows')
+  const reinstallLinuxTemplate = !isWindowsTemplate(selectedTemplate)
   const canOpenVNC = isKVM && isRunning
   const isExpired = container.expires_at ? new Date(container.expires_at) < new Date() : false
   const isPolicyBlocked = !!container.policy_blocked
@@ -1484,6 +1500,55 @@ export default function ContainerDetail() {
                 ))}
               </select>
             </Field>
+            {reinstallLinuxTemplate && (
+              <div className="rounded-md border border-gray-200 bg-white px-3 py-3 text-sm">
+                <div className="mb-2 font-medium text-gray-800">登录方式</div>
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                  {([
+                    ['keep', '保留当前密码'],
+                    ['auto_password', '生成新密码'],
+                    ['password', '自定义密码'],
+                    ['key', 'SSH Key'],
+                  ] as Array<[ReinstallSSHAuthMode, string]>).map(([mode, label]) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      onClick={() => setReinstallAuthMode(mode)}
+                      className={`rounded-md border px-3 py-2 text-xs font-medium transition-colors ${reinstallAuthMode === mode ? 'border-black bg-black text-white' : 'border-gray-300 text-gray-700 hover:bg-gray-50'}`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                {reinstallAuthMode === 'password' && (
+                  <div className="mt-3 flex gap-2">
+                    <input
+                      type="text"
+                      value={reinstallPasswordDraft}
+                      onChange={(event) => setReinstallPasswordDraft(event.target.value)}
+                      className={inputClass}
+                      placeholder="RootPass123"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setReinstallPasswordDraft(generateSSHPassword())}
+                      className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-gray-300 text-gray-600 hover:bg-gray-50"
+                      title="生成密码"
+                    >
+                      <RefreshCw className="h-4 w-4" />
+                    </button>
+                  </div>
+                )}
+                {reinstallAuthMode === 'key' && (
+                  <textarea
+                    value={reinstallPublicKeyDraft}
+                    onChange={(event) => setReinstallPublicKeyDraft(event.target.value)}
+                    className={`${inputClass} mt-3 min-h-20 resize-y font-mono text-xs`}
+                    placeholder="ssh-ed25519 AAAA..."
+                  />
+                )}
+              </div>
+            )}
             <div className="flex justify-end gap-3">
               <button onClick={() => setShowReinstall(false)} className="px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded-md">取消</button>
               <button onClick={handleReinstall} disabled={reinstalling} className="px-4 py-2 text-sm bg-black text-white rounded-md hover:bg-gray-800 disabled:opacity-50">
@@ -2135,30 +2200,8 @@ function TrafficBar({ container }: { container: Container }) {
   )
 }
 
-function secureRandomInt(maxExclusive: number) {
-  if (!Number.isSafeInteger(maxExclusive) || maxExclusive <= 0) {
-    throw new Error('invalid random range')
-  }
-  const values = new Uint32Array(1)
-  const maxUint32 = 0x100000000
-  const limit = Math.floor(maxUint32 / maxExclusive) * maxExclusive
-  let value = 0
-  do {
-    crypto.getRandomValues(values)
-    value = values[0]
-  } while (value >= limit)
-  return value % maxExclusive
-}
-
-function secureShuffle<T>(items: T[]) {
-  const next = [...items]
-  for (let i = next.length - 1; i > 0; i--) {
-    const j = secureRandomInt(i + 1)
-    const value = next[i]
-    next[i] = next[j]
-    next[j] = value
-  }
-  return next
+function isWindowsTemplate(templateID: string) {
+  return templateID.toLowerCase().includes('windows')
 }
 
 function getTemplateIcon(id: string): ReactNode {

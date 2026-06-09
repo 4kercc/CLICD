@@ -2,12 +2,10 @@ package api
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
 	"clicd/internal/config"
 	"clicd/internal/lxc"
@@ -264,6 +262,10 @@ func createContainer(w http.ResponseWriter, r *http.Request) {
 		cfg.SnapshotLimit = config.DefaultSnapshotLimit
 	}
 	if err := validateRuntimeResourceRequest(cfg.Virtualization, cfg.VCPU, cfg.RAMMB, cfg.DiskGB); err != nil {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: err.Error()})
+		return
+	}
+	if err := validateCreateSSHAuth(cfg); err != nil {
 		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: err.Error()})
 		return
 	}
@@ -536,26 +538,7 @@ func resetSSHPassword(w http.ResponseWriter, r *http.Request, id int) {
 }
 
 func validateSSHPassword(password string) error {
-	if len(password) < 8 || len(password) > 64 {
-		return fmt.Errorf("密码长度必须为 8-64 位")
-	}
-	hasLetter := false
-	hasDigit := false
-	for _, r := range password {
-		if unicode.IsSpace(r) {
-			return fmt.Errorf("密码不能包含空白字符")
-		}
-		if unicode.IsLetter(r) {
-			hasLetter = true
-		}
-		if unicode.IsDigit(r) {
-			hasDigit = true
-		}
-	}
-	if !hasLetter || !hasDigit {
-		return fmt.Errorf("密码至少需要包含字母和数字")
-	}
-	return nil
+	return lxc.ValidateCustomSSHPassword(password)
 }
 
 func addPortMapping(w http.ResponseWriter, r *http.Request, id int) {
