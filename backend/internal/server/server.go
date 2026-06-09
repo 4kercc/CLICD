@@ -4,9 +4,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log"
-	"net"
 	"net/http"
-	"net/url"
 	"strings"
 
 	"clicd/internal/api"
@@ -19,7 +17,7 @@ var webFS http.FileSystem
 // corsMiddleware adds CORS headers
 func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if origin := r.Header.Get("Origin"); origin != "" && isAllowedOrigin(origin, r.Host) {
+		if origin := r.Header.Get("Origin"); origin != "" && config.IsOriginAllowed(origin, r.Host) {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
@@ -28,7 +26,7 @@ func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
 
 		if r.Method == http.MethodOptions {
-			if origin := r.Header.Get("Origin"); origin != "" && !isAllowedOrigin(origin, r.Host) {
+			if origin := r.Header.Get("Origin"); origin != "" && !config.IsOriginAllowed(origin, r.Host) {
 				w.WriteHeader(http.StatusForbidden)
 				return
 			}
@@ -38,34 +36,6 @@ func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 
 		next(w, r)
 	}
-}
-
-func isAllowedOrigin(origin string, requestHost string) bool {
-	u, err := url.Parse(origin)
-	if err != nil || u.Host == "" {
-		return false
-	}
-	originHost := normalizeHost(u.Host)
-	host := normalizeHost(requestHost)
-	if originHost == host {
-		return true
-	}
-	return isLoopbackHost(originHost) && isLoopbackHost(host)
-}
-
-func normalizeHost(host string) string {
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		return strings.ToLower(h)
-	}
-	return strings.ToLower(host)
-}
-
-func isLoopbackHost(host string) bool {
-	if host == "localhost" {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
 }
 
 // setupRoutes configures API and static routes
@@ -78,6 +48,7 @@ func setupRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/change-username", corsMiddleware(api.AdminMiddleware(api.HandleAdminUsernameChange)))
 	mux.HandleFunc("/api/login-logs", corsMiddleware(api.AdminMiddleware(api.HandleLoginLogs)))
 	mux.HandleFunc("/api/ssl", corsMiddleware(api.AdminMiddleware(api.HandleSSLSettings)))
+	mux.HandleFunc("/api/webssh-origins", corsMiddleware(api.AdminMiddleware(api.HandleWebSSHOriginSettings)))
 	mux.HandleFunc("/api/containers", corsMiddleware(api.AuthMiddleware(api.SubUserMiddleware(api.HandleContainers))))
 	mux.HandleFunc("/api/containers/list", corsMiddleware(api.AuthMiddleware(api.SubUserMiddleware(api.HandleContainerListAlias))))
 	mux.HandleFunc("/api/containers/", corsMiddleware(api.AuthMiddleware(api.SubUserMiddleware(api.HandleSingleContainer))))
@@ -148,6 +119,7 @@ func setupRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/audit-logs", corsMiddleware(api.AuthMiddleware(api.HandleAuditLogs)))
 	mux.HandleFunc("/api/v1/login-logs", corsMiddleware(api.AuthMiddleware(api.HandleLoginLogs)))
 	mux.HandleFunc("/api/v1/ssl", corsMiddleware(api.AdminMiddleware(api.HandleSSLSettings)))
+	mux.HandleFunc("/api/v1/webssh-origins", corsMiddleware(api.AdminMiddleware(api.HandleWebSSHOriginSettings)))
 	mux.HandleFunc("/api/v1/security/alerts", corsMiddleware(api.AuthMiddleware(api.ScopeMiddleware("security:read", api.HandleSecurityAlerts))))
 	mux.HandleFunc("/api/v1/security/check", corsMiddleware(api.AuthMiddleware(api.ScopeMiddleware("security:check", api.HandleSecurityCheck))))
 	mux.HandleFunc("/api/v1/security/logs", corsMiddleware(api.AuthMiddleware(api.ScopeMiddleware("security:read", api.HandleSecurityLogs))))

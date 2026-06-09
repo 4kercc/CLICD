@@ -363,6 +363,7 @@ type ClicdConfig struct {
 	Snapshots            []Snapshot             `json:"snapshots"`
 	PublicIPv4Pool       []PublicIPv4Assignment `json:"public_ipv4_pool"`
 	PublicIPv6Prefixes   []PublicIPv6Prefix     `json:"public_ipv6_prefixes"`
+	WebSSHAllowedOrigins []string               `json:"webssh_allowed_origins"`
 	SecurityAutoShutdown bool                   `json:"security_auto_shutdown"`
 	Language             string                 `json:"language"`
 	SSL                  SSLConfig              `json:"ssl"`
@@ -480,23 +481,24 @@ func InitConfig() (*ClicdConfig, error) {
 	}
 
 	AppConfig = &ClicdConfig{
-		AdminUser:          adminUser,
-		AdminPassHash:      string(hash),
-		JWTSecret:          jwtSecret,
-		Port:               8999,
-		DataDir:            dataDir,
-		Containers:         []Container{},
-		NextContainerID:    1,
-		NextVNCPort:        5900,
-		NextSSHPort:        22000,
-		SetupComplete:      false,
-		SubUsers:           []SubUser{},
-		AuditLogs:          []AuditLog{},
-		Tasks:              []SavedTask{},
-		LoginLogs:          []SavedLoginLog{},
-		Snapshots:          []Snapshot{},
-		PublicIPv4Pool:     []PublicIPv4Assignment{},
-		PublicIPv6Prefixes: []PublicIPv6Prefix{},
+		AdminUser:            adminUser,
+		AdminPassHash:        string(hash),
+		JWTSecret:            jwtSecret,
+		Port:                 8999,
+		DataDir:              dataDir,
+		Containers:           []Container{},
+		NextContainerID:      1,
+		NextVNCPort:          5900,
+		NextSSHPort:          22000,
+		SetupComplete:        false,
+		SubUsers:             []SubUser{},
+		AuditLogs:            []AuditLog{},
+		Tasks:                []SavedTask{},
+		LoginLogs:            []SavedLoginLog{},
+		Snapshots:            []Snapshot{},
+		PublicIPv4Pool:       []PublicIPv4Assignment{},
+		PublicIPv6Prefixes:   []PublicIPv6Prefix{},
+		WebSSHAllowedOrigins: []string{},
 	}
 
 	if err := SaveConfig(); err != nil {
@@ -553,6 +555,13 @@ func normalizeConfigDefaults(dataDir string) bool {
 	}
 	if AppConfig.PublicIPv6Prefixes == nil {
 		AppConfig.PublicIPv6Prefixes = make([]PublicIPv6Prefix, 0)
+		changed = true
+	}
+	if AppConfig.WebSSHAllowedOrigins == nil {
+		AppConfig.WebSSHAllowedOrigins = make([]string, 0)
+		changed = true
+	} else if normalized, err := NormalizeAllowedOrigins(AppConfig.WebSSHAllowedOrigins); err == nil && strings.Join(normalized, "\n") != strings.Join(AppConfig.WebSSHAllowedOrigins, "\n") {
+		AppConfig.WebSSHAllowedOrigins = normalized
 		changed = true
 	}
 	if AppConfig.SubUsers == nil {

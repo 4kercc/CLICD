@@ -393,6 +393,17 @@ export const getSSLSettings = () =>
 export const updateSSLSettings = (data: UpdateSSLSettingsRequest) =>
   api.put<APIResponse<SSLSettings>>('/ssl', data)
 
+export interface WebSSHOriginSettings {
+  origins: string[]
+  current_origin?: string
+}
+
+export const getWebSSHOriginSettings = () =>
+  api.get<APIResponse<WebSSHOriginSettings>>('/webssh-origins')
+
+export const updateWebSSHOriginSettings = (origins: string[]) =>
+  api.put<APIResponse<WebSSHOriginSettings>>('/webssh-origins', { origins })
+
 // Containers
 export const getContainers = () =>
   api.get<APIResponse<Container[]>>('/containers')

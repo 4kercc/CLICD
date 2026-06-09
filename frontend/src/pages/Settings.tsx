@@ -1,13 +1,16 @@
 import { Dispatch, SetStateAction, useCallback, useEffect, useState } from 'react'
-import { Clock, Globe, Lock, LogIn, Monitor, RefreshCw, ShieldCheck, Upload, UserCog } from 'lucide-react'
+import { Clock, Globe, Lock, LogIn, Monitor, RefreshCw, ShieldCheck, Terminal, Upload, UserCog } from 'lucide-react'
 import {
   changePassword,
   changeUsername,
   getLoginLogs,
   getSSLSettings,
+  getWebSSHOriginSettings,
   LoginLog,
   SSLSettings,
   updateSSLSettings,
+  updateWebSSHOriginSettings,
+  WebSSHOriginSettings,
 } from '../services/api'
 import { useDialog } from '../components/Dialog'
 import { useAuth } from '../contexts/AuthContext'
@@ -33,6 +36,9 @@ export default function Settings() {
   const [keyPEM, setKeyPEM] = useState('')
   const [applyNow, setApplyNow] = useState(true)
   const [savingSSL, setSavingSSL] = useState(false)
+  const [webSSHOrigins, setWebSSHOrigins] = useState<WebSSHOriginSettings | null>(null)
+  const [webSSHOriginsText, setWebSSHOriginsText] = useState('')
+  const [savingWebSSHOrigins, setSavingWebSSHOrigins] = useState(false)
 
   const fetchLogs = useCallback(async () => {
     try {
@@ -60,12 +66,25 @@ export default function Settings() {
     }
   }, [])
 
+  const fetchWebSSHOrigins = useCallback(async () => {
+    try {
+      const res = await getWebSSHOriginSettings()
+      const data = res.data.data
+      if (!data) return
+      setWebSSHOrigins(data)
+      setWebSSHOriginsText((data.origins || []).join('\n'))
+    } catch (err) {
+      console.error(err)
+    }
+  }, [])
+
   useEffect(() => {
     fetchLogs()
     fetchSSL()
+    fetchWebSSHOrigins()
     const timer = setInterval(fetchLogs, 15000)
     return () => clearInterval(timer)
-  }, [fetchLogs, fetchSSL])
+  }, [fetchLogs, fetchSSL, fetchWebSSHOrigins])
 
   const handleSSLModeChange = (mode: SSLSettings['mode']) => {
     setSSLMode(mode)
@@ -98,6 +117,25 @@ export default function Settings() {
       dialog.alert('失败', e.response?.data?.message || 'SSL 设置保存失败')
     } finally {
       setSavingSSL(false)
+    }
+  }
+
+  const handleSaveWebSSHOrigins = async () => {
+    setSavingWebSSHOrigins(true)
+    try {
+      const origins = webSSHOriginsText.split(/\r?\n/).map(item => item.trim()).filter(Boolean)
+      const res = await updateWebSSHOriginSettings(origins)
+      const data = res.data.data
+      if (data) {
+        setWebSSHOrigins(data)
+        setWebSSHOriginsText((data.origins || []).join('\n'))
+      }
+      dialog.alert('完成', 'Origin 白名单已保存')
+    } catch (err: unknown) {
+      const e = err as { response?: { data?: { message?: string } } }
+      dialog.alert('失败', e.response?.data?.message || 'Origin 白名单保存失败')
+    } finally {
+      setSavingWebSSHOrigins(false)
     }
   }
 
@@ -159,26 +197,37 @@ export default function Settings() {
       </div>
 
       <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,1.15fr)_minmax(360px,0.85fr)]">
-        <SSLCard
-          ssl={ssl}
-          sslEnabled={sslEnabled}
-          sslMode={sslMode}
-          sslTarget={sslTarget}
-          sslEmail={sslEmail}
-          certPEM={certPEM}
-          keyPEM={keyPEM}
-          applyNow={applyNow}
-          savingSSL={savingSSL}
-          onRefresh={fetchSSL}
-          onEnabledChange={setSSLEnabled}
-          onModeChange={handleSSLModeChange}
-          onTargetChange={setSSLTarget}
-          onEmailChange={setSSLEmail}
-          onCertChange={setCertPEM}
-          onKeyChange={setKeyPEM}
-          onApplyNowChange={setApplyNow}
-          onSave={handleSaveSSL}
-        />
+        <div className="space-y-6">
+          <SSLCard
+            ssl={ssl}
+            sslEnabled={sslEnabled}
+            sslMode={sslMode}
+            sslTarget={sslTarget}
+            sslEmail={sslEmail}
+            certPEM={certPEM}
+            keyPEM={keyPEM}
+            applyNow={applyNow}
+            savingSSL={savingSSL}
+            onRefresh={fetchSSL}
+            onEnabledChange={setSSLEnabled}
+            onModeChange={handleSSLModeChange}
+            onTargetChange={setSSLTarget}
+            onEmailChange={setSSLEmail}
+            onCertChange={setCertPEM}
+            onKeyChange={setKeyPEM}
+            onApplyNowChange={setApplyNow}
+            onSave={handleSaveSSL}
+          />
+
+          <WebSSHOriginCard
+            settings={webSSHOrigins}
+            originsText={webSSHOriginsText}
+            saving={savingWebSSHOrigins}
+            onOriginsTextChange={setWebSSHOriginsText}
+            onRefresh={fetchWebSSHOrigins}
+            onSave={handleSaveWebSSHOrigins}
+          />
+        </div>
 
         <div className="rounded-lg border border-gray-200 bg-white p-5">
           <h2 className="mb-4 flex items-center gap-2 text-sm font-semibold text-black">
@@ -230,6 +279,49 @@ interface SSLCardProps {
   onKeyChange: (key: string) => void
   onApplyNowChange: (apply: boolean) => void
   onSave: () => void
+}
+
+interface WebSSHOriginCardProps {
+  settings: WebSSHOriginSettings | null
+  originsText: string
+  saving: boolean
+  onOriginsTextChange: (value: string) => void
+  onRefresh: () => void
+  onSave: () => void
+}
+
+function WebSSHOriginCard(props: WebSSHOriginCardProps) {
+  return (
+    <div className="rounded-lg border border-gray-200 bg-white p-5">
+      <div className="mb-4 flex items-center justify-between gap-3">
+        <h2 className="flex items-center gap-2 text-sm font-semibold text-black">
+          <Terminal className="h-4 w-4" />WebSSH Origin 白名单
+        </h2>
+        <button onClick={props.onRefresh} className="rounded-md border border-gray-200 p-1.5 text-gray-500 hover:bg-gray-50" title="刷新">
+          <RefreshCw className="h-4 w-4" />
+        </button>
+      </div>
+      <div className="space-y-3">
+        <div>
+          <label className="mb-1 block text-xs text-gray-500">允许的 Origin</label>
+          <textarea
+            value={props.originsText}
+            onChange={(e) => props.onOriginsTextChange(e.target.value)}
+            rows={5}
+            className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 font-mono text-xs text-black"
+          />
+        </div>
+        <div className="rounded-md border border-gray-100 bg-gray-50 p-3 text-xs text-gray-600">
+          <div className="truncate font-mono" title={props.settings?.current_origin || ''}>当前面板来源：{props.settings?.current_origin || '-'}</div>
+          <div className="mt-1">默认允许当前面板来源和本机回环来源；额外域名每行填写一个完整 Origin。</div>
+        </div>
+        <button onClick={props.onSave} disabled={props.saving} className="inline-flex w-full items-center justify-center gap-2 rounded-md bg-black px-4 py-2 text-sm text-white hover:bg-gray-800 disabled:opacity-50">
+          <Upload className="h-4 w-4" />
+          {props.saving ? '保存中...' : '保存 Origin 白名单'}
+        </button>
+      </div>
+    </div>
+  )
 }
 
 function SSLCard(props: SSLCardProps) {

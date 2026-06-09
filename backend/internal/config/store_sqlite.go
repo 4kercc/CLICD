@@ -426,6 +426,9 @@ func loadConfigFromDB() (*ClicdConfig, bool, error) {
 	if raw := strings.TrimSpace(meta["public_ipv6_prefixes"]); raw != "" {
 		_ = json.Unmarshal([]byte(raw), &cfg.PublicIPv6Prefixes)
 	}
+	if raw := strings.TrimSpace(meta["webssh_allowed_origins"]); raw != "" {
+		_ = json.Unmarshal([]byte(raw), &cfg.WebSSHAllowedOrigins)
+	}
 
 	if cfg.Containers, err = loadContainers(); err != nil {
 		return nil, false, err
@@ -524,6 +527,7 @@ func saveMeta(tx *sql.Tx) error {
 	sslCertificatesJSON, _ := json.Marshal(AppConfig.SSLCertificates)
 	publicIPv4PoolJSON, _ := json.Marshal(AppConfig.PublicIPv4Pool)
 	publicIPv6PrefixesJSON, _ := json.Marshal(AppConfig.PublicIPv6Prefixes)
+	webSSHAllowedOriginsJSON, _ := json.Marshal(AppConfig.WebSSHAllowedOrigins)
 	values := map[string]string{
 		"admin_user":             AppConfig.AdminUser,
 		"admin_pass_hash":        AppConfig.AdminPassHash,
@@ -540,6 +544,7 @@ func saveMeta(tx *sql.Tx) error {
 		"ssl_certificates":       string(sslCertificatesJSON),
 		"public_ipv4_pool":       string(publicIPv4PoolJSON),
 		"public_ipv6_prefixes":   string(publicIPv6PrefixesJSON),
+		"webssh_allowed_origins": string(webSSHAllowedOriginsJSON),
 		"schema_version":         "1",
 		"updated_at":             time.Now().Format("2006-01-02 15:04:05"),
 	}
