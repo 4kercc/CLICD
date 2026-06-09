@@ -5,15 +5,6 @@
 <h1 align="center">CLICD</h1>
 
 <p align="center">
-  <img alt="Release" src="https://img.shields.io/github/v/release/MengMengCode/CLICD?style=flat-square">
-  <img alt="Stars" src="https://img.shields.io/github/stars/MengMengCode/CLICD?style=flat-square">
-  <img alt="Forks" src="https://img.shields.io/github/forks/MengMengCode/CLICD?style=flat-square">
-  <img alt="Downloads" src="https://img.shields.io/github/downloads/MengMengCode/CLICD/total?style=flat-square">
-  <img alt="Last Commit" src="https://img.shields.io/github/last-commit/MengMengCode/CLICD?style=flat-square">
-  <img alt="License" src="https://img.shields.io/github/license/MengMengCode/CLICD.svg?style=flat-square">
-</p>
-
-<p align="center">
   <img alt="Go" src="https://img.shields.io/badge/Go-1.22-00ADD8?style=flat-square&logo=go&logoColor=white">
   <img alt="React" src="https://img.shields.io/badge/React-18-61DAFB?style=flat-square&logo=react&logoColor=111111">
   <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-5-3178C6?style=flat-square&logo=typescript&logoColor=white">
