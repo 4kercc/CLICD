@@ -1,7 +1,38 @@
 import { useEffect, useRef, useState } from 'react'
 import { Monitor, RefreshCw, Send, X } from 'lucide-react'
-import RFB from '@novnc/novnc'
+import RFBModule from '@novnc/novnc/lib/rfb'
 import { createVNCTicket, getWebVNCUrl } from '../services/api'
+
+type RFBConstructor = new (
+  target: HTMLElement,
+  url: string,
+  options?: { credentials?: Record<string, string>; shared?: boolean; repeaterID?: string; wsProtocols?: string[] }
+) => RFBInstance
+
+interface RFBInstance extends EventTarget {
+  scaleViewport: boolean
+  resizeSession: boolean
+  focusOnClick: boolean
+  viewOnly: boolean
+  qualityLevel: number
+  compressionLevel: number
+  background: string
+  disconnect(): void
+  sendCtrlAltDel(): void
+}
+
+const RFB = resolveRFBConstructor(RFBModule)
+
+function resolveRFBConstructor(moduleValue: unknown): RFBConstructor {
+  if (typeof moduleValue === 'function') {
+    return moduleValue as RFBConstructor
+  }
+  const maybeDefault = (moduleValue as { default?: unknown })?.default
+  if (typeof maybeDefault === 'function') {
+    return maybeDefault as RFBConstructor
+  }
+  throw new Error('noVNC RFB constructor is unavailable')
+}
 
 interface WebVNCViewerProps {
   containerName: string
@@ -10,7 +41,7 @@ interface WebVNCViewerProps {
 
 export default function WebVNCViewer({ containerName, onClose }: WebVNCViewerProps) {
   const screenRef = useRef<HTMLDivElement>(null)
-  const rfbRef = useRef<RFB | null>(null)
+  const rfbRef = useRef<RFBInstance | null>(null)
   const [status, setStatus] = useState<'connecting' | 'connected' | 'disconnected' | 'error'>('connecting')
   const [errorMsg, setErrorMsg] = useState('')
 
@@ -80,6 +111,7 @@ export default function WebVNCViewer({ containerName, onClose }: WebVNCViewerPro
       setErrorMsg(error.response?.data?.message || 'WebVNC ticket 创建失败，请重新登录后再试')
       return
     }
+
     if (!ticket) {
       setStatus('error')
       setErrorMsg('WebVNC ticket 为空，请重新登录后再试')
@@ -97,9 +129,7 @@ export default function WebVNCViewer({ containerName, onClose }: WebVNCViewerPro
       rfb.qualityLevel = 6
       rfb.compressionLevel = 2
       rfb.background = '#050505'
-      rfb.addEventListener('connect', () => {
-        setStatus('connected')
-      })
+      rfb.addEventListener('connect', () => setStatus('connected'))
       rfb.addEventListener('disconnect', (event) => {
         const detail = (event as CustomEvent<{ clean?: boolean }>).detail
         setStatus((current) => current === 'error' ? current : 'disconnected')
@@ -133,35 +163,31 @@ export default function WebVNCViewer({ containerName, onClose }: WebVNCViewerPro
   }, [containerName])
 
   return (
-    <div className="bg-white border border-gray-200 rounded-lg overflow-hidden h-full flex flex-col">
-      <div className="flex items-center justify-between px-4 py-2.5 border-b border-gray-200 bg-gray-50 shrink-0">
+    <div className="flex h-full flex-col overflow-hidden rounded-lg border border-gray-200 bg-white">
+      <div className="flex shrink-0 items-center justify-between border-b border-gray-200 bg-gray-50 px-4 py-2.5">
         <div className="flex items-center gap-2">
-          <Monitor className="w-4 h-4 text-gray-600" />
+          <Monitor className="h-4 w-4 text-gray-600" />
           <span className="text-sm font-medium text-black">WebVNC - {containerName}</span>
-          {status === 'connected' && <span className="text-xs px-1.5 py-0.5 rounded bg-green-100 text-green-700">已连接</span>}
-          {status === 'connecting' && <span className="text-xs px-1.5 py-0.5 rounded bg-yellow-100 text-yellow-700">连接中...</span>}
-          {status === 'disconnected' && <span className="text-xs px-1.5 py-0.5 rounded bg-gray-100 text-gray-600">已断开</span>}
-          {status === 'error' && <span className="text-xs px-1.5 py-0.5 rounded bg-red-100 text-red-700">连接失败</span>}
+          {status === 'connected' && <span className="rounded bg-green-100 px-1.5 py-0.5 text-xs text-green-700">已连接</span>}
+          {status === 'connecting' && <span className="rounded bg-yellow-100 px-1.5 py-0.5 text-xs text-yellow-700">连接中...</span>}
+          {status === 'disconnected' && <span className="rounded bg-gray-100 px-1.5 py-0.5 text-xs text-gray-600">已断开</span>}
+          {status === 'error' && <span className="rounded bg-red-100 px-1.5 py-0.5 text-xs text-red-700">连接失败</span>}
         </div>
         <div className="flex items-center gap-1">
-          <button
-            onClick={() => rfbRef.current?.sendCtrlAltDel()}
-            className="inline-flex items-center gap-1 px-2 py-1.5 hover:bg-gray-200 rounded text-gray-500 text-xs"
-            title="发送 Ctrl+Alt+Del"
-          >
-            <Send className="w-3.5 h-3.5" />
+          <button onClick={() => rfbRef.current?.sendCtrlAltDel()} className="inline-flex items-center gap-1 rounded px-2 py-1.5 text-xs text-gray-500 hover:bg-gray-200" title="发送 Ctrl+Alt+Del">
+            <Send className="h-3.5 w-3.5" />
             Ctrl+Alt+Del
           </button>
-          <button onClick={connect} className="p-1.5 hover:bg-gray-200 rounded text-gray-500 text-xs" title="重新连接">
-            <RefreshCw className="w-3.5 h-3.5" />
+          <button onClick={connect} className="rounded p-1.5 text-xs text-gray-500 hover:bg-gray-200" title="重新连接">
+            <RefreshCw className="h-3.5 w-3.5" />
           </button>
-          <button onClick={onClose} className="p-1.5 hover:bg-gray-200 rounded text-gray-500" title="关闭">
-            <X className="w-4 h-4" />
+          <button onClick={onClose} className="rounded p-1.5 text-gray-500 hover:bg-gray-200" title="关闭">
+            <X className="h-4 w-4" />
           </button>
         </div>
       </div>
 
-      <div className="relative flex-1 min-h-0 bg-black overflow-hidden">
+      <div className="relative min-h-0 flex-1 overflow-hidden bg-black">
         <div ref={screenRef} className="h-full w-full [&>div]:h-full [&>div]:w-full [&_canvas]:block" />
         {(status === 'connecting' || status === 'error' || (status === 'disconnected' && errorMsg)) && (
           <div className={`absolute inset-x-0 bottom-0 border-t px-4 py-2 text-sm ${status === 'error' ? 'border-red-900 bg-red-950 text-red-100' : 'border-gray-800 bg-gray-950 text-gray-200'}`}>
