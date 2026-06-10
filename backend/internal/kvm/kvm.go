@@ -588,7 +588,7 @@ func (m *Manager) StartContainer(id int) error {
 			}
 		}
 	}
-	config.UpdateContainerStatus(id, "running")
+	config.UpdateContainerStatus(id, "initializing")
 	// Detect VNC port
 	if _, err := m.RefreshVNCPort(id); err != nil {
 		fmt.Printf("Warning: failed to refresh VNC port for %s: %v\n", name, err)
@@ -625,6 +625,11 @@ func (m *Manager) StartContainer(id int) error {
 			return err
 		}
 	}
+	// Wait for cloud-init to finish and SSH to be reachable (password-only mode)
+	if !isWindows && c.IP != "" {
+		m.waitForCloudInitReady(name, c.IP, c.SSHPassword)
+	}
+	config.UpdateContainerStatus(id, "running")
 	if c.IPv6 != "" || len(c.IPv6Addresses) > 0 {
 		if err := m.applyIPv6Runtime(c); err != nil {
 			return err
@@ -633,6 +638,50 @@ func (m *Manager) StartContainer(id int) error {
 		ensureKVMIPv6DenyRule("virbr0", c.MACAddress)
 	}
 	return nil
+}
+
+// waitForCloudInitReady waits for cloud-init to finish and SSH to be reachable.
+func (m *Manager) waitForCloudInitReady(vmName, ip, password string) {
+	if ip == "" || password == "" {
+		return
+	}
+	deadline := time.Now().Add(3 * time.Minute)
+	target := net.JoinHostPort(ip, "22")
+	sshWasUp := false
+	qgaAttempted := false
+
+	for time.Now().Before(deadline) {
+		client, err := ssh.Dial("tcp", target, &ssh.ClientConfig{
+			User:            "root",
+			Auth:            []ssh.AuthMethod{ssh.Password(password)},
+			HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+			Timeout:         5 * time.Second,
+		})
+		if err == nil {
+			client.Close()
+			if !sshWasUp {
+				sshWasUp = true
+				fmt.Printf("KVM %s SSH up, waiting for cloud-init to settle...\n", vmName)
+				time.Sleep(10 * time.Second)
+				continue
+			}
+			fmt.Printf("KVM %s ready\n", vmName)
+			return
+		}
+
+		// Try guest agent ONCE to speed things up, with timeout to avoid blocking
+		if !qgaAttempted && qemuGuestPing(vmName) == nil {
+			qgaAttempted = true
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			cmd := exec.CommandContext(ctx, "virsh", "qemu-agent-command", vmName,
+				`{"execute":"guest-exec","arguments":{"path":"/bin/sh","arg":["-c","cloud-init status --wait 2>/dev/null; systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null; true"],"capture-output":false}}`)
+			cmd.Run()
+			cancel()
+		}
+
+		time.Sleep(5 * time.Second)
+	}
+	fmt.Printf("Warning: KVM %s not ready after 3 minutes\n", vmName)
 }
 
 func (m *Manager) StopContainer(id int) error {
@@ -2530,7 +2579,10 @@ if [ -n "$SSH_PUBLIC_KEY" ]; then
 	chown -R root:root /root/.ssh 2>/dev/null || true
 fi
 if command -v chpasswd >/dev/null 2>&1; then
-	printf 'root:%s\n' "$ROOT_PASSWORD" | chpasswd || true
+	printf 'root:%s\n' "$ROOT_PASSWORD" | chpasswd 2>/tmp/clicd-chpasswd.log && echo "root password set via chpasswd" || echo "WARNING: chpasswd failed: $(cat /tmp/clicd-chpasswd.log 2>/dev/null)"
+elif command -v openssl >/dev/null 2>&1 && command -v usermod >/dev/null 2>&1; then
+	HASH=$(echo "$ROOT_PASSWORD" | openssl passwd -6 -stdin 2>/dev/null)
+	[ -n "$HASH" ] && usermod -p "$HASH" root 2>/dev/null && echo "root password set via openssl/usermod" || echo "WARNING: openssl/usermod failed"
 fi
 ssh-keygen -A >/dev/null 2>&1 || true
 if command -v systemctl >/dev/null 2>&1; then

@@ -34,7 +34,7 @@ var cliTranslations = map[string]string{
 	"请选择操作":             "Select an action",
 	"再见":                "Goodbye",
 	"无效选择":              "Invalid choice",
-	"CLICD - LXC 容器管理器": "CLICD - LXC Container Manager",
+	"CLICD - LXC 容器管理器": "CLICD - Container Manager",
 	"Web 面板":            "Web panel",
 	"端口":                "port",
 	"运行中":               "running",

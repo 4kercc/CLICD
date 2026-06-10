@@ -753,6 +753,7 @@ export default function ContainerDetail() {
   }
 
   const isRunning = container.status === 'running'
+  const isInitializing = container.status === 'initializing'
   const isKVM = (container.virtualization || 'lxc') === 'kvm'
   const isWindows = container.template?.includes('windows')
   const reinstallLinuxTemplate = !isWindowsTemplate(selectedTemplate)
@@ -872,7 +873,7 @@ export default function ContainerDetail() {
             <div>
               <div className="flex items-center gap-2 flex-wrap">
                 <h1 className="text-xl font-bold text-black">{container.name}</h1>
-                <StatusBadge running={isRunning} />
+                <StatusBadge running={isRunning} initializing={isInitializing} />
               </div>
               <div className="flex items-center gap-2 flex-wrap mt-2">
                 <InfoTag color="blue">系统 {container.template}</InfoTag>
@@ -1670,7 +1671,15 @@ function RangeSwitch({ value, onChange }: { value: StatsRangeKey; onChange: (val
   )
 }
 
-function StatusBadge({ running }: { running: boolean }) {
+function StatusBadge({ running, initializing }: { running: boolean; initializing?: boolean }) {
+  if (initializing) {
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium whitespace-nowrap bg-amber-50 text-amber-700">
+        <span className="w-1.5 h-1.5 rounded-full flex-shrink-0 bg-amber-500 animate-pulse"></span>
+        正在初始化
+      </span>
+    )
+  }
   return (
     <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium whitespace-nowrap ${running ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>
       <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${running ? 'bg-emerald-500' : 'bg-rose-500'}`}></span>
