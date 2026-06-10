@@ -770,8 +770,26 @@ export default function ContainerDetail() {
   if (ipv6List.length === 0 && container.ipv6) ipv6List.push(container.ipv6)
   const maxVCPU = hostInfo?.cpu.cores || 64
   const maxRAMMB = hostInfo?.ram.total_mb ? Number(hostInfo.ram.total_mb) : undefined
-  const publicEndpoint = container.ssh_port > 0 ? `${publicHost}:${container.ssh_port}` : '-'
-  const sshCommand = container.ssh_port > 0 ? `ssh -p ${container.ssh_port} root@${publicHost}` : ''
+  const hasIndependentIPv4 = assignedIPv4List.length > 0
+  const hasIndependentIPv6 = ipv6List.length > 0
+  const hasIndependentIP = hasIndependentIPv4 || hasIndependentIPv6
+  const defaultConnPort = isWindows ? 3389 : 22
+
+  let publicEndpoint = '-'
+  let sshCommand = ''
+
+  if (container.ssh_port > 0) {
+    // NAT port mapping mode
+    publicEndpoint = `${publicHost}:${container.ssh_port}`
+    sshCommand = `ssh -p ${container.ssh_port} root@${publicHost}`
+  } else if (hasIndependentIP) {
+    // Direct connection via independent IPv4 or IPv6
+    const connIP = hasIndependentIPv4 ? assignedIPv4List[0] : `[${ipv6List[0]}]`
+    publicEndpoint = `${connIP}:${defaultConnPort}`
+    if (!isWindows) {
+      sshCommand = `ssh root@${connIP}`
+    }
+  }
   const editingSSH = draft.index !== null && !!container.port_mappings?.[draft.index] && (
     container.port_mappings[draft.index].description === 'SSH' || container.port_mappings[draft.index].container_port === 22 ||
     container.port_mappings[draft.index].description === 'RDP' || container.port_mappings[draft.index].container_port === 3389
