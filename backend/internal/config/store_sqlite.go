@@ -254,6 +254,14 @@ func ensureSchema() error {
 			success INTEGER,
 			error TEXT
 		)`,
+		`CREATE TABLE IF NOT EXISTS security_conntrack_snapshots (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			container_ip TEXT NOT NULL,
+			line TEXT NOT NULL,
+			captured_at TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_conntrack_snapshots_ip_time
+			ON security_conntrack_snapshots(container_ip, captured_at)`,
 		`CREATE TABLE IF NOT EXISTS tasks (
 			id TEXT PRIMARY KEY,
 			type TEXT,
@@ -640,6 +648,59 @@ func saveAPIKeys(tx *sql.Tx) error {
 		}
 	}
 	return nil
+}
+
+// SaveConntrackSnapshot stores raw conntrack lines for a container IP.
+func SaveConntrackSnapshot(containerIP string, lines []string) {
+	if db == nil || len(lines) == 0 || strings.TrimSpace(containerIP) == "" {
+		return
+	}
+	now := time.Now().Format("2006-01-02 15:04:05")
+	tx, err := db.Begin()
+	if err != nil {
+		return
+	}
+	defer tx.Rollback()
+	stmt, err := tx.Prepare(`INSERT INTO security_conntrack_snapshots (container_ip, line, captured_at) VALUES (?, ?, ?)`)
+	if err != nil {
+		return
+	}
+	defer stmt.Close()
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		stmt.Exec(containerIP, line, now)
+	}
+	tx.Commit()
+
+	// Cleanup old snapshots (>1 hour)
+	db.Exec(`DELETE FROM security_conntrack_snapshots WHERE captured_at < ?`,
+		time.Now().Add(-1*time.Hour).Format("2006-01-02 15:04:05"))
+}
+
+// GetConntrackSnapshotLines returns stored conntrack lines for a container IP.
+func GetConntrackSnapshotLines(containerIP string) []string {
+	if db == nil || strings.TrimSpace(containerIP) == "" {
+		return nil
+	}
+	rows, err := db.Query(
+		`SELECT line FROM security_conntrack_snapshots WHERE container_ip = ? ORDER BY captured_at DESC LIMIT 200`,
+		containerIP,
+	)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var lines []string
+	for rows.Next() {
+		var line string
+		if rows.Scan(&line) == nil {
+			lines = append(lines, line)
+		}
+	}
+	return lines
 }
 
 func saveAuditLogs(tx *sql.Tx) error {

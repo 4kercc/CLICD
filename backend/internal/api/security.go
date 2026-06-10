@@ -180,6 +180,12 @@ func (ss *SecurityScanner) monitorLoop() {
 	}
 }
 
+func (ss *SecurityScanner) alertCount() int {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	return len(ss.alerts)
+}
+
 func (ss *SecurityScanner) checkAllContainers() {
 	for _, c := range config.AppConfig.Containers {
 		if c.Status != "running" || c.IP == "" {
@@ -208,6 +214,7 @@ func (ss *SecurityScanner) checkContainer(name, ip string) {
 		return
 	}
 
+	alertBefore := ss.alertCount()
 	ss.detectPortScans(name, ip, stats)
 	ss.detectBruteForce(name, ip, stats)
 	ss.detectSpam(name, ip, stats)
@@ -216,6 +223,11 @@ func (ss *SecurityScanner) checkContainer(name, ip string) {
 	ss.detectMining(name, ip, stats)
 	ss.detectProxyAndTor(name, ip, stats)
 	ss.detectMalware(name, ip, stats)
+
+	// If new alerts were generated, snapshot the conntrack data for later retrieval.
+	if ss.alertCount() > alertBefore {
+		config.SaveConntrackSnapshot(ip, lines)
+	}
 }
 
 func newTrafficStats() *trafficStats {
@@ -759,28 +771,49 @@ func HandleSecurityLogs(w http.ResponseWriter, r *http.Request) {
 
 func getConnectionLogs(ip string) []map[string]interface{} {
 	logs := make([]map[string]interface{}, 0)
+	seen := map[string]bool{}
 
-	for _, line := range readConntrackLines(ip) {
+	parseLine := func(line string) map[string]interface{} {
 		srcIP := extractField(line, "src=")
 		dstIP := extractField(line, "dst=")
 		srcPort := extractField(line, "sport=")
 		dstPort := extractField(line, "dport=")
-
 		sPort, _ := strconv.Atoi(srcPort)
 		dPort, _ := strconv.Atoi(dstPort)
-
-		logs = append(logs, map[string]interface{}{
+		return map[string]interface{}{
 			"src_ip":   srcIP,
 			"dst_ip":   dstIP,
 			"src_port": sPort,
 			"dst_port": dPort,
 			"protocol": extractProtocol(line),
 			"state":    extractConnState(line),
-		})
+		}
+	}
 
+	// First, load stored snapshots from database (persisted at alert time).
+	for _, line := range config.GetConntrackSnapshotLines(ip) {
 		if len(logs) >= 100 {
 			break
 		}
+		key := strings.TrimSpace(line)
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		logs = append(logs, parseLine(line))
+	}
+
+	// Then, merge live conntrack data (deduplicated).
+	for _, line := range readConntrackLines(ip) {
+		if len(logs) >= 100 {
+			break
+		}
+		key := strings.TrimSpace(line)
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		logs = append(logs, parseLine(line))
 	}
 
 	return logs
