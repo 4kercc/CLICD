@@ -112,9 +112,11 @@ This open-source software is intended solely for educational purposes, specifica
 本开源软件仅供学习和研究 LXC、KVM 等虚拟化技术原理之目的使用，不得用于任何违反适用法律法规、软件许可协议或第三方权益的行为。
 
 本软件中涉及的 Windows 名称、标识、图标及相关知识产权均归 Microsoft Corporation 及其权利人所有。本项目与微软公司不存在任何关联、授权或合作关系。
-## Thanks/鸣谢
-
+## Thanks / 鸣谢
+- [Nodeseek.com](https://www.nodeseek.com) — 一个专注于服务器的社区
 - [Linux.do](https://linux.do) — 一个充满灵感的科技社区
+- [52pojie.cn](https://www.52pojie.cn) — 一个专注于软件研究、逆向分析、安全技术与工具开发的技术社区
+
 
 ## Star History
 
