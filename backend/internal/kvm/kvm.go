@@ -407,6 +407,7 @@ func (m *Manager) defineContainer(id int, vmName string, cfg lxc.ContainerConfig
 	mac := randomMAC()
 	sshPassword := generateRandomString(16)
 	sshPublicKey := ""
+	sshAuthMode := ""
 	if !IsWindowsImage(image.ID) {
 		sshAccess, err := lxc.ResolveCreateSSHAccess(cfg)
 		if err != nil {
@@ -414,6 +415,7 @@ func (m *Manager) defineContainer(id int, vmName string, cfg lxc.ContainerConfig
 		}
 		sshPassword = sshAccess.Password
 		sshPublicKey = sshAccess.PublicKey
+		sshAuthMode = sshAccess.Mode
 	}
 	publicIPv4s, err := lxc.AllocatePublicIPv4Assignments(id, cfg.PublicIPv4s, cfg.IPv4Count, cfg.AssignIPv4)
 	if err != nil {
@@ -465,7 +467,7 @@ func (m *Manager) defineContainer(id int, vmName string, cfg lxc.ContainerConfig
 		if err := createOverlayDisk(ImagePath(image.ID), diskPath, cfg.DiskGB); err != nil {
 			return nil, err
 		}
-		if err := createSeedISO(seedPath, vmName, cfg.Name, sshPassword, sshPublicKey, mac, ipv6List, ipv4List, *image); err != nil {
+		if err := createSeedISO(seedPath, vmName, cfg.Name, sshPassword, sshPublicKey, mac, ipv6List, ipv4List, *image, sshAuthMode); err != nil {
 			return nil, err
 		}
 		xml = domainXML(vmName, int(cfg.VCPU), cfg.RAMMB, diskPath, seedPath, mac, cfg.IOSpeedMBps, cfg.NetworkBWMbps, image.Desktop != "")
@@ -1853,8 +1855,9 @@ func shellQuoteWindows(value string) string {
 	return `"` + strings.ReplaceAll(value, `"`, `\"`) + `"`
 }
 
-func createSeedISO(seedPath, instanceID, hostname, password, publicKey, mac string, ipv6s []string, ipv4s []string, image Image) error {
-	guestSetup := kvmSSHSetupScript(password, publicKey)
+func createSeedISO(seedPath, instanceID, hostname, password, publicKey, mac string, ipv6s []string, ipv4s []string, image Image, sshAuthMode string) error {
+	disablePubkey := sshAuthMode == "password" || sshAuthMode == "auto_password"
+	guestSetup := kvmSSHSetupScript(password, disablePubkey, publicKey)
 	if desktopSetup := kvmDesktopSetupScript(image); desktopSetup != "" {
 		guestSetup += "\n" + desktopSetup
 	}
@@ -2432,11 +2435,11 @@ func runKVMGuestAgentSSHSetup(name string, password string) error {
 	if err := qemuGuestPing(name); err != nil {
 		return err
 	}
-	return qemuGuestExec(name, kvmSSHSetupScript(password), 180*time.Second)
+	return qemuGuestExec(name, kvmSSHSetupScript(password, false), 180*time.Second)
 }
 
 func runKVMSSHSetup(client *ssh.Client, password string) error {
-	return runKVMSSHScript(client, kvmSSHSetupScript(password), "KVM SSH", 150*time.Second)
+	return runKVMSSHScript(client, kvmSSHSetupScript(password, false), "KVM SSH", 150*time.Second)
 }
 
 func runKVMSSHScript(client *ssh.Client, script string, description string, timeout time.Duration) error {
@@ -2465,12 +2468,16 @@ func runKVMSSHScript(client *ssh.Client, script string, description string, time
 	}
 }
 
-func kvmSSHSetupScript(password string, publicKeys ...string) string {
+func kvmSSHSetupScript(password string, disablePubkeyAuth bool, publicKeys ...string) string {
 	publicKey := ""
 	if len(publicKeys) > 0 {
 		publicKey = strings.TrimSpace(publicKeys[0])
 	}
-	return `set -u
+	pubkeyValue := "yes"
+	if disablePubkeyAuth {
+		pubkeyValue = "no"
+	}
+	script := `set -u
 ROOT_PASSWORD=` + shellQuote(password) + `
 SSH_PUBLIC_KEY=` + shellQuote(publicKey) + `
 export DEBIAN_FRONTEND=noninteractive
@@ -2499,7 +2506,7 @@ fi
 mkdir -p /etc/ssh/sshd_config.d
 cat > /etc/ssh/sshd_config.d/99-clicd-root.conf <<'EOF'
 PermitRootLogin yes
-PubkeyAuthentication yes
+PubkeyAuthentication __CLICD_PUBKEY_AUTH__
 PasswordAuthentication yes
 KbdInteractiveAuthentication yes
 ChallengeResponseAuthentication yes
@@ -2507,8 +2514,8 @@ EOF
 if [ -f /etc/ssh/sshd_config ]; then
 	grep -q '^PermitRootLogin ' /etc/ssh/sshd_config && sed -i 's/^PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config || printf '\nPermitRootLogin yes\n' >> /etc/ssh/sshd_config
 	grep -q '^#PermitRootLogin ' /etc/ssh/sshd_config && sed -i 's/^#PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config || true
-	grep -q '^PubkeyAuthentication ' /etc/ssh/sshd_config && sed -i 's/^PubkeyAuthentication .*/PubkeyAuthentication yes/' /etc/ssh/sshd_config || printf '\nPubkeyAuthentication yes\n' >> /etc/ssh/sshd_config
-	grep -q '^#PubkeyAuthentication ' /etc/ssh/sshd_config && sed -i 's/^#PubkeyAuthentication .*/PubkeyAuthentication yes/' /etc/ssh/sshd_config || true
+	grep -q '^PubkeyAuthentication ' /etc/ssh/sshd_config && sed -i 's/^PubkeyAuthentication .*/PubkeyAuthentication __CLICD_PUBKEY_AUTH__/' /etc/ssh/sshd_config || printf '\nPubkeyAuthentication __CLICD_PUBKEY_AUTH__\n' >> /etc/ssh/sshd_config
+	grep -q '^#PubkeyAuthentication ' /etc/ssh/sshd_config && sed -i 's/^#PubkeyAuthentication .*/PubkeyAuthentication __CLICD_PUBKEY_AUTH__/' /etc/ssh/sshd_config || true
 	grep -q '^PasswordAuthentication ' /etc/ssh/sshd_config && sed -i 's/^PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config || printf '\nPasswordAuthentication yes\n' >> /etc/ssh/sshd_config
 	grep -q '^#PasswordAuthentication ' /etc/ssh/sshd_config && sed -i 's/^#PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config || true
 	grep -q '^KbdInteractiveAuthentication ' /etc/ssh/sshd_config && sed -i 's/^KbdInteractiveAuthentication .*/KbdInteractiveAuthentication yes/' /etc/ssh/sshd_config || printf '\nKbdInteractiveAuthentication yes\n' >> /etc/ssh/sshd_config
@@ -2549,6 +2556,8 @@ if [ -w /dev/tty1 ]; then
 	printf '\nCLICD VNC console is ready. Press Enter for login prompt.\n' >/dev/tty1 || true
 fi
 `
+	script = strings.ReplaceAll(script, "__CLICD_PUBKEY_AUTH__", pubkeyValue)
+	return script
 }
 
 func kvmDesktopSetupScript(image Image) string {

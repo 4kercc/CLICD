@@ -424,7 +424,7 @@ func (m *Manager) CreateContainer(cfg ContainerConfig) error {
 			fmt.Printf("Warning: failed to install IPv6 init in %s: %v\n", lxcName, err)
 		}
 	}
-	if err := m.preconfigureSSH(rootfsPath, cfg.TemplateID); err != nil {
+	if err := m.preconfigureSSH(rootfsPath, cfg.TemplateID, sshAccess.Mode); err != nil {
 		fmt.Printf("Warning: failed to pre-configure SSH in %s: %v\n", lxcName, err)
 	}
 	if sshAccess.PublicKey != "" {
@@ -512,11 +512,13 @@ IPv6AcceptRA=no
 }
 
 // preconfigureSSH installs and configures SSH directly in the rootfs before first boot.
-func (m *Manager) preconfigureSSH(rootfsPath, templateID string) error {
+func (m *Manager) preconfigureSSH(rootfsPath, templateID string, sshAuthMode string) error {
 	_ = templateID
+	// Disable pubkey auth when user chose password-only mode (password or auto_password)
+	disablePubkey := sshAuthMode == SSHAuthPassword || sshAuthMode == SSHAuthAutoPassword
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
-	cmd, err := m.rootfsCommand(rootfsPath, "sh", "-c", sshSetupScript(false))
+	cmd, err := m.rootfsCommand(rootfsPath, "sh", "-c", sshSetupScript(false, disablePubkey))
 	if err != nil {
 		return err
 	}
@@ -1758,7 +1760,7 @@ func (m *Manager) EnsureSSH(id int) error {
 		config.SaveConfig()
 	}
 
-	script := sshSetupScript(true)
+	script := sshSetupScript(true, false) // keep pubkey enabled for runtime ensure
 
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
@@ -1826,7 +1828,11 @@ func (m *Manager) containerPortListening(lxcName string, port int) bool {
 	return exec.CommandContext(ctx, "lxc-attach", "-n", lxcName, "--", "sh", "-c", check).Run() == nil
 }
 
-func sshSetupScript(startService bool) string {
+func sshSetupScript(startService bool, disablePubkeyAuth bool) string {
+	pubkeyValue := "yes"
+	if disablePubkeyAuth {
+		pubkeyValue = "no"
+	}
 	script := `set -u
 
 # DNS setup: handle both traditional /etc/resolv.conf and systemd-resolved (Ubuntu 24.04).
@@ -1945,7 +1951,7 @@ ssh-keygen -A >/dev/null 2>&1 || true
 
 cat >/etc/ssh/sshd_config.d/99-clicd.conf <<'EOF'
 PermitRootLogin yes
-PubkeyAuthentication yes
+PubkeyAuthentication __CLICD_PUBKEY_AUTH__
 PasswordAuthentication yes
 KbdInteractiveAuthentication no
 ChallengeResponseAuthentication no
@@ -1953,7 +1959,7 @@ UsePAM no
 EOF
 
 set_sshd_option PermitRootLogin yes
-set_sshd_option PubkeyAuthentication yes
+set_sshd_option PubkeyAuthentication __CLICD_PUBKEY_AUTH__
 set_sshd_option PasswordAuthentication yes
 set_sshd_option KbdInteractiveAuthentication no
 set_sshd_option ChallengeResponseAuthentication no
@@ -1981,6 +1987,7 @@ ensure_sshd_runtime_dir
 	exit 32
 }
 `
+	script = strings.ReplaceAll(script, "__CLICD_PUBKEY_AUTH__", pubkeyValue)
 	if !startService {
 		return script
 	}
@@ -2054,7 +2061,7 @@ func (m *Manager) ResetSSHPassword(id int, password string) (string, error) {
 			return "", err
 		}
 		rootfsPath := filepath.Join(m.LxcPath, lxcName, "rootfs")
-		if err := m.preconfigureSSH(rootfsPath, c.Template); err != nil {
+		if err := m.preconfigureSSH(rootfsPath, c.Template, ""); err != nil {
 			return "", fmt.Errorf("failed to configure SSH: %v", err)
 		}
 		if err := m.setRootfsPassword(rootfsPath, newPassword); err != nil {
@@ -2626,7 +2633,7 @@ func (m *Manager) ReinstallContainer(id int, templateID string, authConfig ...Co
 		}
 	}
 	c.SSHPassword = sshAccess.Password
-	if err := m.preconfigureSSH(rootfsPath, templateID); err != nil {
+	if err := m.preconfigureSSH(rootfsPath, templateID, sshAccess.Mode); err != nil {
 		fmt.Printf("Warning: failed to pre-configure SSH in %s after reinstall: %v\n", lxcName, err)
 	}
 	if sshAccess.PublicKey != "" {
