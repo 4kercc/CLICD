@@ -115,7 +115,6 @@ This open-source software is intended solely for educational purposes, specifica
 ## Thanks / 鸣谢
 - [Nodeseek.com](https://www.nodeseek.com) — 一个专注于服务器的社区
 - [Linux.do](https://linux.do) — 一个充满灵感的科技社区
-- [52pojie.cn](https://www.52pojie.cn) — 一个专注于软件研究、逆向分析、安全技术与工具开发的技术社区
 
 
 ## Star History
