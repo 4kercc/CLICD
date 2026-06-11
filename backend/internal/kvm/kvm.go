@@ -84,6 +84,7 @@ var (
 	lastTrafficSnapshot = map[string]trafficSample{}
 	kvmSnapshotMu       sync.Mutex
 	kvmSSHEnsureLocks   sync.Map
+	knownSSHHostKeys    sync.Map // TOFU host key store: host:port → ssh.PublicKey
 	portMapApplyMu      sync.Mutex
 	lastPortMapApply    = map[int]time.Time{}
 	windowsMetricsMu    sync.Mutex
@@ -642,6 +643,20 @@ func (m *Manager) StartContainer(id int) error {
 }
 
 // waitForCloudInitReady waits for cloud-init to finish and SSH to be reachable.
+// tofuHostKeyCallback implements Trust-On-First-Use host key verification.
+// On the first connection to a host, the key is accepted and remembered.
+// Subsequent connections must present the same key or the connection is rejected.
+func tofuHostKeyCallback(hostname string, remote net.Addr, key ssh.PublicKey) error {
+	if stored, ok := knownSSHHostKeys.Load(hostname); ok {
+		if bytes.Equal(stored.(ssh.PublicKey).Marshal(), key.Marshal()) {
+			return nil
+		}
+		return fmt.Errorf("host key mismatch for %s (possible MitM attack)", hostname)
+	}
+	knownSSHHostKeys.Store(hostname, key)
+	return nil
+}
+
 func (m *Manager) waitForCloudInitReady(vmName, ip, password string) {
 	if ip == "" || password == "" {
 		return
@@ -655,7 +670,7 @@ func (m *Manager) waitForCloudInitReady(vmName, ip, password string) {
 		client, err := ssh.Dial("tcp", target, &ssh.ClientConfig{
 			User:            "root",
 			Auth:            []ssh.AuthMethod{ssh.Password(password)},
-			HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+			HostKeyCallback: tofuHostKeyCallback,
 			Timeout:         5 * time.Second,
 		})
 		if err == nil {
