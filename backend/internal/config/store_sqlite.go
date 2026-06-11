@@ -364,6 +364,8 @@ func ensureSchemaMigrations() error {
 		{"port_mappings", "host_ip", "TEXT"},
 		{"container_public_ipv4s", "prefix_len", "INTEGER"},
 		{"container_public_ipv4s", "gateway", "TEXT"},
+		{"containers", "firewall_enabled", "INTEGER NOT NULL DEFAULT 0"},
+		{"containers", "firewall_rules", "TEXT"},
 	} {
 		if err := ensureColumn(column.table, column.name, column.def); err != nil {
 			return err
@@ -583,8 +585,9 @@ func saveContainers(tx *sql.Tx) error {
 			ssh_host_key, port_mapping_limit, snapshot_limit, created_at, expires_at,
 			snapshot_schedule_enabled, snapshot_schedule_interval_hours, snapshot_schedule_time,
 			snapshot_schedule_last_run, snapshot_schedule_next_run, snapshot_schedule_created_by,
-			policy_blocked, policy_blocked_reason, policy_blocked_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			policy_blocked, policy_blocked_reason, policy_blocked_at,
+			firewall_enabled, firewall_rules
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			c.ID, c.UUID, c.Name, c.Virtualization, c.LXCName, c.KVMName, c.DiskImage, c.MACAddress, c.Template,
 			c.VCPU, c.RAMMB, c.DiskGB, c.NetworkBWMbps, c.MonthlyTrafficGB, c.TrafficMode, c.TrafficInGB,
 			c.TrafficOutGB, c.TrafficUsedRX, c.TrafficUsedTX, c.TrafficResetDate, c.IOSpeedMBps,
@@ -593,6 +596,7 @@ func saveContainers(tx *sql.Tx) error {
 			boolInt(c.SnapshotScheduleEnabled), c.SnapshotScheduleIntervalHours, c.SnapshotScheduleTime,
 			c.SnapshotScheduleLastRun, c.SnapshotScheduleNextRun, c.SnapshotScheduleCreatedBy,
 			boolInt(c.PolicyBlocked), c.PolicyBlockedReason, c.PolicyBlockedAt,
+			boolInt(c.FirewallEnabled), marshalFirewallRules(c.FirewallRules),
 		); err != nil {
 			return err
 		}
@@ -789,7 +793,8 @@ func loadContainers() ([]Container, error) {
 		ssh_host_key, port_mapping_limit, snapshot_limit, created_at, expires_at,
 		snapshot_schedule_enabled, snapshot_schedule_interval_hours, snapshot_schedule_time,
 		snapshot_schedule_last_run, snapshot_schedule_next_run, snapshot_schedule_created_by,
-		policy_blocked, policy_blocked_reason, policy_blocked_at
+		policy_blocked, policy_blocked_reason, policy_blocked_at,
+		firewall_enabled, firewall_rules
 		FROM containers ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -799,7 +804,8 @@ func loadContainers() ([]Container, error) {
 	result := []Container{}
 	for rows.Next() {
 		var c Container
-		var scheduleEnabled, policyBlocked int
+		var scheduleEnabled, policyBlocked, firewallEnabled int
+		var firewallRulesJSON sql.NullString
 		if err := rows.Scan(
 			&c.ID, &c.UUID, &c.Name, &c.Virtualization, &c.LXCName, &c.KVMName, &c.DiskImage, &c.MACAddress, &c.Template,
 			&c.VCPU, &c.RAMMB, &c.DiskGB, &c.NetworkBWMbps, &c.MonthlyTrafficGB, &c.TrafficMode, &c.TrafficInGB,
@@ -809,11 +815,16 @@ func loadContainers() ([]Container, error) {
 			&scheduleEnabled, &c.SnapshotScheduleIntervalHours, &c.SnapshotScheduleTime,
 			&c.SnapshotScheduleLastRun, &c.SnapshotScheduleNextRun, &c.SnapshotScheduleCreatedBy,
 			&policyBlocked, &c.PolicyBlockedReason, &c.PolicyBlockedAt,
+			&firewallEnabled, &firewallRulesJSON,
 		); err != nil {
 			return nil, err
 		}
 		c.SnapshotScheduleEnabled = scheduleEnabled != 0
 		c.PolicyBlocked = policyBlocked != 0
+		c.FirewallEnabled = firewallEnabled != 0
+		if firewallRulesJSON.Valid && strings.TrimSpace(firewallRulesJSON.String) != "" {
+			_ = json.Unmarshal([]byte(firewallRulesJSON.String), &c.FirewallRules)
+		}
 		result = append(result, c)
 	}
 	if err := rows.Err(); err != nil {
@@ -1165,6 +1176,17 @@ func boolInt(value bool) int {
 		return 1
 	}
 	return 0
+}
+
+func marshalFirewallRules(rules []FirewallRule) interface{} {
+	if len(rules) == 0 {
+		return nil
+	}
+	data, err := json.Marshal(rules)
+	if err != nil {
+		return nil
+	}
+	return string(data)
 }
 
 func boolPtrInt(value *bool) interface{} {

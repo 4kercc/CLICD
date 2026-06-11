@@ -1324,6 +1324,9 @@ func (m *Manager) StartContainer(id int) error {
 	if err := m.ApplyPortMappings(id); err != nil {
 		fmt.Printf("Warning: failed to apply port mappings: %v\n", err)
 	}
+	if err := ApplyFirewallRules(id); err != nil {
+		fmt.Printf("Warning: failed to apply firewall rules: %v\n", err)
+	}
 	if c.IPv6 != "" || len(c.IPv6Addresses) > 0 {
 		if err := m.ApplyIPv6(id); err != nil {
 			fmt.Printf("Warning: failed to apply IPv6 routing for %s: %v\n", lxcName, err)
@@ -1472,11 +1475,13 @@ func (m *Manager) StopContainer(id int) error {
 	if status != "running" {
 		config.UpdateContainerStatus(id, "stopped")
 		m.CleanPortMappings(id)
+		CleanFirewallRules(id)
 		m.cleanupBandwidthLimit(lxcName)
 		return nil
 	}
 
 	m.CleanPortMappings(id)
+	CleanFirewallRules(id)
 	m.cleanupBandwidthLimit(lxcName)
 
 	cmd := exec.Command("lxc-stop", "-n", lxcName)
@@ -2585,6 +2590,7 @@ func (m *Manager) ReinstallContainer(id int, templateID string, authConfig ...Co
 
 	// Clean port mappings temporarily
 	m.CleanPortMappings(id)
+	CleanFirewallRules(id)
 
 	// Download the new OS into a temporary container, then replace only the
 	// existing rootfs. The target container directory and config are preserved.

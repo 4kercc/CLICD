@@ -176,6 +176,8 @@ const endpointGroups: Array<{ title: string; endpoints: EndpointTuple[] }> = [
       ['POST', '/api/v1/containers/{id}/port-mappings', '添加端口映射'],
       ['PUT', '/api/v1/containers/{id}/port-mappings/{index}', '更新端口映射'],
       ['DELETE', '/api/v1/containers/{id}/port-mappings/{index}', '删除端口映射'],
+      ['GET', '/api/v1/containers/{id}/firewall', '获取防火墙设置'],
+      ['PUT', '/api/v1/containers/{id}/firewall', '更新防火墙设置'],
       ['GET', '/api/v1/snapshots', '快照总览'],
       ['GET', '/api/v1/containers/{id}/snapshots', '容器快照'],
       ['POST', '/api/v1/containers/{id}/snapshots', '创建快照'],
@@ -817,6 +819,14 @@ const requestBodySamples: Record<string, Record<string, unknown>> = {
     limit: 64,
   },
   'POST /api/v1/security/check': { container_name: 'example-vm' },
+  'PUT /api/v1/containers/{id}/firewall': {
+    enabled: true,
+    rules: [
+      { id: '', direction: 'in', protocol: 'tcp', port: '22', source_ip: '', action: 'ACCEPT', description: 'Allow SSH', enabled: true },
+      { id: '', direction: 'in', protocol: 'tcp', port: '80,443', source_ip: '', action: 'ACCEPT', description: 'Allow HTTP/HTTPS', enabled: true },
+      { id: '', direction: 'out', protocol: 'tcp', port: '', source_ip: '', action: 'ACCEPT', description: 'Allow all outbound TCP', enabled: true },
+    ],
+  },
   'PUT /api/v1/security/settings': { auto_shutdown: false },
   'POST /api/v1/swap': { action: 'resize', size_mb: 16384 },
   'POST /api/v1/batch-create': {
@@ -1025,6 +1035,29 @@ const responseSamples: Record<string, unknown> = {
     data: [{ container_port: 8081, host_port: 61320, protocol: 'tcp', description: 'HTTP' }],
   },
   'DELETE /api/v1/containers/{id}/port-mappings/{index}': { success: true, data: [] },
+  'GET /api/v1/containers/{id}/firewall': {
+    success: true,
+    data: {
+      enabled: true,
+      rules: [
+        { id: 'a1b2c3d4', direction: 'in', protocol: 'tcp', port: '22', source_ip: '', action: 'ACCEPT', description: 'Allow SSH', enabled: true },
+        { id: 'e5f6g7h8', direction: 'in', protocol: 'tcp', port: '80,443', source_ip: '', action: 'ACCEPT', description: 'Allow HTTP/HTTPS', enabled: true },
+        { id: 'i9j0k1l2', direction: 'out', protocol: 'tcp', port: '', source_ip: '', action: 'ACCEPT', description: 'Allow all outbound TCP', enabled: true },
+      ],
+    },
+  },
+  'PUT /api/v1/containers/{id}/firewall': {
+    success: true,
+    message: 'Firewall updated',
+    data: {
+      enabled: true,
+      rules: [
+        { id: 'a1b2c3d4', direction: 'in', protocol: 'tcp', port: '22', source_ip: '', action: 'ACCEPT', description: 'Allow SSH', enabled: true },
+        { id: 'e5f6g7h8', direction: 'in', protocol: 'tcp', port: '80,443', source_ip: '', action: 'ACCEPT', description: 'Allow HTTP/HTTPS', enabled: true },
+        { id: 'i9j0k1l2', direction: 'out', protocol: 'tcp', port: '', source_ip: '', action: 'ACCEPT', description: 'Allow all outbound TCP', enabled: true },
+      ],
+    },
+  },
   'GET /api/v1/snapshots': { success: true, data: null },
   'GET /api/v1/containers/{id}/snapshots': {
     success: true,
@@ -1138,6 +1171,9 @@ function endpointNoteFor(key: string) {
   }
   if (key === 'POST /api/v1/batch-create') {
     notes.push('批量创建的单个 containers[] 项支持与 POST /api/v1/containers 相同的网络和 SSH 认证字段。')
+  }
+  if (key === 'PUT /api/v1/containers/{id}/firewall') {
+    notes.push('启用防火墙后默认拒绝所有 TCP/UDP 入站和出站流量，仅放行 rules 中定义的规则。direction: in=入站, out=出站。action: ACCEPT=放行, DROP=拒绝。port 支持单端口(22)、多端口(80,443)、范围(8000-9000)。')
   }
   if (key === 'POST /api/v1/batch-action') {
     notes.push('action=reinstall 时可追加 template_id、ssh_auth_mode、ssh_password、ssh_public_key；其他 action 会忽略这些重装字段。')

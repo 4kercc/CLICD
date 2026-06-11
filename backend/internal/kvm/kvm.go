@@ -626,6 +626,9 @@ func (m *Manager) StartContainer(id int) error {
 		if err := lxc.NewManager().ApplyPortMappings(id); err != nil {
 			return err
 		}
+		if err := lxc.ApplyFirewallRules(id); err != nil {
+			fmt.Printf("Warning: failed to apply firewall rules: %v\n", err)
+		}
 	}
 	// Wait for cloud-init to finish and SSH to be reachable (password-only mode)
 	if !isWindows && c.IP != "" {
@@ -706,6 +709,7 @@ func (m *Manager) StopContainer(id int) error {
 		return fmt.Errorf("container not found: %d", id)
 	}
 	_ = lxc.NewManager().CleanPortMappings(id)
+	lxc.CleanFirewallRules(id)
 	name := c.VirshName()
 	status, _ := m.GetContainerStatus(name)
 	if status != "running" {
@@ -1183,6 +1187,7 @@ func (m *Manager) prepareVMForColdCopy(id int, name string) (bool, error) {
 		time.Sleep(time.Second)
 	} else {
 		_ = lxc.NewManager().CleanPortMappings(id)
+		lxc.CleanFirewallRules(id)
 	}
 	return wasRunning, nil
 }
@@ -2485,6 +2490,9 @@ func (m *Manager) EnsureSSH(id int) error {
 		}
 		if mapErr := lxc.NewManager().ApplyPortMappings(id); mapErr != nil {
 			return mapErr
+		}
+		if err := lxc.ApplyFirewallRules(id); err != nil {
+			fmt.Printf("Warning: failed to apply firewall rules: %v\n", err)
 		}
 		return nil
 	}

@@ -724,6 +724,8 @@ function toPlaceholder(cfg: CreateContainerRequest): DisplayContainer {
     ssh_password: '',
     port_mappings: [],
     port_mapping_limit: cfg.assign_nat === false ? 0 : (cfg.port_mapping_count || 0),
+    firewall_enabled: false,
+    firewall_rules: [],
     snapshot_limit: cfg.snapshot_limit || 3,
     created_at: '',
     expires_at: cfg.expires_at,
