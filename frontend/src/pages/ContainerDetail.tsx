@@ -149,7 +149,7 @@ export default function ContainerDetail() {
   const [trafficEdit, setTrafficEdit] = useState({ mode: 'total', monthly: 0, inGB: 0, outGB: 0 })
   const [savingTraffic, setSavingTraffic] = useState(false)
   const [showResourceEdit, setShowResourceEdit] = useState(false)
-  const [resourceEdit, setResourceEdit] = useState({ vcpu: 1, ramMb: 512, ioMbps: 500, bwMbps: 100 })
+  const [resourceEdit, setResourceEdit] = useState({ vcpu: 1, ramMb: 512, networkDownMbps: 0, networkUpMbps: 0, ioReadMbps: 0, ioWriteMbps: 0 })
   const [savingResource, setSavingResource] = useState(false)
   const [showPassword, setShowPassword] = useState(false)
   const [showResetPassword, setShowResetPassword] = useState(false)
@@ -395,8 +395,10 @@ export default function ContainerDetail() {
     setResourceEdit({
       vcpu: container.vcpu,
       ramMb: container.ram_mb,
-      ioMbps: container.io_speed_mbps || 0,
-      bwMbps: container.network_bw_mbps || 0,
+      networkDownMbps: resourceLimitValue(container.network_down_mbps, container.network_bw_mbps),
+      networkUpMbps: resourceLimitValue(container.network_up_mbps, container.network_bw_mbps),
+      ioReadMbps: resourceLimitValue(container.io_read_mbps, container.io_speed_mbps),
+      ioWriteMbps: resourceLimitValue(container.io_write_mbps, container.io_speed_mbps),
     })
     setShowResourceEdit(true)
   }
@@ -408,8 +410,12 @@ export default function ContainerDetail() {
       await updateResourceLimit(container.id, {
         vcpu: resourceEdit.vcpu,
         ram_mb: resourceEdit.ramMb,
-        io_speed_mbps: resourceEdit.ioMbps,
-        network_bw_mbps: resourceEdit.bwMbps,
+        network_down_mbps: resourceEdit.networkDownMbps,
+        network_up_mbps: resourceEdit.networkUpMbps,
+        network_bw_mbps: symmetricLimit(resourceEdit.networkDownMbps, resourceEdit.networkUpMbps),
+        io_read_mbps: resourceEdit.ioReadMbps,
+        io_write_mbps: resourceEdit.ioWriteMbps,
+        io_speed_mbps: symmetricLimit(resourceEdit.ioReadMbps, resourceEdit.ioWriteMbps),
       })
       setShowResourceEdit(false)
       fetchContainer()
@@ -903,8 +909,19 @@ export default function ContainerDetail() {
   const diskPct = container.disk_gb > 0 ? clamp(((usage?.disk_usage_bytes || 0) / (container.disk_gb * 1024 * 1024 * 1024)) * 100) : 0
   const networkBps = (usage?.network_rx_bps || 0) + (usage?.network_tx_bps || 0)
   const rx = usage?.network_rx_bps || 0
-  const netPct = Math.min(((usage?.network_rx_bps || 0) + (usage?.network_tx_bps || 0)) / (container.network_bw_mbps > 0 ? container.network_bw_mbps * 125000 : 125000000) * 100, 100)
+  const networkDownLimit = resourceLimitValue(container.network_down_mbps, container.network_bw_mbps)
+  const networkUpLimit = resourceLimitValue(container.network_up_mbps, container.network_bw_mbps)
+  const netPct = Math.max(
+    directionUsagePercent(usage?.network_rx_bps || 0, networkDownLimit, 125000, 125000000),
+    directionUsagePercent(usage?.network_tx_bps || 0, networkUpLimit, 125000, 125000000),
+  )
   const diskIOBps = (usage?.disk_read_bps || 0) + (usage?.disk_write_bps || 0)
+  const ioReadLimit = resourceLimitValue(container.io_read_mbps, container.io_speed_mbps)
+  const ioWriteLimit = resourceLimitValue(container.io_write_mbps, container.io_speed_mbps)
+  const diskIOPct = Math.max(
+    directionUsagePercent(usage?.disk_read_bps || 0, ioReadLimit, 1024 * 1024, 1024 * 1024 * 1024),
+    directionUsagePercent(usage?.disk_write_bps || 0, ioWriteLimit, 1024 * 1024, 1024 * 1024 * 1024),
+  )
   const mappingCount = container.port_mappings?.length || 0
   const mappingLimit = Math.max(container.port_mapping_limit || 0, mappingCount)
   const hasNATQuota = mappingLimit > 0
@@ -951,7 +968,7 @@ export default function ContainerDetail() {
       current: networkBps,
       points: toChartPoints(filtered, 'network'),
       formatValue: formatRate,
-      detail: `入 ${formatRate(usage?.network_rx_bps || 0)} / 出 ${formatRate(usage?.network_tx_bps || 0)}，累计 ${formatBytes((usage?.network_rx_bytes || 0) + (usage?.network_tx_bytes || 0))}`,
+      detail: `入 ${formatRate(usage?.network_rx_bps || 0)} / 出 ${formatRate(usage?.network_tx_bps || 0)}，限速占用 ${netPct.toFixed(1)}%，累计 ${formatBytes((usage?.network_rx_bytes || 0) + (usage?.network_tx_bytes || 0))}`,
     },
     {
       title: '磁盘IO',
@@ -959,7 +976,7 @@ export default function ContainerDetail() {
       current: diskIOBps,
       points: toChartPoints(filtered, 'diskIO'),
       formatValue: formatRate,
-      detail: `读 ${formatRate(usage?.disk_read_bps || 0)} / 写 ${formatRate(usage?.disk_write_bps || 0)}，累计 ${formatBytes((usage?.disk_read_bytes || 0) + (usage?.disk_write_bytes || 0))}，容量 ${diskPct.toFixed(1)}%`,
+      detail: `读 ${formatRate(usage?.disk_read_bps || 0)} / 写 ${formatRate(usage?.disk_write_bps || 0)}，限速占用 ${diskIOPct.toFixed(1)}%，累计 ${formatBytes((usage?.disk_read_bytes || 0) + (usage?.disk_write_bytes || 0))}，容量 ${diskPct.toFixed(1)}%`,
     },
   ]
 
@@ -1154,8 +1171,8 @@ export default function ContainerDetail() {
           <PlainRow label="vCPU" value={`${container.vcpu} 核`} />
           <PlainRow label="内存" value={`${container.ram_mb} MB`} />
           <PlainRow label="磁盘" value={`${container.disk_gb} GB`} />
-          <PlainRow label="网络速率" value={container.network_bw_mbps > 0 ? `${container.network_bw_mbps} Mbps` : '不限制'} />
-          <PlainRow label="IO 速度" value={container.io_speed_mbps > 0 ? `${container.io_speed_mbps} MB/s` : '不限制'} />
+          <PlainRow label="网络速率" value={formatDirectionalLimit('下行', networkDownLimit, '上行', networkUpLimit, 'Mbps')} />
+          <PlainRow label="IO 速度" value={formatDirectionalLimit('读取', ioReadLimit, '写入', ioWriteLimit, 'MB/s')} />
         </Panel>
 
         <Panel title="实时状态">
@@ -1982,15 +1999,27 @@ export default function ContainerDetail() {
                   className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm" />
               </div>
               <div>
-                <label className="block text-xs text-gray-500 mb-1">网络速率 (Mbps，0=不限制)</label>
-                <input type="number" min={0} value={resourceEdit.bwMbps}
-                  onChange={(e) => setResourceEdit({ ...resourceEdit, bwMbps: Math.max(0, Number(e.target.value) || 0) })}
+                <label className="block text-xs text-gray-500 mb-1">下行带宽 (Mbps，0=不限制)</label>
+                <input type="number" min={0} value={resourceEdit.networkDownMbps}
+                  onChange={(e) => setResourceEdit({ ...resourceEdit, networkDownMbps: Math.max(0, Number(e.target.value) || 0) })}
                   className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm" />
               </div>
               <div>
-                <label className="block text-xs text-gray-500 mb-1">IO 速度 (MB/s，0=不限制)</label>
-                <input type="number" min={0} value={resourceEdit.ioMbps}
-                  onChange={(e) => setResourceEdit({ ...resourceEdit, ioMbps: Math.max(0, Number(e.target.value) || 0) })}
+                <label className="block text-xs text-gray-500 mb-1">上行带宽 (Mbps，0=不限制)</label>
+                <input type="number" min={0} value={resourceEdit.networkUpMbps}
+                  onChange={(e) => setResourceEdit({ ...resourceEdit, networkUpMbps: Math.max(0, Number(e.target.value) || 0) })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm" />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">读取 IO (MB/s，0=不限制)</label>
+                <input type="number" min={0} value={resourceEdit.ioReadMbps}
+                  onChange={(e) => setResourceEdit({ ...resourceEdit, ioReadMbps: Math.max(0, Number(e.target.value) || 0) })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm" />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">写入 IO (MB/s，0=不限制)</label>
+                <input type="number" min={0} value={resourceEdit.ioWriteMbps}
+                  onChange={(e) => setResourceEdit({ ...resourceEdit, ioWriteMbps: Math.max(0, Number(e.target.value) || 0) })}
                   className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm" />
               </div>
             </div>
@@ -2457,6 +2486,32 @@ function clampVCPU(value: number, max: number) {
 function clampResourceInt(value: number, min: number, max?: number, fallback = min) {
   const next = Math.round(Number.isFinite(value) ? value : fallback)
   return Math.min(Math.max(next, min), max ?? next)
+}
+
+function resourceLimitValue(value?: number, fallback?: number) {
+  return Math.max(0, Number(value || fallback || 0))
+}
+
+function symmetricLimit(a: number, b: number) {
+  const left = resourceLimitValue(a)
+  const right = resourceLimitValue(b)
+  if (left === right) return left
+  if (left === 0) return right
+  if (right === 0) return left
+  return Math.min(left, right)
+}
+
+function directionUsagePercent(bytesPerSecond: number, limit: number, bytesPerLimitUnit: number, fallbackBytesPerSecond: number) {
+  const denominator = limit > 0 ? limit * bytesPerLimitUnit : fallbackBytesPerSecond
+  return denominator > 0 ? clamp((bytesPerSecond / denominator) * 100) : 0
+}
+
+function formatLimit(value: number, unit: string) {
+  return value > 0 ? `${value} ${unit}` : '不限制'
+}
+
+function formatDirectionalLimit(firstLabel: string, firstValue: number, secondLabel: string, secondValue: number, unit: string) {
+  return `${firstLabel} ${formatLimit(firstValue, unit)} / ${secondLabel} ${formatLimit(secondValue, unit)}`
 }
 
 function toChartPoints<T extends keyof Omit<MetricPoint, 'ts'>>(history: MetricPoint[], key: T): ChartPoint[] {

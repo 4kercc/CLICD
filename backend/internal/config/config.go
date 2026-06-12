@@ -115,6 +115,8 @@ type Container struct {
 	RAMMB                         int                    `json:"ram_mb"`
 	DiskGB                        int                    `json:"disk_gb"`
 	NetworkBWMbps                 int                    `json:"network_bw_mbps"`
+	NetworkDownMbps               int                    `json:"network_down_mbps"`
+	NetworkUpMbps                 int                    `json:"network_up_mbps"`
 	MonthlyTrafficGB              int                    `json:"monthly_traffic_gb"`
 	TrafficMode                   string                 `json:"traffic_mode"`   // "total" or "in_out"
 	TrafficInGB                   int                    `json:"traffic_in_gb"`  // 0 = unlimited
@@ -123,6 +125,8 @@ type Container struct {
 	TrafficUsedTX                 int64                  `json:"traffic_used_tx"`
 	TrafficResetDate              string                 `json:"traffic_reset_date"`
 	IOSpeedMBps                   int                    `json:"io_speed_mbps"`
+	IOReadMBps                    int                    `json:"io_read_mbps"`
+	IOWriteMBps                   int                    `json:"io_write_mbps"`
 	Status                        string                 `json:"status"`
 	IP                            string                 `json:"ip"`
 	PublicIPv4s                   []PublicIPv4Assignment `json:"public_ipv4s,omitempty"`
@@ -704,6 +708,9 @@ func migrateLoadedConfig() bool {
 	if ensureContainerNetworkAssignments() {
 		changed = true
 	}
+	if ensureContainerResourceAliases() {
+		changed = true
+	}
 	if ensureContainerSnapshotScheduleDefaults() {
 		changed = true
 	}
@@ -802,6 +809,91 @@ func ensureContainerNetworkAssignments() bool {
 	return changed
 }
 
+func ensureContainerResourceAliases() bool {
+	changed := false
+	for i := range AppConfig.Containers {
+		if NormalizeContainerResourceAliases(&AppConfig.Containers[i]) {
+			changed = true
+		}
+	}
+	return changed
+}
+
+func NormalizeContainerResourceAliases(c *Container) bool {
+	if c == nil {
+		return false
+	}
+	changed := false
+	if c.NetworkBWMbps < 0 {
+		c.NetworkBWMbps = 0
+		changed = true
+	}
+	if c.NetworkDownMbps < 0 {
+		c.NetworkDownMbps = 0
+		changed = true
+	}
+	if c.NetworkUpMbps < 0 {
+		c.NetworkUpMbps = 0
+		changed = true
+	}
+	if c.NetworkDownMbps == 0 && c.NetworkUpMbps == 0 && c.NetworkBWMbps > 0 {
+		c.NetworkDownMbps = c.NetworkBWMbps
+		c.NetworkUpMbps = c.NetworkBWMbps
+		changed = true
+	}
+	nextNetworkBW := LegacySymmetricLimit(c.NetworkDownMbps, c.NetworkUpMbps)
+	if c.NetworkBWMbps != nextNetworkBW {
+		c.NetworkBWMbps = nextNetworkBW
+		changed = true
+	}
+
+	if c.IOSpeedMBps < 0 {
+		c.IOSpeedMBps = 0
+		changed = true
+	}
+	if c.IOReadMBps < 0 {
+		c.IOReadMBps = 0
+		changed = true
+	}
+	if c.IOWriteMBps < 0 {
+		c.IOWriteMBps = 0
+		changed = true
+	}
+	if c.IOReadMBps == 0 && c.IOWriteMBps == 0 && c.IOSpeedMBps > 0 {
+		c.IOReadMBps = c.IOSpeedMBps
+		c.IOWriteMBps = c.IOSpeedMBps
+		changed = true
+	}
+	nextIO := LegacySymmetricLimit(c.IOReadMBps, c.IOWriteMBps)
+	if c.IOSpeedMBps != nextIO {
+		c.IOSpeedMBps = nextIO
+		changed = true
+	}
+	return changed
+}
+
+func LegacySymmetricLimit(a, b int) int {
+	if a < 0 {
+		a = 0
+	}
+	if b < 0 {
+		b = 0
+	}
+	if a == b {
+		return a
+	}
+	if a == 0 {
+		return b
+	}
+	if b == 0 {
+		return a
+	}
+	if a < b {
+		return a
+	}
+	return b
+}
+
 func migrateSubUsers() bool {
 	changed := false
 	for i := range AppConfig.SubUsers {
@@ -886,6 +978,7 @@ func AddContainer(c Container) {
 		c.UUID = NewContainerUUID()
 	}
 	c.Virtualization = NormalizeVirtualization(c.Virtualization)
+	NormalizeContainerResourceAliases(&c)
 	AppConfig.Containers = append(AppConfig.Containers, c)
 	SaveConfig()
 }
