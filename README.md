@@ -2,7 +2,7 @@
   <img src="frontend/public/favicon.svg" width="96" alt="CLICD">
 </p>
 
-<h1 align="center">CLICD</h1>
+<h1 align="center">CLICD <sub><sup>v1.1.18</sup></sub></h1>
 
 <p align="center">
   <img alt="Go" src="https://img.shields.io/badge/Go-1.24-00ADD8?style=flat-square&logo=go&logoColor=white">
