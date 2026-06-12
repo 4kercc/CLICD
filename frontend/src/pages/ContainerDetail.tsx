@@ -46,6 +46,7 @@ import {
   HostInfo,
   TrafficInfo,
   getEnabledImages,
+  getFirewall,
   PortMapping,
   FirewallRule,
   reinstallContainer,
@@ -166,8 +167,10 @@ export default function ContainerDetail() {
   const [snapshotScheduleDraft, setSnapshotScheduleDraft] = useState({ intervalHours: 24, time: '03:00' })
   const [showFirewall, setShowFirewall] = useState(false)
   const [firewallEnabled, setFirewallEnabled] = useState(false)
+  const [firewallDefaultAction, setFirewallDefaultAction] = useState<'ACCEPT' | 'DROP'>('DROP')
   const [firewallRules, setFirewallRules] = useState<FirewallRule[]>([])
   const [firewallSaving, setFirewallSaving] = useState(false)
+  const [firewallMessage, setFirewallMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
   const [editingFirewallRule, setEditingFirewallRule] = useState<FirewallRule | null>(null)
   const [showFirewallEditor, setShowFirewallEditor] = useState(false)
 
@@ -417,29 +420,59 @@ export default function ContainerDetail() {
     }
   }
 
-  const openFirewall = () => {
+  const syncFirewallState = (enabled: boolean, defaultAction: 'ACCEPT' | 'DROP', rules: FirewallRule[]) => {
+    const nextRules = rules.map(r => ({ ...r }))
+    setFirewallEnabled(enabled)
+    setFirewallDefaultAction(defaultAction)
+    setFirewallRules(nextRules)
+    setContainer(prev => prev ? {
+      ...prev,
+      firewall_enabled: enabled,
+      firewall_default_action: defaultAction,
+      firewall_rules: nextRules.map(r => ({ ...r })),
+    } : prev)
+  }
+
+  const openFirewall = async () => {
     if (!container) return
-    setFirewallEnabled(container.firewall_enabled || false)
-    setFirewallRules(container.firewall_rules ? [...container.firewall_rules.map(r => ({ ...r }))] : [])
+    syncFirewallState(container.firewall_enabled || false, container.firewall_default_action || 'DROP', container.firewall_rules || [])
+    setFirewallMessage(null)
     setShowFirewall(true)
+    try {
+      const res = await getFirewall(container.id)
+      const data = res.data.data
+      if (data) syncFirewallState(data.enabled, data.default_action || 'DROP', data.rules || [])
+    } catch (err) {
+      console.error('Failed to load firewall:', err)
+    }
   }
 
   const saveFirewall = async () => {
     if (!container) return
     setFirewallSaving(true)
     try {
-      await updateFirewall(container.id, { enabled: firewallEnabled, rules: firewallRules })
+      const res = await updateFirewall(container.id, { enabled: firewallEnabled, default_action: firewallDefaultAction, rules: firewallRules })
+      const data = res.data.data
+      if (data) {
+        syncFirewallState(data.enabled, data.default_action || 'DROP', data.rules || [])
+      }
+      setFirewallMessage({ type: 'success', text: '防火墙设置已保存并应用' })
       fetchContainer()
     } catch (err: any) {
-      dialog.alert('错误', err?.response?.data?.message || '保存防火墙设置失败')
+      const message = err?.response?.data?.message || '保存防火墙设置失败'
+      setFirewallMessage({ type: 'error', text: message })
+      dialog.alert('错误', message)
     } finally {
       setFirewallSaving(false)
     }
   }
 
   const addFirewallRule = () => {
+    const hasIPv4Firewall = (container?.public_ipv4s?.length || 0) > 0 || Math.max(container?.port_mapping_limit || 0, container?.port_mappings?.length || 0) > 0
+    const hasIPv6Firewall = !!container?.ipv6 || (container?.ipv6_addresses?.length || 0) > 0
     setEditingFirewallRule({
       id: '',
+      network: hasIPv4Firewall ? 'ipv4' : hasIPv6Firewall ? 'ipv6' : 'ipv4',
       direction: 'in',
       protocol: 'tcp',
       port: '',
@@ -876,6 +909,20 @@ export default function ContainerDetail() {
   const mappingLimit = Math.max(container.port_mapping_limit || 0, mappingCount)
   const hasNATQuota = mappingLimit > 0
   const canAddMapping = hasNATQuota && mappingCount < mappingLimit && !isSubUserPolicyBlocked
+  const hasFirewallIPv4 = hasIndependentIPv4 || hasNATQuota
+  const firewallNetworkOptions: Array<{ value: NonNullable<FirewallRule['network']>; label: string }> = []
+  if (hasFirewallIPv4) {
+    firewallNetworkOptions.push({
+      value: 'ipv4',
+      label: hasIndependentIPv4 ? 'IPv4（公网 IPv4）' : 'IPv4（NAT）',
+    })
+  }
+  if (hasIndependentIPv6) {
+    firewallNetworkOptions.push({ value: 'ipv6', label: 'IPv6' })
+  }
+  if (hasFirewallIPv4 && hasIndependentIPv6) {
+    firewallNetworkOptions.push({ value: 'all', label: '全部网络' })
+  }
   const managementUrl = subUser?.access_code
     ? `${window.location.origin}/login?code=${encodeURIComponent(subUser.access_code)}`
     : ''
@@ -997,7 +1044,7 @@ export default function ContainerDetail() {
                 IPv4 NAT 管理
               </ActionButton>
             )}
-            <ActionButton onClick={() => setShowFirewall(true)} disabled={isSubUserPolicyBlocked}>
+            <ActionButton onClick={openFirewall} disabled={isSubUserPolicyBlocked}>
               <FirewallIcon className="w-3.5 h-3.5" />
               防火墙
             </ActionButton>
@@ -1511,7 +1558,12 @@ export default function ContainerDetail() {
       {showFirewall && (
         <Modal title="防火墙设置" onClose={() => { setShowFirewall(false); setShowFirewallEditor(false); setEditingFirewallRule(null) }} wide extra={
           !isSubUser && (
-            <button onClick={addFirewallRule} className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-black text-white rounded-md text-xs hover:bg-gray-800">
+            <button
+              onClick={addFirewallRule}
+              disabled={firewallNetworkOptions.length === 0}
+              title={firewallNetworkOptions.length === 0 ? '当前容器没有可配置的 NAT、公网 IPv4 或 IPv6' : undefined}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-black text-white rounded-md text-xs hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-50"
+            >
               <Plus className="w-3.5 h-3.5" />添加规则
             </button>
           )
@@ -1521,7 +1573,11 @@ export default function ContainerDetail() {
             <div className="flex items-center justify-between gap-4">
               <div>
                 <div className="text-sm font-medium text-gray-800">防火墙</div>
-                <div className="text-xs text-gray-500">启用后默认拒绝所有入站和出站流量，仅放行下方规则</div>
+                <div className="text-xs text-gray-500">
+                  {firewallEnabled
+                    ? (firewallDefaultAction === 'DROP' ? '已启用，未匹配规则的流量将被拒绝' : '已启用，未匹配规则的流量将被放行')
+                    : '未启用时不接管该容器流量'}
+                </div>
               </div>
               <button
                 onClick={() => setFirewallEnabled(!firewallEnabled)}
@@ -1531,12 +1587,47 @@ export default function ContainerDetail() {
               </button>
             </div>
 
+            <div className="flex items-center justify-between gap-4 rounded-md border border-gray-200 px-3 py-2">
+              <div>
+                <div className="text-sm font-medium text-gray-800">默认动作</div>
+                <div className="text-xs text-gray-500">没有命中下方规则时如何处理</div>
+              </div>
+              <select
+                value={firewallDefaultAction}
+                onChange={(e) => setFirewallDefaultAction(e.target.value as 'ACCEPT' | 'DROP')}
+                disabled={isSubUser}
+                className="rounded-md border border-gray-300 bg-white px-2.5 py-1.5 text-xs text-gray-800 focus:border-black focus:outline-none focus:ring-2 focus:ring-black disabled:opacity-60"
+              >
+                <option value="DROP">未匹配拒绝</option>
+                <option value="ACCEPT">未匹配放行</option>
+              </select>
+            </div>
+
+            <div className="rounded-md border border-blue-100 bg-blue-50 px-3 py-2 text-xs text-blue-800">
+              <div className="font-medium text-blue-900">网络范围</div>
+              <div className="mt-1">
+                {firewallNetworkOptions.length > 0
+                  ? `可配置：${firewallNetworkOptions.filter((option) => option.value !== 'all').map((option) => option.label).join('、')}。`
+                  : '当前容器未分配 IPv4 NAT、独立公网 IPv4 或 IPv6，暂无可配置网络。'}
+                {hasFirewallIPv4 ? ` IPv4 规则覆盖${hasIndependentIPv4 ? '独立公网 IPv4' : 'IPv4 NAT 端口映射'}。` : ''}
+                {hasNATQuota && !hasIndependentIPv4 ? ' NAT 入站端口按容器内部端口匹配，不是宿主机公网端口。' : ''}
+                {hasIndependentIPv6 ? ' IPv6 规则覆盖该容器已分配的 IPv6 地址。' : ''}
+              </div>
+            </div>
+
+            {firewallMessage && (
+              <div className={`rounded-md px-3 py-2 text-xs ${firewallMessage.type === 'success' ? 'border border-emerald-100 bg-emerald-50 text-emerald-700' : 'border border-red-100 bg-red-50 text-red-700'}`}>
+                {firewallMessage.text}
+              </div>
+            )}
+
             {/* Rules table */}
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead className="border-b border-gray-200 bg-gray-50 text-xs text-gray-500">
                   <tr>
                     <th className="px-3 py-2 text-left font-medium">状态</th>
+                    <th className="px-3 py-2 text-left font-medium">网络</th>
                     <th className="px-3 py-2 text-left font-medium">方向</th>
                     <th className="px-3 py-2 text-left font-medium">协议</th>
                     <th className="px-3 py-2 text-left font-medium">端口</th>
@@ -1555,6 +1646,11 @@ export default function ContainerDetail() {
                         </button>
                       </td>
                       <td className="px-3 py-2">
+                        <span className="inline-flex rounded bg-gray-100 px-1.5 py-0.5 text-xs font-medium text-gray-700">
+                          {(rule.network || 'ipv4') === 'ipv6' ? 'IPv6' : (rule.network || 'ipv4') === 'all' ? '全部' : 'IPv4'}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2">
                         <span className={`inline-flex px-1.5 py-0.5 rounded text-xs font-medium ${rule.direction === 'in' ? 'bg-blue-50 text-blue-700' : 'bg-orange-50 text-orange-700'}`}>
                           {rule.direction === 'in' ? '入站' : '出站'}
                         </span>
@@ -1571,7 +1667,14 @@ export default function ContainerDetail() {
                       {!isSubUser && (
                         <td className="px-3 py-2 text-right">
                           <div className="inline-flex items-center gap-1">
-                            <button onClick={() => { setEditingFirewallRule({ ...rule }); setShowFirewallEditor(true) }} className="p-1.5 text-gray-400 hover:text-gray-700 rounded hover:bg-gray-100">
+                            <button onClick={() => {
+                              const currentNetwork = (rule.network || 'ipv4') as NonNullable<FirewallRule['network']>
+                              const network = firewallNetworkOptions.some((option) => option.value === currentNetwork)
+                                ? currentNetwork
+                                : (firewallNetworkOptions[0]?.value || currentNetwork)
+                              setEditingFirewallRule({ ...rule, network })
+                              setShowFirewallEditor(true)
+                            }} className="p-1.5 text-gray-400 hover:text-gray-700 rounded hover:bg-gray-100">
                               <Pencil className="h-3.5 w-3.5" />
                             </button>
                             <button onClick={() => deleteFirewallRule(rule.id)} className="p-1.5 text-gray-400 hover:text-red-600 rounded hover:bg-red-50">
@@ -1583,7 +1686,7 @@ export default function ContainerDetail() {
                     </tr>
                   ))}
                   {firewallRules.length === 0 && (
-                    <tr><td colSpan={isSubUser ? 7 : 8} className="px-3 py-6 text-center text-xs text-gray-400">暂无防火墙规则</td></tr>
+                    <tr><td colSpan={isSubUser ? 8 : 9} className="px-3 py-6 text-center text-xs text-gray-400">暂无防火墙规则</td></tr>
                   )}
                 </tbody>
               </table>
@@ -1605,6 +1708,17 @@ export default function ContainerDetail() {
       {showFirewallEditor && editingFirewallRule && (
         <Modal title={editingFirewallRule.id ? '编辑规则' : '添加规则'} onClose={() => { setShowFirewallEditor(false); setEditingFirewallRule(null) }}>
           <div className="space-y-4">
+            <Field label="网络">
+              {firewallNetworkOptions.length > 0 ? (
+                <select value={editingFirewallRule.network || firewallNetworkOptions[0].value} onChange={(e) => setEditingFirewallRule({ ...editingFirewallRule, network: e.target.value as FirewallRule['network'] })} className={inputClass}>
+                  {firewallNetworkOptions.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              ) : (
+                <input value="当前容器没有可配置网络" disabled className={`${inputClass} bg-gray-100 text-gray-400`} />
+              )}
+            </Field>
             <Field label="方向">
               <select value={editingFirewallRule.direction} onChange={(e) => setEditingFirewallRule({ ...editingFirewallRule, direction: e.target.value as 'in' | 'out' })} className={inputClass}>
                 <option value="in">入站 (Inbound)</option>
@@ -1612,18 +1726,52 @@ export default function ContainerDetail() {
               </select>
             </Field>
             <Field label="协议">
-              <select value={editingFirewallRule.protocol} onChange={(e) => setEditingFirewallRule({ ...editingFirewallRule, protocol: e.target.value as any })} className={inputClass}>
+              <select
+                value={editingFirewallRule.protocol}
+                onChange={(e) => {
+                  const protocol = e.target.value as FirewallRule['protocol']
+                  setEditingFirewallRule({
+                    ...editingFirewallRule,
+                    protocol,
+                    port: protocol === 'tcp' || protocol === 'udp' ? editingFirewallRule.port : '',
+                  })
+                }}
+                className={inputClass}
+              >
                 <option value="tcp">TCP</option>
                 <option value="udp">UDP</option>
                 <option value="icmp">ICMP</option>
                 <option value="all">全部</option>
               </select>
             </Field>
-            <Field label="端口" hint="留空为全部端口，支持: 22 | 80,443 | 8000-9000">
-              <input value={editingFirewallRule.port} onChange={(e) => setEditingFirewallRule({ ...editingFirewallRule, port: e.target.value })} placeholder="如: 22 或 80,443 或 8000-9000" className={inputClass} />
+            <Field
+              label="端口"
+              hint={editingFirewallRule.protocol === 'tcp' || editingFirewallRule.protocol === 'udp'
+                ? (editingFirewallRule.direction === 'in'
+                  ? ((editingFirewallRule.network || 'ipv4') === 'ipv4' && hasNATQuota && !hasIndependentIPv4
+                    ? 'NAT 入站填容器内部端口，例如公网 22023 -> 容器 22，这里填 22'
+                    : '入站填容器服务端口；留空为全部端口，支持: 22 | 80,443 | 8000-9000')
+                  : '出站填远端目标端口；留空为全部端口，支持: 22 | 80,443 | 8000-9000')
+                : '端口仅适用于 TCP/UDP'}
+            >
+              <input
+                value={editingFirewallRule.port}
+                onChange={(e) => setEditingFirewallRule({ ...editingFirewallRule, port: e.target.value })}
+                placeholder={editingFirewallRule.protocol === 'tcp' || editingFirewallRule.protocol === 'udp' ? '如: 22 或 80,443 或 8000-9000' : '当前协议不使用端口'}
+                disabled={editingFirewallRule.protocol !== 'tcp' && editingFirewallRule.protocol !== 'udp'}
+                className={`${inputClass} disabled:bg-gray-100 disabled:text-gray-400`}
+              />
             </Field>
-            <Field label={editingFirewallRule.direction === 'in' ? '来源 IP' : '目标 IP'} hint="留空为任意 IP，支持 CIDR: 192.168.1.0/24">
-              <input value={editingFirewallRule.source_ip} onChange={(e) => setEditingFirewallRule({ ...editingFirewallRule, source_ip: e.target.value })} placeholder="如: 192.168.1.0/24" className={inputClass} />
+            <Field
+              label={editingFirewallRule.direction === 'in' ? '来源 IP' : '目标 IP'}
+              hint={(editingFirewallRule.network || 'ipv4') === 'ipv6' ? '留空为任意 IPv6，支持 CIDR: 2001:db8::/64' : (editingFirewallRule.network || 'ipv4') === 'all' ? '留空为任意 IP，支持 IPv4/IPv6 CIDR' : '留空为任意 IPv4，支持 CIDR: 192.168.1.0/24'}
+            >
+              <input
+                value={editingFirewallRule.source_ip}
+                onChange={(e) => setEditingFirewallRule({ ...editingFirewallRule, source_ip: e.target.value })}
+                placeholder={(editingFirewallRule.network || 'ipv4') === 'ipv6' ? '如: 2001:db8::/64' : (editingFirewallRule.network || 'ipv4') === 'all' ? '如: 192.168.1.0/24 或 2001:db8::/64' : '如: 192.168.1.0/24'}
+                className={inputClass}
+              />
             </Field>
             <Field label="动作">
               <select value={editingFirewallRule.action} onChange={(e) => setEditingFirewallRule({ ...editingFirewallRule, action: e.target.value as 'ACCEPT' | 'DROP' })} className={inputClass}>

@@ -3231,6 +3231,11 @@ func (m *Manager) applyIPv6Runtime(c *config.Container) error {
 		}
 		ensureKVMIPv6NAT66(assignment.Address, uplink)
 	}
+	if c.Status == "running" {
+		if err := lxc.ApplyFirewallRules(c.ID); err != nil {
+			fmt.Printf("Warning: failed to re-apply firewall rules after KVM IPv6 setup for %s: %v\n", c.Name, err)
+		}
+	}
 	return nil
 }
 
@@ -3307,7 +3312,7 @@ func ensureKVMIPv6ForwardRules(ipv6 string, bridge string) {
 	}
 	for _, rule := range rules {
 		check := append([]string{"-C"}, rule...)
-		add := append([]string{"-I"}, append([]string{rule[0], "1"}, rule[1:]...)...)
+		add := append([]string{"-A"}, rule...)
 		if exec.Command("ip6tables", check...).Run() != nil {
 			exec.Command("ip6tables", add...).Run()
 		}

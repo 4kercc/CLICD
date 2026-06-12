@@ -821,10 +821,11 @@ const requestBodySamples: Record<string, Record<string, unknown>> = {
   'POST /api/v1/security/check': { container_name: 'example-vm' },
   'PUT /api/v1/containers/{id}/firewall': {
     enabled: true,
+    default_action: 'DROP',
     rules: [
-      { id: '', direction: 'in', protocol: 'tcp', port: '22', source_ip: '', action: 'ACCEPT', description: 'Allow SSH', enabled: true },
-      { id: '', direction: 'in', protocol: 'tcp', port: '80,443', source_ip: '', action: 'ACCEPT', description: 'Allow HTTP/HTTPS', enabled: true },
-      { id: '', direction: 'out', protocol: 'tcp', port: '', source_ip: '', action: 'ACCEPT', description: 'Allow all outbound TCP', enabled: true },
+      { id: '', network: 'ipv4', direction: 'in', protocol: 'tcp', port: '22', source_ip: '', action: 'ACCEPT', description: 'Allow SSH over IPv4/NAT4', enabled: true },
+      { id: '', network: 'ipv6', direction: 'in', protocol: 'tcp', port: '22', source_ip: '', action: 'ACCEPT', description: 'Allow SSH over IPv6', enabled: true },
+      { id: '', network: 'all', direction: 'out', protocol: 'tcp', port: '', source_ip: '', action: 'ACCEPT', description: 'Allow outbound TCP', enabled: true },
     ],
   },
   'PUT /api/v1/security/settings': { auto_shutdown: false },
@@ -1039,10 +1040,11 @@ const responseSamples: Record<string, unknown> = {
     success: true,
     data: {
       enabled: true,
+      default_action: 'DROP',
       rules: [
-        { id: 'a1b2c3d4', direction: 'in', protocol: 'tcp', port: '22', source_ip: '', action: 'ACCEPT', description: 'Allow SSH', enabled: true },
-        { id: 'e5f6g7h8', direction: 'in', protocol: 'tcp', port: '80,443', source_ip: '', action: 'ACCEPT', description: 'Allow HTTP/HTTPS', enabled: true },
-        { id: 'i9j0k1l2', direction: 'out', protocol: 'tcp', port: '', source_ip: '', action: 'ACCEPT', description: 'Allow all outbound TCP', enabled: true },
+        { id: 'a1b2c3d4', network: 'ipv4', direction: 'in', protocol: 'tcp', port: '22', source_ip: '', action: 'ACCEPT', description: 'Allow SSH over IPv4/NAT4', enabled: true },
+        { id: 'e5f6g7h8', network: 'ipv6', direction: 'in', protocol: 'tcp', port: '22', source_ip: '', action: 'ACCEPT', description: 'Allow SSH over IPv6', enabled: true },
+        { id: 'i9j0k1l2', network: 'all', direction: 'out', protocol: 'tcp', port: '', source_ip: '', action: 'ACCEPT', description: 'Allow outbound TCP', enabled: true },
       ],
     },
   },
@@ -1051,10 +1053,11 @@ const responseSamples: Record<string, unknown> = {
     message: 'Firewall updated',
     data: {
       enabled: true,
+      default_action: 'DROP',
       rules: [
-        { id: 'a1b2c3d4', direction: 'in', protocol: 'tcp', port: '22', source_ip: '', action: 'ACCEPT', description: 'Allow SSH', enabled: true },
-        { id: 'e5f6g7h8', direction: 'in', protocol: 'tcp', port: '80,443', source_ip: '', action: 'ACCEPT', description: 'Allow HTTP/HTTPS', enabled: true },
-        { id: 'i9j0k1l2', direction: 'out', protocol: 'tcp', port: '', source_ip: '', action: 'ACCEPT', description: 'Allow all outbound TCP', enabled: true },
+        { id: 'a1b2c3d4', network: 'ipv4', direction: 'in', protocol: 'tcp', port: '22', source_ip: '', action: 'ACCEPT', description: 'Allow SSH over IPv4/NAT4', enabled: true },
+        { id: 'e5f6g7h8', network: 'ipv6', direction: 'in', protocol: 'tcp', port: '22', source_ip: '', action: 'ACCEPT', description: 'Allow SSH over IPv6', enabled: true },
+        { id: 'i9j0k1l2', network: 'all', direction: 'out', protocol: 'tcp', port: '', source_ip: '', action: 'ACCEPT', description: 'Allow outbound TCP', enabled: true },
       ],
     },
   },
@@ -1173,7 +1176,7 @@ function endpointNoteFor(key: string) {
     notes.push('批量创建的单个 containers[] 项支持与 POST /api/v1/containers 相同的网络和 SSH 认证字段。')
   }
   if (key === 'PUT /api/v1/containers/{id}/firewall') {
-    notes.push('启用防火墙后默认拒绝所有 TCP/UDP 入站和出站流量，仅放行 rules 中定义的规则。direction: in=入站, out=出站。action: ACCEPT=放行, DROP=拒绝。port 支持单端口(22)、多端口(80,443)、范围(8000-9000)。')
+    notes.push('兼容旧请求：default_action 可不传，不传时保留现有策略；rule.network 可不传，不传按 ipv4 处理。default_action: DROP=未命中规则时拒绝, ACCEPT=未命中规则时放行。network: ipv4=IPv4 NAT/公网 IPv4, ipv6=IPv6, all=同时应用到 IPv4 和 IPv6。NAT 入站规则的 port 填容器内端口，不是宿主机公网端口。')
   }
   if (key === 'POST /api/v1/batch-action') {
     notes.push('action=reinstall 时可追加 template_id、ssh_auth_mode、ssh_password、ssh_public_key；其他 action 会忽略这些重装字段。')

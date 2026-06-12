@@ -24,11 +24,12 @@ type PortMapping struct {
 
 type FirewallRule struct {
 	ID          string `json:"id"`
-	Direction   string `json:"direction"`   // "in" or "out"
-	Protocol    string `json:"protocol"`    // "tcp", "udp", "icmp", "all"
-	Port        string `json:"port"`        // "" = all, "22", "80,443", "8000-9000"
-	SourceIP    string `json:"source_ip"`   // "" = any
-	Action      string `json:"action"`      // "ACCEPT" or "DROP"
+	Network     string `json:"network,omitempty"` // "ipv4", "ipv6", or "all"; empty defaults to "ipv4"
+	Direction   string `json:"direction"`         // "in" or "out"
+	Protocol    string `json:"protocol"`          // "tcp", "udp", "icmp", "all"
+	Port        string `json:"port"`              // "" = all, "22", "80,443", "8000-9000"
+	SourceIP    string `json:"source_ip"`         // "" = any
+	Action      string `json:"action"`            // "ACCEPT" or "DROP"
 	Description string `json:"description"`
 	Enabled     bool   `json:"enabled"`
 }
@@ -136,7 +137,8 @@ type Container struct {
 	PortMappings                  []PortMapping          `json:"port_mappings"`
 	PortMappingLimit              int                    `json:"port_mapping_limit"`
 	FirewallEnabled               bool                   `json:"firewall_enabled"`
-	FirewallRules                 []FirewallRule          `json:"firewall_rules"`
+	FirewallDefaultAction         string                 `json:"firewall_default_action"`
+	FirewallRules                 []FirewallRule         `json:"firewall_rules"`
 	SnapshotLimit                 int                    `json:"snapshot_limit"`
 	CreatedAt                     string                 `json:"created_at"`
 	ExpiresAt                     string                 `json:"expires_at"`

@@ -725,6 +725,7 @@ function toPlaceholder(cfg: CreateContainerRequest): DisplayContainer {
     port_mappings: [],
     port_mapping_limit: cfg.assign_nat === false ? 0 : (cfg.port_mapping_count || 0),
     firewall_enabled: false,
+    firewall_default_action: 'DROP',
     firewall_rules: [],
     snapshot_limit: cfg.snapshot_limit || 3,
     created_at: '',
