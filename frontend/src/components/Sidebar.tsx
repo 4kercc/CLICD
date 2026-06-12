@@ -50,7 +50,7 @@ function LanguageIcon({ className = '' }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
       <path
-        d="M213.333333 640v85.333333a85.333333 85.333333 0 0 0 78.933334 85.12L298.666667 810.666667h128v85.333333H298.666667a170.666667 170.666667 0 0 1-170.666667-170.666667v-85.333333h85.333333z m554.666667-213.333333l187.733333 469.333333h-91.946666l-51.242667-128h-174.506667l-51.157333 128h-91.904L682.666667 426.666667h85.333333z m-42.666667 123.093333L672.128 682.666667h106.325333L725.333333 549.76zM341.333333 85.333333v85.333334h170.666667v298.666666H341.333333v128H256v-128H85.333333V170.666667h170.666667V85.333333h85.333333z m384 42.666667a170.666667 170.666667 0 0 1 170.666667 170.666667v85.333333h-85.333333V298.666667a85.333333 85.333333 0 0 0-85.333334-85.333334h-128V128h128zM256 256H170.666667v128h85.333333V256z m170.666667 0H341.333333v128h85.333334V256z"
+        d="M128 170.6496A42.6496 42.6496 0 0 0 128 256V170.6496zM640 256a42.6496 42.6496 0 1 0 0-85.3504V256zM426.6496 128a42.6496 42.6496 0 0 0-85.2992 0h85.2992zM341.3504 213.3504a42.6496 42.6496 0 0 0 85.2992 0H341.3504z m56.6784 434.944a42.6496 42.6496 0 0 0 61.44-59.2896l-61.44 59.2896zM312.8832 367.4112a42.6496 42.6496 0 0 0-78.592 33.1776l78.592-33.1776z m220.4672 357.888a42.6496 42.6496 0 1 0 0 85.3504v-85.2992z m298.6496 85.3504a42.6496 42.6496 0 1 0 0-85.2992v85.2992z m-400.8448 66.2528a42.6496 42.6496 0 1 0 76.3392 38.1952l-76.288-38.1952z m251.4944-407.552l38.1952-19.0976a42.6496 42.6496 0 0 0-76.3392 0l38.144 19.0976z m175.2064 445.7472a42.6496 42.6496 0 1 0 76.288-38.1952l-76.288 38.1952zM586.1376 220.3648a42.6496 42.6496 0 1 0-84.1728-14.08l84.1728 14.08zM109.0048 735.2832a42.6496 42.6496 0 0 0 37.9904 76.4416l-37.9904-76.4416zM128 256h512V170.6496h-512V256z m213.3504-128v85.3504h85.2992V128H341.3504z m118.0672 461.0048a726.3232 726.3232 0 0 1-146.5344-221.5936l-78.592 33.1776a811.6224 811.6224 0 0 0 163.7376 247.7056l61.44-59.2896z m73.9328 221.696h298.6496v-85.3504h-298.6496v85.2992z m-25.856 104.3968l213.3504-426.7008-76.3392-38.144-213.3504 426.6496 76.3392 38.1952z m137.0112-426.7008l213.3504 426.7008 76.288-38.1952-213.2992-426.6496-76.3392 38.144zM501.9648 206.336C463.0016 438.6304 313.3952 633.7536 109.056 735.232l37.9904 76.4416c228.2496-113.4592 395.52-331.3152 439.1424-591.36L501.9648 206.336z"
         fill="currentColor"
       />
     </svg>
@@ -62,7 +62,7 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
   const location = useLocation()
   const { logout, isSubUser } = useAuth()
   const { theme, toggleTheme } = useTheme()
-  const { language, toggleLanguage, t } = useLanguage()
+  const { toggleLanguage, t } = useLanguage()
   const [version, setVersion] = useState('')
 
   useEffect(() => {
@@ -282,10 +282,11 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
 
           <button
             onClick={() => { void toggleLanguage() }}
-            className={`${collapsed ? 'w-full' : 'w-10'} flex items-center justify-center rounded-md px-2 py-2.5 text-sm text-gray-600 hover:bg-gray-100 transition-colors dark:text-gray-400 dark:hover:bg-gray-800`}
-            title={language === 'en' ? '切换中文' : 'Switch to English'}
+            className={`${collapsed ? 'w-full justify-center' : 'flex-1 justify-center'} flex items-center gap-2 rounded-md px-3 py-2.5 text-sm text-gray-600 hover:bg-gray-100 transition-colors dark:text-gray-400 dark:hover:bg-gray-800`}
+            title="Language"
           >
-            <LanguageIcon className="h-4 w-4" />
+            <LanguageIcon className="h-4 w-4 shrink-0" />
+            {!collapsed && <span>Language</span>}
           </button>
         </div>
 

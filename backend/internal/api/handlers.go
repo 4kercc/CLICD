@@ -182,6 +182,16 @@ func HandleSingleContainer(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		deletePortMapping(w, r, id, strings.TrimPrefix(action, "port-mappings/"))
+	case action == "firewall" && r.Method == http.MethodGet:
+		if !requireScope(w, r, "container:network") {
+			return
+		}
+		getFirewall(w, r, id)
+	case action == "firewall" && r.Method == http.MethodPut:
+		if !requireScope(w, r, "container:network") {
+			return
+		}
+		updateFirewall(w, r, id)
 	case r.Method == http.MethodGet:
 		if !requireScope(w, r, "container:read") {
 			return

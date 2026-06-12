@@ -19,7 +19,6 @@ import {
   Plus,
   RefreshCw,
   Save,
-
   Settings,
   Square,
   TerminalSquare,
@@ -48,6 +47,7 @@ import {
   TrafficInfo,
   getEnabledImages,
   PortMapping,
+  FirewallRule,
   reinstallContainer,
   resetSSHPassword,
   restartContainer,
@@ -57,6 +57,7 @@ import {
   SnapshotSchedule,
   Template,
   updateContainerExpiry,
+  updateFirewall,
   updateSnapshotQuota,
   updateSnapshotSchedule,
   restoreContainerSnapshot,
@@ -163,6 +164,12 @@ export default function ContainerDetail() {
   const [snapshotBusy, setSnapshotBusy] = useState('')
   const [showSnapshotSchedule, setShowSnapshotSchedule] = useState(false)
   const [snapshotScheduleDraft, setSnapshotScheduleDraft] = useState({ intervalHours: 24, time: '03:00' })
+  const [showFirewall, setShowFirewall] = useState(false)
+  const [firewallEnabled, setFirewallEnabled] = useState(false)
+  const [firewallRules, setFirewallRules] = useState<FirewallRule[]>([])
+  const [firewallSaving, setFirewallSaving] = useState(false)
+  const [editingFirewallRule, setEditingFirewallRule] = useState<FirewallRule | null>(null)
+  const [showFirewallEditor, setShowFirewallEditor] = useState(false)
 
   const fetchContainer = useCallback(async () => {
     if (!containerIdentifier) return
@@ -408,6 +415,61 @@ export default function ContainerDetail() {
     } finally {
       setSavingResource(false)
     }
+  }
+
+  const openFirewall = () => {
+    if (!container) return
+    setFirewallEnabled(container.firewall_enabled || false)
+    setFirewallRules(container.firewall_rules ? [...container.firewall_rules.map(r => ({ ...r }))] : [])
+    setShowFirewall(true)
+  }
+
+  const saveFirewall = async () => {
+    if (!container) return
+    setFirewallSaving(true)
+    try {
+      await updateFirewall(container.id, { enabled: firewallEnabled, rules: firewallRules })
+      fetchContainer()
+    } catch (err: any) {
+      dialog.alert('错误', err?.response?.data?.message || '保存防火墙设置失败')
+    } finally {
+      setFirewallSaving(false)
+    }
+  }
+
+  const addFirewallRule = () => {
+    setEditingFirewallRule({
+      id: '',
+      direction: 'in',
+      protocol: 'tcp',
+      port: '',
+      source_ip: '',
+      action: 'DROP',
+      description: '',
+      enabled: true,
+    })
+    setShowFirewallEditor(true)
+  }
+
+  const saveFirewallRule = (rule: FirewallRule) => {
+    if (rule.id) {
+      // Update existing
+      setFirewallRules(firewallRules.map(r => r.id === rule.id ? rule : r))
+    } else {
+      // Add new with temporary ID
+      const newRule = { ...rule, id: `tmp-${Date.now()}` }
+      setFirewallRules([...firewallRules, newRule])
+    }
+    setShowFirewallEditor(false)
+    setEditingFirewallRule(null)
+  }
+
+  const deleteFirewallRule = (ruleId: string) => {
+    setFirewallRules(firewallRules.filter(r => r.id !== ruleId))
+  }
+
+  const toggleFirewallRule = (ruleId: string) => {
+    setFirewallRules(firewallRules.map(r => r.id === ruleId ? { ...r, enabled: !r.enabled } : r))
   }
 
   const openReinstall = async () => {
@@ -753,6 +815,7 @@ export default function ContainerDetail() {
   }
 
   const isRunning = container.status === 'running'
+  const isInitializing = container.status === 'initializing'
   const isKVM = (container.virtualization || 'lxc') === 'kvm'
   const isWindows = container.template?.includes('windows')
   const reinstallLinuxTemplate = !isWindowsTemplate(selectedTemplate)
@@ -770,8 +833,29 @@ export default function ContainerDetail() {
   if (ipv6List.length === 0 && container.ipv6) ipv6List.push(container.ipv6)
   const maxVCPU = hostInfo?.cpu.cores || 64
   const maxRAMMB = hostInfo?.ram.total_mb ? Number(hostInfo.ram.total_mb) : undefined
-  const publicEndpoint = container.ssh_port > 0 ? `${publicHost}:${container.ssh_port}` : '-'
-  const sshCommand = container.ssh_port > 0 ? `ssh -p ${container.ssh_port} root@${publicHost}` : ''
+  const hasIndependentIPv4 = assignedIPv4List.length > 0
+  const hasIndependentIPv6 = ipv6List.length > 0
+  const defaultConnPort = isWindows ? 3389 : 22
+
+  let publicEndpoint = '-'
+  let sshCommand = ''
+
+  if (hasIndependentIPv4) {
+    // Direct connection via independent IPv4 — all ports forwarded
+    publicEndpoint = `${assignedIPv4List[0]}:${defaultConnPort}`
+    if (!isWindows) {
+      sshCommand = `ssh root@${assignedIPv4List[0]}`
+    }
+  } else if (hasIndependentIPv6) {
+    publicEndpoint = `[${ipv6List[0]}]:${defaultConnPort}`
+    if (!isWindows) {
+      sshCommand = `ssh root@[${ipv6List[0]}]`
+    }
+  } else if (container.ssh_port > 0) {
+    // NAT port mapping mode
+    publicEndpoint = `${publicHost}:${container.ssh_port}`
+    sshCommand = `ssh -p ${container.ssh_port} root@${publicHost}`
+  }
   const editingSSH = draft.index !== null && !!container.port_mappings?.[draft.index] && (
     container.port_mappings[draft.index].description === 'SSH' || container.port_mappings[draft.index].container_port === 22 ||
     container.port_mappings[draft.index].description === 'RDP' || container.port_mappings[draft.index].container_port === 3389
@@ -854,13 +938,17 @@ export default function ContainerDetail() {
             <div>
               <div className="flex items-center gap-2 flex-wrap">
                 <h1 className="text-xl font-bold text-black">{container.name}</h1>
-                <StatusBadge running={isRunning} />
+                <StatusBadge running={isRunning} initializing={isInitializing} />
               </div>
               <div className="flex items-center gap-2 flex-wrap mt-2">
                 <InfoTag color="blue">系统 {container.template}</InfoTag>
                 <InfoTag color="slate">类型 {(container.virtualization || 'lxc').toUpperCase()}</InfoTag>
                 <InfoTag color="emerald">内网 {container.ip || '-'}</InfoTag>
-                <InfoTag color="amber">IPv4 NAT {hasNATQuota ? `${mappingCount} 条` : '未分配'}</InfoTag>
+                {hasIndependentIPv4 ? (
+                  <InfoTag color="amber">独立 IPv4 {assignedIPv4List[0]}</InfoTag>
+                ) : (
+                  <InfoTag color="amber">IPv4 NAT {hasNATQuota ? `${mappingCount} 条` : '未分配'}</InfoTag>
+                )}
                 <InfoTag color="violet">{isWindows ? 'RDP' : 'SSH'} {publicEndpoint}</InfoTag>
                 {isPolicyBlocked && <InfoTag color="red">策略封禁</InfoTag>}
               </div>
@@ -903,22 +991,24 @@ export default function ContainerDetail() {
                 管理链接
               </ActionButton>
             )}
-            <>
+            {!hasIndependentIPv4 && hasNATQuota && (
               <ActionButton disabled={isSubUserPolicyBlocked} onClick={() => setShowNat(true)}>
                 <Settings className="w-3.5 h-3.5" />
                 IPv4 NAT 管理
               </ActionButton>
-            </>
+            )}
+            <ActionButton onClick={() => setShowFirewall(true)} disabled={isSubUserPolicyBlocked}>
+              <FirewallIcon className="w-3.5 h-3.5" />
+              防火墙
+            </ActionButton>
             <ActionButton onClick={() => setShowSnapshots(true)} disabled={!!taskStatus || !!snapshotBusy || isSubUserPolicyBlocked}>
               <Camera className="w-3.5 h-3.5" />
               快照
             </ActionButton>
-            {!isSubUser && (
-              <ActionButton onClick={openReinstall} disabled={!!taskStatus || isExpired}>
-                <RefreshCw className="w-3.5 h-3.5" />
-                {isExpired ? '已到期' : taskStatus === 'reinstall' ? taskActionLabels['reinstall'] : '重装'}
-              </ActionButton>
-            )}
+            <ActionButton onClick={openReinstall} disabled={!!taskStatus || isExpired || isSubUserPolicyBlocked}>
+              <RefreshCw className="w-3.5 h-3.5" />
+              {isExpired ? '已到期' : taskStatus === 'reinstall' ? taskActionLabels['reinstall'] : '重装'}
+            </ActionButton>
             {!isSubUser && (
               <ActionButton disabled={!!taskStatus} onClick={() => handleAction('delete')}>
                 <Trash2 className="w-3.5 h-3.5" />
@@ -942,7 +1032,7 @@ export default function ContainerDetail() {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
         <Panel
           title="连接信息"
-          extra={!isSubUser && !isWindows && !isSubUserPolicyBlocked ? (
+          extra={!isWindows && !isSubUserPolicyBlocked ? (
             <button
               onClick={openResetPassword}
               className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs text-gray-600 hover:bg-gray-100 hover:text-black"
@@ -1418,7 +1508,141 @@ export default function ContainerDetail() {
         </Modal>
       )}
 
-      {showNat && (
+      {showFirewall && (
+        <Modal title="防火墙设置" onClose={() => { setShowFirewall(false); setShowFirewallEditor(false); setEditingFirewallRule(null) }} wide extra={
+          !isSubUser && (
+            <button onClick={addFirewallRule} className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-black text-white rounded-md text-xs hover:bg-gray-800">
+              <Plus className="w-3.5 h-3.5" />添加规则
+            </button>
+          )
+        }>
+          <div className="space-y-5">
+            {/* Global toggle */}
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <div className="text-sm font-medium text-gray-800">防火墙</div>
+                <div className="text-xs text-gray-500">启用后默认拒绝所有入站和出站流量，仅放行下方规则</div>
+              </div>
+              <button
+                onClick={() => setFirewallEnabled(!firewallEnabled)}
+                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${firewallEnabled ? 'bg-emerald-500' : 'bg-gray-300'}`}
+              >
+                <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${firewallEnabled ? 'translate-x-6' : 'translate-x-1'}`} />
+              </button>
+            </div>
+
+            {/* Rules table */}
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="border-b border-gray-200 bg-gray-50 text-xs text-gray-500">
+                  <tr>
+                    <th className="px-3 py-2 text-left font-medium">状态</th>
+                    <th className="px-3 py-2 text-left font-medium">方向</th>
+                    <th className="px-3 py-2 text-left font-medium">协议</th>
+                    <th className="px-3 py-2 text-left font-medium">端口</th>
+                    <th className="px-3 py-2 text-left font-medium">来源/目标 IP</th>
+                    <th className="px-3 py-2 text-left font-medium">动作</th>
+                    <th className="px-3 py-2 text-left font-medium">描述</th>
+                    {!isSubUser && <th className="px-3 py-2 text-right font-medium">操作</th>}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {firewallRules.map((rule) => (
+                    <tr key={rule.id} className={!rule.enabled ? 'opacity-50' : ''}>
+                      <td className="px-3 py-2">
+                        <button onClick={() => toggleFirewallRule(rule.id)} className={`inline-flex h-4 w-7 items-center rounded-full transition-colors ${rule.enabled ? 'bg-emerald-500' : 'bg-gray-300'}`}>
+                          <span className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${rule.enabled ? 'translate-x-3.5' : 'translate-x-0.5'}`} />
+                        </button>
+                      </td>
+                      <td className="px-3 py-2">
+                        <span className={`inline-flex px-1.5 py-0.5 rounded text-xs font-medium ${rule.direction === 'in' ? 'bg-blue-50 text-blue-700' : 'bg-orange-50 text-orange-700'}`}>
+                          {rule.direction === 'in' ? '入站' : '出站'}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2 font-mono text-xs">{rule.protocol.toUpperCase()}</td>
+                      <td className="px-3 py-2 font-mono text-xs">{rule.port || '全部'}</td>
+                      <td className="px-3 py-2 font-mono text-xs">{rule.source_ip || '任意'}</td>
+                      <td className="px-3 py-2">
+                        <span className={`inline-flex px-1.5 py-0.5 rounded text-xs font-medium ${rule.action === 'ACCEPT' ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'}`}>
+                          {rule.action === 'ACCEPT' ? '放行' : '拒绝'}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2 text-xs text-gray-600 max-w-32 truncate">{rule.description || '-'}</td>
+                      {!isSubUser && (
+                        <td className="px-3 py-2 text-right">
+                          <div className="inline-flex items-center gap-1">
+                            <button onClick={() => { setEditingFirewallRule({ ...rule }); setShowFirewallEditor(true) }} className="p-1.5 text-gray-400 hover:text-gray-700 rounded hover:bg-gray-100">
+                              <Pencil className="h-3.5 w-3.5" />
+                            </button>
+                            <button onClick={() => deleteFirewallRule(rule.id)} className="p-1.5 text-gray-400 hover:text-red-600 rounded hover:bg-red-50">
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        </td>
+                      )}
+                    </tr>
+                  ))}
+                  {firewallRules.length === 0 && (
+                    <tr><td colSpan={isSubUser ? 7 : 8} className="px-3 py-6 text-center text-xs text-gray-400">暂无防火墙规则</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Save button */}
+            {!isSubUser && (
+              <div className="flex justify-end">
+                <button onClick={saveFirewall} disabled={firewallSaving} className="inline-flex items-center gap-1.5 px-4 py-2 bg-black text-white rounded-md text-sm hover:bg-gray-800 disabled:opacity-50">
+                  <Save className="w-3.5 h-3.5" />
+                  {firewallSaving ? '保存中...' : '保存'}
+                </button>
+              </div>
+            )}
+          </div>
+        </Modal>
+      )}
+
+      {showFirewallEditor && editingFirewallRule && (
+        <Modal title={editingFirewallRule.id ? '编辑规则' : '添加规则'} onClose={() => { setShowFirewallEditor(false); setEditingFirewallRule(null) }}>
+          <div className="space-y-4">
+            <Field label="方向">
+              <select value={editingFirewallRule.direction} onChange={(e) => setEditingFirewallRule({ ...editingFirewallRule, direction: e.target.value as 'in' | 'out' })} className={inputClass}>
+                <option value="in">入站 (Inbound)</option>
+                <option value="out">出站 (Outbound)</option>
+              </select>
+            </Field>
+            <Field label="协议">
+              <select value={editingFirewallRule.protocol} onChange={(e) => setEditingFirewallRule({ ...editingFirewallRule, protocol: e.target.value as any })} className={inputClass}>
+                <option value="tcp">TCP</option>
+                <option value="udp">UDP</option>
+                <option value="icmp">ICMP</option>
+                <option value="all">全部</option>
+              </select>
+            </Field>
+            <Field label="端口" hint="留空为全部端口，支持: 22 | 80,443 | 8000-9000">
+              <input value={editingFirewallRule.port} onChange={(e) => setEditingFirewallRule({ ...editingFirewallRule, port: e.target.value })} placeholder="如: 22 或 80,443 或 8000-9000" className={inputClass} />
+            </Field>
+            <Field label={editingFirewallRule.direction === 'in' ? '来源 IP' : '目标 IP'} hint="留空为任意 IP，支持 CIDR: 192.168.1.0/24">
+              <input value={editingFirewallRule.source_ip} onChange={(e) => setEditingFirewallRule({ ...editingFirewallRule, source_ip: e.target.value })} placeholder="如: 192.168.1.0/24" className={inputClass} />
+            </Field>
+            <Field label="动作">
+              <select value={editingFirewallRule.action} onChange={(e) => setEditingFirewallRule({ ...editingFirewallRule, action: e.target.value as 'ACCEPT' | 'DROP' })} className={inputClass}>
+                <option value="ACCEPT">放行 (ACCEPT)</option>
+                <option value="DROP">拒绝 (DROP)</option>
+              </select>
+            </Field>
+            <Field label="描述">
+              <input value={editingFirewallRule.description} onChange={(e) => setEditingFirewallRule({ ...editingFirewallRule, description: e.target.value })} placeholder="规则描述" className={inputClass} />
+            </Field>
+            <div className="flex justify-end gap-2 pt-2">
+              <button onClick={() => { setShowFirewallEditor(false); setEditingFirewallRule(null) }} className="px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded-md">取消</button>
+              <button onClick={() => saveFirewallRule(editingFirewallRule)} className="px-4 py-2 text-sm bg-black text-white rounded-md hover:bg-gray-800">确定</button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {showNat && !hasIndependentIPv4 && (
         <Modal title="IPv4 NAT 端口管理" onClose={() => { setShowNat(false); setDraft(emptyDraft); setShowMappingEditor(false) }} wide extra={
           !isSubUser && canAddMapping && (
             <button onClick={openAddMapping} className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-black text-white rounded-md text-xs hover:bg-gray-800">
@@ -1652,7 +1876,23 @@ function RangeSwitch({ value, onChange }: { value: StatsRangeKey; onChange: (val
   )
 }
 
-function StatusBadge({ running }: { running: boolean }) {
+function FirewallIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 1024 1024" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
+      <path d="M979.989543 469.308394H757.450516c4.519899-21.887511 7.247838-45.094992 7.247838-69.798441 0-137.428929-116.773391-270.417958-121.72528-276.001833a21.415521 21.415521 0 0 0-21.887511-6.319858 21.287524 21.287524 0 0 0-15.103663 16.98362l-12.583719 75.438315C571.854663 148.115571 533.535519 69.229333 467.241 5.910748A21.46352 21.46352 0 0 0 441.585573 2.982813a21.295524 21.295524 0 0 0-9.727782 23.935466c15.703649 58.366696-2.815937 152.996581-22.911488 226.978928-5.591875-35.7912-15.615651-66.214521-32.935264-76.414293a21.351523 21.351523 0 0 0-32.167282 18.399589c0 31.359299-15.999643 60.278653-34.519228 93.813904-24.703448 44.759-52.734822 95.525866-52.734822 167.972247 0 4.055909 0.599987 7.727827 0.767983 11.64774H41.346516A21.343523 21.343523 0 0 0 20.010993 490.651917v511.98856a21.343523 21.343523 0 0 0 21.335523 21.335524H979.989543a21.343523 21.343523 0 0 0 21.335524-21.335524v-511.98856A21.343523 21.343523 0 0 0 979.989543 469.308394z m-149.332663 42.663047v127.99714H660.380685c33.879243-29.183348 65.878528-72.702376 85.334093-127.99714h84.942102zM346.699693 310.255948c7.559831-13.599696 14.895667-26.919399 21.167527-40.399098 3.495922 28.543362 5.503877 64.510559 5.071887 100.26176a21.311524 21.311524 0 0 0 17.367612 21.199526 21.255525 21.255525 0 0 0 23.935465-13.351701c3.071931-8.191817 63.918572-169.980202 65.958527-293.241448 78.462247 104.493665 96.429845 228.906885 96.63784 230.354853a21.279525 21.279525 0 0 0 20.823535 18.431588c9.85578-0.255994 19.631561-7.383835 21.335523-17.791602L640.077138 189.29865c32.895265 46.422963 81.958169 129.277111 81.958169 210.219303 0 157.772475-113.837456 240.458627-153.212577 240.458628H455.241268c-19.023575-5.247883-155.940516-47.742933-155.940516-182.347926 0-61.486626 24.111461-105.133651 47.398941-147.372707zM659.996693 682.647627v127.99714H361.339366v-127.99714H659.996693zM190.67118 511.971441h72.750374c15.311658 60.974638 54.910773 101.717727 93.693907 127.99714H190.67118v-127.99714z m-127.99714 0H148.008133v127.99714H62.67404v-127.99714z m0 170.668186h255.99428v127.99714h-255.99428v-127.99714zM148.008133 981.296954H62.67404v-127.99714H148.008133v127.99714z m341.328373 0H190.67118v-127.99714h298.665326v127.99714z m341.320374 0H531.999553v-127.99714h298.657327v127.99714z m127.99714 0h-85.326093v-127.99714h85.326093v127.99714z m0-170.660187h-255.99428v-127.99714h255.99428v127.99714z m0-170.668186h-85.326093v-127.99714h85.326093v127.99714z" />
+    </svg>
+  )
+}
+
+function StatusBadge({ running, initializing }: { running: boolean; initializing?: boolean }) {
+  if (initializing) {
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium whitespace-nowrap bg-amber-50 text-amber-700">
+        <span className="w-1.5 h-1.5 rounded-full flex-shrink-0 bg-amber-500 animate-pulse"></span>
+        正在初始化
+      </span>
+    )
+  }
   return (
     <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium whitespace-nowrap ${running ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>
       <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${running ? 'bg-emerald-500' : 'bg-rose-500'}`}></span>
@@ -2005,11 +2245,12 @@ function TableHead({ children }: { children: ReactNode }) {
   return <th className="text-left px-3 py-2 text-xs font-medium text-gray-500">{children}</th>
 }
 
-function Field({ label, children }: { label: string; children: ReactNode }) {
+function Field({ label, children, hint }: { label: string; children: ReactNode; hint?: string }) {
   return (
     <label className="block">
       <span className="block text-xs font-medium text-gray-600 mb-1.5">{label}</span>
       {children}
+      {hint && <span className="block text-[11px] text-gray-400 mt-1">{hint}</span>}
     </label>
   )
 }

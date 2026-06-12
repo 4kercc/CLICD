@@ -22,6 +22,17 @@ type PortMapping struct {
 	Description   string `json:"description"`
 }
 
+type FirewallRule struct {
+	ID          string `json:"id"`
+	Direction   string `json:"direction"`   // "in" or "out"
+	Protocol    string `json:"protocol"`    // "tcp", "udp", "icmp", "all"
+	Port        string `json:"port"`        // "" = all, "22", "80,443", "8000-9000"
+	SourceIP    string `json:"source_ip"`   // "" = any
+	Action      string `json:"action"`      // "ACCEPT" or "DROP"
+	Description string `json:"description"`
+	Enabled     bool   `json:"enabled"`
+}
+
 type PublicIPv4Assignment struct {
 	Address   string `json:"address"`
 	Interface string `json:"interface,omitempty"`
@@ -124,6 +135,8 @@ type Container struct {
 	SSHHostKey                    string                 `json:"ssh_host_key,omitempty"`
 	PortMappings                  []PortMapping          `json:"port_mappings"`
 	PortMappingLimit              int                    `json:"port_mapping_limit"`
+	FirewallEnabled               bool                   `json:"firewall_enabled"`
+	FirewallRules                 []FirewallRule          `json:"firewall_rules"`
 	SnapshotLimit                 int                    `json:"snapshot_limit"`
 	CreatedAt                     string                 `json:"created_at"`
 	ExpiresAt                     string                 `json:"expires_at"`

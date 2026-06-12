@@ -84,6 +84,7 @@ var (
 	lastTrafficSnapshot = map[string]trafficSample{}
 	kvmSnapshotMu       sync.Mutex
 	kvmSSHEnsureLocks   sync.Map
+	knownSSHHostKeys    sync.Map // TOFU host key store: host:port → ssh.PublicKey
 	portMapApplyMu      sync.Mutex
 	lastPortMapApply    = map[int]time.Time{}
 	windowsMetricsMu    sync.Mutex
@@ -407,6 +408,7 @@ func (m *Manager) defineContainer(id int, vmName string, cfg lxc.ContainerConfig
 	mac := randomMAC()
 	sshPassword := generateRandomString(16)
 	sshPublicKey := ""
+	sshAuthMode := ""
 	if !IsWindowsImage(image.ID) {
 		sshAccess, err := lxc.ResolveCreateSSHAccess(cfg)
 		if err != nil {
@@ -414,6 +416,7 @@ func (m *Manager) defineContainer(id int, vmName string, cfg lxc.ContainerConfig
 		}
 		sshPassword = sshAccess.Password
 		sshPublicKey = sshAccess.PublicKey
+		sshAuthMode = sshAccess.Mode
 	}
 	publicIPv4s, err := lxc.AllocatePublicIPv4Assignments(id, cfg.PublicIPv4s, cfg.IPv4Count, cfg.AssignIPv4)
 	if err != nil {
@@ -429,7 +432,9 @@ func (m *Manager) defineContainer(id int, vmName string, cfg lxc.ContainerConfig
 		ipv6Assignments = assigned
 	}
 	ipv6List := configIPv6AssignmentAddresses(ipv6Assignments)
-	defaultHostIP := lxc.DefaultPortMappingHostIP(publicIPv4s)
+	ipv4List := configIPv4AssignmentAddresses(publicIPv4s)
+	// NAT4 port mappings should bind to the host IP, not the VM's independent public IPv4.
+	defaultHostIP := ""
 
 	var xml string
 	winAdminPassword := ""
@@ -448,7 +453,7 @@ func (m *Manager) defineContainer(id int, vmName string, cfg lxc.ContainerConfig
 		}
 		winAdminPassword = generateWindowsPassword()
 		unattendPath := filepath.Join(m.instanceDir(vmName), "unattend.iso")
-		if err := createWindowsUnattendISO(unattendPath, cfg.Name, winAdminPassword, ipv6List); err != nil {
+		if err := createWindowsUnattendISO(unattendPath, cfg.Name, winAdminPassword, ipv6List, ipv4List); err != nil {
 			return nil, err
 		}
 		xml = windowsDomainXML(vmName, int(cfg.VCPU), cfg.RAMMB, diskPath, ImagePath(image.ID), unattendPath, mac, cfg.IOSpeedMBps, cfg.NetworkBWMbps)
@@ -464,7 +469,7 @@ func (m *Manager) defineContainer(id int, vmName string, cfg lxc.ContainerConfig
 		if err := createOverlayDisk(ImagePath(image.ID), diskPath, cfg.DiskGB); err != nil {
 			return nil, err
 		}
-		if err := createSeedISO(seedPath, vmName, cfg.Name, sshPassword, sshPublicKey, mac, ipv6List, *image); err != nil {
+		if err := createSeedISO(seedPath, vmName, cfg.Name, sshPassword, sshPublicKey, mac, ipv6List, ipv4List, *image, sshAuthMode); err != nil {
 			return nil, err
 		}
 		xml = domainXML(vmName, int(cfg.VCPU), cfg.RAMMB, diskPath, seedPath, mac, cfg.IOSpeedMBps, cfg.NetworkBWMbps, image.Desktop != "")
@@ -585,7 +590,7 @@ func (m *Manager) StartContainer(id int) error {
 			}
 		}
 	}
-	config.UpdateContainerStatus(id, "running")
+	config.UpdateContainerStatus(id, "initializing")
 	// Detect VNC port
 	if _, err := m.RefreshVNCPort(id); err != nil {
 		fmt.Printf("Warning: failed to refresh VNC port for %s: %v\n", name, err)
@@ -621,7 +626,15 @@ func (m *Manager) StartContainer(id int) error {
 		if err := lxc.NewManager().ApplyPortMappings(id); err != nil {
 			return err
 		}
+		if err := lxc.ApplyFirewallRules(id); err != nil {
+			fmt.Printf("Warning: failed to apply firewall rules: %v\n", err)
+		}
 	}
+	// Wait for cloud-init to finish and SSH to be reachable (password-only mode)
+	if !isWindows && c.IP != "" {
+		m.waitForCloudInitReady(name, c.IP, c.SSHPassword)
+	}
+	config.UpdateContainerStatus(id, "running")
 	if c.IPv6 != "" || len(c.IPv6Addresses) > 0 {
 		if err := m.applyIPv6Runtime(c); err != nil {
 			return err
@@ -632,12 +645,71 @@ func (m *Manager) StartContainer(id int) error {
 	return nil
 }
 
+// waitForCloudInitReady waits for cloud-init to finish and SSH to be reachable.
+// tofuHostKeyCallback implements Trust-On-First-Use host key verification.
+// On the first connection to a host, the key is accepted and remembered.
+// Subsequent connections must present the same key or the connection is rejected.
+func tofuHostKeyCallback(hostname string, remote net.Addr, key ssh.PublicKey) error {
+	if stored, ok := knownSSHHostKeys.Load(hostname); ok {
+		if bytes.Equal(stored.(ssh.PublicKey).Marshal(), key.Marshal()) {
+			return nil
+		}
+		return fmt.Errorf("host key mismatch for %s (possible MitM attack)", hostname)
+	}
+	knownSSHHostKeys.Store(hostname, key)
+	return nil
+}
+
+func (m *Manager) waitForCloudInitReady(vmName, ip, password string) {
+	if ip == "" || password == "" {
+		return
+	}
+	deadline := time.Now().Add(3 * time.Minute)
+	target := net.JoinHostPort(ip, "22")
+	sshWasUp := false
+	qgaAttempted := false
+
+	for time.Now().Before(deadline) {
+		client, err := ssh.Dial("tcp", target, &ssh.ClientConfig{
+			User:            "root",
+			Auth:            []ssh.AuthMethod{ssh.Password(password)},
+			HostKeyCallback: tofuHostKeyCallback,
+			Timeout:         5 * time.Second,
+		})
+		if err == nil {
+			client.Close()
+			if !sshWasUp {
+				sshWasUp = true
+				fmt.Printf("KVM %s SSH up, waiting for cloud-init to settle...\n", vmName)
+				time.Sleep(10 * time.Second)
+				continue
+			}
+			fmt.Printf("KVM %s ready\n", vmName)
+			return
+		}
+
+		// Try guest agent ONCE to speed things up, with timeout to avoid blocking
+		if !qgaAttempted && qemuGuestPing(vmName) == nil {
+			qgaAttempted = true
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			cmd := exec.CommandContext(ctx, "virsh", "qemu-agent-command", vmName,
+				`{"execute":"guest-exec","arguments":{"path":"/bin/sh","arg":["-c","cloud-init status --wait 2>/dev/null; systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null; true"],"capture-output":false}}`)
+			cmd.Run()
+			cancel()
+		}
+
+		time.Sleep(5 * time.Second)
+	}
+	fmt.Printf("Warning: KVM %s not ready after 3 minutes\n", vmName)
+}
+
 func (m *Manager) StopContainer(id int) error {
 	c := config.FindContainer(id)
 	if c == nil {
 		return fmt.Errorf("container not found: %d", id)
 	}
 	_ = lxc.NewManager().CleanPortMappings(id)
+	lxc.CleanFirewallRules(id)
 	name := c.VirshName()
 	status, _ := m.GetContainerStatus(name)
 	if status != "running" {
@@ -1115,6 +1187,7 @@ func (m *Manager) prepareVMForColdCopy(id int, name string) (bool, error) {
 		time.Sleep(time.Second)
 	} else {
 		_ = lxc.NewManager().CleanPortMappings(id)
+		lxc.CleanFirewallRules(id)
 	}
 	return wasRunning, nil
 }
@@ -1389,7 +1462,7 @@ func (m *Manager) RefreshNetwork(id int) (string, error) {
 	if changed {
 		config.SaveConfig()
 	}
-	if c.Status == "running" && len(c.PortMappings) > 0 && shouldApplyPortMappings(id, changed) {
+	if c.Status == "running" && shouldApplyPortMappings(id, changed) {
 		if err := lxc.NewManager().ApplyPortMappings(id); err != nil {
 			return ip, err
 		}
@@ -1596,7 +1669,7 @@ func createEmptyDisk(target string, diskGB int) error {
 	return nil
 }
 
-func createWindowsUnattendISO(target, hostname, adminPassword string, ipv6s []string) error {
+func createWindowsUnattendISO(target, hostname, adminPassword string, ipv6s []string, ipv4s []string) error {
 	tool := firstAvailableCommand("genisoimage", "mkisofs", "xorriso")
 	if tool == "" {
 		return fmt.Errorf("one of genisoimage, mkisofs, xorriso is required for Windows unattended setup")
@@ -1622,13 +1695,13 @@ func createWindowsUnattendISO(target, hostname, adminPassword string, ipv6s []st
 	if err := os.WriteFile(filepath.Join(setupScriptsDir, "SetupComplete.cmd"), []byte(windowsSetupCompleteCMD()), 0600); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(clicdDir, "FirstLogon.ps1"), []byte(windowsFirstLogonPowerShell(adminPassword, ipv6s)), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(clicdDir, "FirstLogon.ps1"), []byte(windowsFirstLogonPowerShell(adminPassword, ipv6s, ipv4s)), 0600); err != nil {
 		return err
 	}
 	if err := os.WriteFile(filepath.Join(dir, "SetupComplete.cmd"), []byte(windowsSetupCompleteCMD()), 0600); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(dir, "FirstLogon.ps1"), []byte(windowsFirstLogonPowerShell(adminPassword, ipv6s)), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "FirstLogon.ps1"), []byte(windowsFirstLogonPowerShell(adminPassword, ipv6s, ipv4s)), 0600); err != nil {
 		return err
 	}
 	_ = os.Remove(target)
@@ -1738,7 +1811,7 @@ exit /b 0
 `
 }
 
-func windowsFirstLogonPowerShell(adminPassword string, ipv6s []string) string {
+func windowsFirstLogonPowerShell(adminPassword string, ipv6s []string, ipv4s []string) string {
 	commands := []string{
 		"$ErrorActionPreference='Continue'",
 		"$ProgressPreference='SilentlyContinue'",
@@ -1774,6 +1847,12 @@ func windowsFirstLogonPowerShell(adminPassword string, ipv6s []string) string {
 			windowsIPv6PowerShell(ipv6s),
 		)
 	}
+	ipv4s = normalizeKVMIPv4List(ipv4s)
+	if len(ipv4s) > 0 {
+		commands = append(commands,
+			windowsIPv4PowerShell(ipv4s),
+		)
+	}
 	commands = append(commands,
 		"New-Item -ItemType File -Force -Path 'C:\\CLICD\\init.done' | Out-Null",
 		"} finally { Stop-Transcript | Out-Null }",
@@ -1792,8 +1871,7 @@ func windowsIPv6PowerShell(ipv6s []string) string {
 	}
 	return strings.Join([]string{
 		"$clicdIPv6=@(" + strings.Join(quoted, ",") + ")",
-		"$iface=$null",
-		"for ($i=0; $i -lt 60 -and -not $iface; $i++) { $iface=Get-NetAdapter | Where-Object { $_.Status -eq 'Up' -and $_.HardwareInterface } | Sort-Object ifIndex | Select-Object -First 1; if (-not $iface) { Start-Sleep -Seconds 5 } }",
+		// Reuse $iface already found by the main script
 		"if ($iface) {",
 		"  foreach ($ip in $clicdIPv6) {",
 		"    Get-NetIPAddress -InterfaceIndex $iface.ifIndex -AddressFamily IPv6 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -eq $ip } | Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue",
@@ -1806,12 +1884,48 @@ func windowsIPv6PowerShell(ipv6s []string) string {
 	}, "\r\n")
 }
 
+func windowsIPv4PowerShell(ipv4s []string) string {
+	ipv4s = normalizeKVMIPv4List(ipv4s)
+	if len(ipv4s) == 0 {
+		return ""
+	}
+	quoted := make([]string, 0, len(ipv4s))
+	for _, ipv4 := range ipv4s {
+		quoted = append(quoted, "'"+strings.ReplaceAll(ipv4, "'", "''")+"'")
+	}
+	return strings.Join([]string{
+		"$clicdIPv4=@(" + strings.Join(quoted, ",") + ")",
+		// Reuse $iface already found by the main script
+		"if ($iface) {",
+		"  foreach ($ip in $clicdIPv4) {",
+		"    Get-NetIPAddress -InterfaceIndex $iface.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -eq $ip } | Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue",
+		"    New-NetIPAddress -IPAddress $ip -PrefixLength 32 -InterfaceIndex $iface.ifIndex -SkipAsSource:$false -ErrorAction SilentlyContinue | Out-Null",
+		"  }",
+		"}",
+	}, "\r\n")
+}
+
+func normalizeKVMIPv4List(values []string) []string {
+	seen := map[string]bool{}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		result = append(result, value)
+	}
+	return result
+}
+
 func shellQuoteWindows(value string) string {
 	return `"` + strings.ReplaceAll(value, `"`, `\"`) + `"`
 }
 
-func createSeedISO(seedPath, instanceID, hostname, password, publicKey, mac string, ipv6s []string, image Image) error {
-	guestSetup := kvmSSHSetupScript(password, publicKey)
+func createSeedISO(seedPath, instanceID, hostname, password, publicKey, mac string, ipv6s []string, ipv4s []string, image Image, sshAuthMode string) error {
+	disablePubkey := sshAuthMode == "password" || sshAuthMode == "auto_password"
+	guestSetup := kvmSSHSetupScript(password, disablePubkey, publicKey)
 	if desktopSetup := kvmDesktopSetupScript(image); desktopSetup != "" {
 		guestSetup += "\n" + desktopSetup
 	}
@@ -1846,29 +1960,40 @@ runcmd:
 %s
 `, hostname, password, authorizedKeys, setupScript)
 	metaData := fmt.Sprintf("instance-id: %s\nlocal-hostname: %s\n", instanceID, hostname)
-	ipv6Block := ""
+
+	// Build static address block (IPv4 + IPv6)
+	ipv4s = normalizeKVMIPv4List(ipv4s)
+	addressBlock := ""
+	addressLines := make([]string, 0, len(ipv4s)+len(ipv6s))
+	for _, ipv4 := range ipv4s {
+		addressLines = append(addressLines, fmt.Sprintf("        - %s/32", ipv4))
+	}
+	for _, ipv6 := range ipv6s {
+		addressLines = append(addressLines, fmt.Sprintf("        - %s/128", ipv6))
+	}
+	if len(addressLines) > 0 {
+		addressBlock = fmt.Sprintf("\n      addresses:\n%s", strings.Join(addressLines, "\n"))
+	}
+
+	// IPv6 routes (only needed when IPv6 addresses are configured)
+	ipv6RouteBlock := ""
 	if len(ipv6s) > 0 {
-		addressLines := make([]string, 0, len(ipv6s))
-		for _, ipv6 := range ipv6s {
-			addressLines = append(addressLines, fmt.Sprintf("        - %s/128", ipv6))
-		}
-		ipv6Block = fmt.Sprintf(`
-      addresses:
-%s
+		ipv6RouteBlock = fmt.Sprintf(`
       routes:
         - to: default
           via: %s
           on-link: true
-          metric: 100`, strings.Join(addressLines, "\n"), ipv6GatewayLinkLocal)
+          metric: 100`, ipv6GatewayLinkLocal)
 	}
+
 	networkConfig := fmt.Sprintf(`version: 2
 ethernets:
   nic0:
     match:
       macaddress: "%s"
     dhcp4: true
-    dhcp6: false%s
-`, strings.ToLower(mac), ipv6Block)
+    dhcp6: false%s%s
+`, strings.ToLower(mac), addressBlock, ipv6RouteBlock)
 	dir := filepath.Dir(seedPath)
 	userPath := filepath.Join(dir, "user-data")
 	metaPath := filepath.Join(dir, "meta-data")
@@ -1891,6 +2016,16 @@ ethernets:
 }
 
 func configIPv6AssignmentAddresses(assignments []config.IPv6Assignment) []string {
+	values := make([]string, 0, len(assignments))
+	for _, item := range assignments {
+		if strings.TrimSpace(item.Address) != "" {
+			values = append(values, strings.TrimSpace(item.Address))
+		}
+	}
+	return values
+}
+
+func configIPv4AssignmentAddresses(assignments []config.PublicIPv4Assignment) []string {
 	values := make([]string, 0, len(assignments))
 	for _, item := range assignments {
 		if strings.TrimSpace(item.Address) != "" {
@@ -2356,6 +2491,9 @@ func (m *Manager) EnsureSSH(id int) error {
 		if mapErr := lxc.NewManager().ApplyPortMappings(id); mapErr != nil {
 			return mapErr
 		}
+		if err := lxc.ApplyFirewallRules(id); err != nil {
+			fmt.Printf("Warning: failed to apply firewall rules: %v\n", err)
+		}
 		return nil
 	}
 	if lastErr == nil {
@@ -2368,11 +2506,11 @@ func runKVMGuestAgentSSHSetup(name string, password string) error {
 	if err := qemuGuestPing(name); err != nil {
 		return err
 	}
-	return qemuGuestExec(name, kvmSSHSetupScript(password), 180*time.Second)
+	return qemuGuestExec(name, kvmSSHSetupScript(password, false), 180*time.Second)
 }
 
 func runKVMSSHSetup(client *ssh.Client, password string) error {
-	return runKVMSSHScript(client, kvmSSHSetupScript(password), "KVM SSH", 150*time.Second)
+	return runKVMSSHScript(client, kvmSSHSetupScript(password, false), "KVM SSH", 150*time.Second)
 }
 
 func runKVMSSHScript(client *ssh.Client, script string, description string, timeout time.Duration) error {
@@ -2401,12 +2539,16 @@ func runKVMSSHScript(client *ssh.Client, script string, description string, time
 	}
 }
 
-func kvmSSHSetupScript(password string, publicKeys ...string) string {
+func kvmSSHSetupScript(password string, disablePubkeyAuth bool, publicKeys ...string) string {
 	publicKey := ""
 	if len(publicKeys) > 0 {
 		publicKey = strings.TrimSpace(publicKeys[0])
 	}
-	return `set -u
+	pubkeyValue := "yes"
+	if disablePubkeyAuth {
+		pubkeyValue = "no"
+	}
+	script := `set -u
 ROOT_PASSWORD=` + shellQuote(password) + `
 SSH_PUBLIC_KEY=` + shellQuote(publicKey) + `
 export DEBIAN_FRONTEND=noninteractive
@@ -2435,7 +2577,7 @@ fi
 mkdir -p /etc/ssh/sshd_config.d
 cat > /etc/ssh/sshd_config.d/99-clicd-root.conf <<'EOF'
 PermitRootLogin yes
-PubkeyAuthentication yes
+PubkeyAuthentication __CLICD_PUBKEY_AUTH__
 PasswordAuthentication yes
 KbdInteractiveAuthentication yes
 ChallengeResponseAuthentication yes
@@ -2443,8 +2585,8 @@ EOF
 if [ -f /etc/ssh/sshd_config ]; then
 	grep -q '^PermitRootLogin ' /etc/ssh/sshd_config && sed -i 's/^PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config || printf '\nPermitRootLogin yes\n' >> /etc/ssh/sshd_config
 	grep -q '^#PermitRootLogin ' /etc/ssh/sshd_config && sed -i 's/^#PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config || true
-	grep -q '^PubkeyAuthentication ' /etc/ssh/sshd_config && sed -i 's/^PubkeyAuthentication .*/PubkeyAuthentication yes/' /etc/ssh/sshd_config || printf '\nPubkeyAuthentication yes\n' >> /etc/ssh/sshd_config
-	grep -q '^#PubkeyAuthentication ' /etc/ssh/sshd_config && sed -i 's/^#PubkeyAuthentication .*/PubkeyAuthentication yes/' /etc/ssh/sshd_config || true
+	grep -q '^PubkeyAuthentication ' /etc/ssh/sshd_config && sed -i 's/^PubkeyAuthentication .*/PubkeyAuthentication __CLICD_PUBKEY_AUTH__/' /etc/ssh/sshd_config || printf '\nPubkeyAuthentication __CLICD_PUBKEY_AUTH__\n' >> /etc/ssh/sshd_config
+	grep -q '^#PubkeyAuthentication ' /etc/ssh/sshd_config && sed -i 's/^#PubkeyAuthentication .*/PubkeyAuthentication __CLICD_PUBKEY_AUTH__/' /etc/ssh/sshd_config || true
 	grep -q '^PasswordAuthentication ' /etc/ssh/sshd_config && sed -i 's/^PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config || printf '\nPasswordAuthentication yes\n' >> /etc/ssh/sshd_config
 	grep -q '^#PasswordAuthentication ' /etc/ssh/sshd_config && sed -i 's/^#PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config || true
 	grep -q '^KbdInteractiveAuthentication ' /etc/ssh/sshd_config && sed -i 's/^KbdInteractiveAuthentication .*/KbdInteractiveAuthentication yes/' /etc/ssh/sshd_config || printf '\nKbdInteractiveAuthentication yes\n' >> /etc/ssh/sshd_config
@@ -2459,7 +2601,10 @@ if [ -n "$SSH_PUBLIC_KEY" ]; then
 	chown -R root:root /root/.ssh 2>/dev/null || true
 fi
 if command -v chpasswd >/dev/null 2>&1; then
-	printf 'root:%s\n' "$ROOT_PASSWORD" | chpasswd || true
+	printf 'root:%s\n' "$ROOT_PASSWORD" | chpasswd 2>/tmp/clicd-chpasswd.log && echo "root password set via chpasswd" || echo "WARNING: chpasswd failed: $(cat /tmp/clicd-chpasswd.log 2>/dev/null)"
+elif command -v openssl >/dev/null 2>&1 && command -v usermod >/dev/null 2>&1; then
+	HASH=$(echo "$ROOT_PASSWORD" | openssl passwd -6 -stdin 2>/dev/null)
+	[ -n "$HASH" ] && usermod -p "$HASH" root 2>/dev/null && echo "root password set via openssl/usermod" || echo "WARNING: openssl/usermod failed"
 fi
 ssh-keygen -A >/dev/null 2>&1 || true
 if command -v systemctl >/dev/null 2>&1; then
@@ -2485,6 +2630,8 @@ if [ -w /dev/tty1 ]; then
 	printf '\nCLICD VNC console is ready. Press Enter for login prompt.\n' >/dev/tty1 || true
 fi
 `
+	script = strings.ReplaceAll(script, "__CLICD_PUBKEY_AUTH__", pubkeyValue)
+	return script
 }
 
 func kvmDesktopSetupScript(image Image) string {

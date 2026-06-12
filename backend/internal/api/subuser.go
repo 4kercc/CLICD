@@ -373,6 +373,15 @@ func SubUserMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
+		imagesEnabledPath := "/api/images/enabled"
+		if strings.HasPrefix(path, "/api/v1/") {
+			imagesEnabledPath = "/api/v1/images/enabled"
+		}
+		if path == imagesEnabledPath && r.Method == http.MethodGet {
+			next(w, r)
+			return
+		}
+
 		if path == containerListPath {
 			if r.Method != http.MethodGet {
 				jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "Sub-users cannot create containers"})
@@ -503,7 +512,7 @@ func isSubUserContainerActionAllowed(action string, method string) bool {
 		return method == http.MethodPost
 	case strings.HasPrefix(action, "snapshots/"):
 		return method == http.MethodDelete || method == http.MethodPost
-	case action == "start" || action == "stop" || action == "restart" || action == "reinstall":
+	case action == "start" || action == "stop" || action == "restart" || action == "reinstall" || action == "reset-password":
 		return method == http.MethodPost
 	case strings.HasPrefix(action, "port-mappings/"):
 		return method == http.MethodPut

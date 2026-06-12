@@ -59,9 +59,48 @@ func (m *Manager) ApplyPortMappings(id int) error {
 		}
 	}
 
+	// When container has public IPv4, apply full port passthrough DNAT so the
+	// container owns all ports on its public IP (no NAT management needed).
+	if len(c.PublicIPv4s) > 0 {
+		ensureIndependentIPv4Ingress(c, tag)
+	}
+
 	applyIPv4EgressPolicy(c, bridge, subnet, tag)
 
 	return nil
+}
+
+func ensureIndependentIPv4Ingress(c *config.Container, tag string) {
+	if c == nil || c.IP == "" || len(c.PublicIPv4s) == 0 {
+		return
+	}
+
+	for _, assignment := range c.PublicIPv4s {
+		hostIP := strings.TrimSpace(assignment.Address)
+		if hostIP == "" {
+			continue
+		}
+		// Full port passthrough: DNAT all TCP+UDP traffic on this public IP to the container.
+		for _, proto := range []string{"tcp", "udp"} {
+			args := []string{
+				"-t", "nat",
+				"-I", "PREROUTING", "1",
+				"-d", hostIP,
+				"-p", proto,
+				"-j", "DNAT",
+				"--to-destination", c.IP,
+				"-m", "comment", "--comment", fmt.Sprintf("clicd-%s-%s-all-%s", tag, natRuleIPTag(hostIP), proto),
+			}
+			cmd := exec.Command("iptables", args...)
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				fmt.Printf("Warning: failed to apply %s passthrough %s->%s: %v, output: %s\n",
+					proto, hostIP, c.IP, err, string(output))
+				continue
+			}
+			fmt.Printf("IPv4 passthrough (%s): %s -> %s (all ports)\n", proto, hostIP, c.IP)
+		}
+	}
 }
 
 func applyIPv4EgressPolicy(c *config.Container, bridge, subnet, tag string) {
@@ -528,4 +567,177 @@ func hostPortKey(hostIP string, port int) int {
 		sum = -sum
 	}
 	return port + (sum % 1000000 * 100000)
+}
+
+// CleanFirewallRules removes all firewall rules for a container from the FORWARD chain.
+func CleanFirewallRules(id int) {
+	tag := clicdTag(id)
+	// Remove all rules with the firewall tag prefix
+	cmd := exec.Command("bash", "-c",
+		fmt.Sprintf("iptables -S FORWARD 2>/dev/null | grep 'clicd-%s-fw-' | sed 's/^-A /-D /' | while read rule; do iptables $rule; done", tag))
+	cmd.CombinedOutput()
+
+	// Also remove legacy default policy rules (without specific rule ID)
+	for _, suffix := range []string{"default-in", "default-out"} {
+		for _, proto := range []string{"tcp", "udp"} {
+			exec.Command("iptables", "-D", "FORWARD",
+				"-m", "comment", "--comment", fmt.Sprintf("clicd-%s-fw-%s-%s", tag, suffix, proto),
+			).CombinedOutput()
+		}
+	}
+}
+
+// ApplyFirewallRules applies iptables FORWARD rules for a container's firewall configuration.
+func ApplyFirewallRules(id int) error {
+	c := config.FindContainer(id)
+	if c == nil {
+		return fmt.Errorf("container not found: %d", id)
+	}
+
+	// Always clean existing firewall rules first
+	CleanFirewallRules(id)
+
+	// If firewall is disabled or no rules, nothing to apply
+	if !c.FirewallEnabled {
+		return nil
+	}
+
+	bridge := "lxcbr0"
+	if c.IsKVM() {
+		bridge = "virbr0"
+	}
+	containerIP := c.IP
+	if containerIP == "" {
+		return nil
+	}
+	tag := clicdTag(id)
+
+	// Apply default DROP policy first (inserted at position 1).
+	// Then insert ACCEPT rules (also at position 1), which pushes the DROPs down.
+	// Final order: ACCEPT rules on top, DROP defaults below, bridge ACCEPT rules at the bottom.
+	applyDefaultFirewallPolicy(tag, bridge, containerIP)
+
+	for _, rule := range c.FirewallRules {
+		if !rule.Enabled {
+			continue
+		}
+		if err := applyOneFirewallRule(tag, bridge, containerIP, rule); err != nil {
+			fmt.Printf("Warning: failed to apply firewall rule %s for container %d: %v\n", rule.ID, id, err)
+		}
+	}
+
+	return nil
+}
+
+func applyOneFirewallRule(tag, bridge, containerIP string, rule config.FirewallRule) error {
+	commentTag := fmt.Sprintf("clicd-%s-fw-%s", tag, rule.ID)
+
+	// Build base iptables args
+	args := []string{"-I", "FORWARD", "1"}
+
+	// Direction: in = traffic arriving at container (-i bridge -d containerIP)
+	//            out = traffic leaving container (-o bridge -s containerIP)
+	switch rule.Direction {
+	case "in":
+		args = append(args, "-i", bridge, "-d", containerIP+"/32")
+	case "out":
+		args = append(args, "-o", bridge, "-s", containerIP+"/32")
+	default:
+		return fmt.Errorf("invalid direction: %s", rule.Direction)
+	}
+
+	// Protocol
+	switch rule.Protocol {
+	case "tcp", "udp":
+		args = append(args, "-p", rule.Protocol)
+	case "icmp":
+		args = append(args, "-p", "icmp")
+	case "all":
+		// no protocol filter
+	default:
+		return fmt.Errorf("invalid protocol: %s", rule.Protocol)
+	}
+
+	// Port matching (only for tcp/udp)
+	if rule.Port != "" && (rule.Protocol == "tcp" || rule.Protocol == "udp") {
+		// For "in" direction, traffic going TO the container uses --dport
+		// For "out" direction, traffic going FROM the container uses --dport (destination port on remote)
+		args = append(args, "--dport", normalizePortSpec(rule.Port))
+	}
+
+	// Source IP filter (for "out" direction, this matches the remote source; for "in", it matches the sender)
+	if rule.SourceIP != "" {
+		switch rule.Direction {
+		case "in":
+			args = append(args, "-s", rule.SourceIP)
+		case "out":
+			args = append(args, "-d", rule.SourceIP)
+		}
+	}
+
+	// Action
+	action := "DROP"
+	if rule.Action == "ACCEPT" {
+		action = "ACCEPT"
+	}
+	args = append(args, "-j", action)
+
+	// Comment tag for cleanup
+	args = append(args, "-m", "comment", "--comment", commentTag)
+
+	cmd := exec.Command("iptables", args...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("iptables error: %s", string(output))
+	}
+	return nil
+}
+
+// normalizePortSpec converts user port input to iptables-compatible port spec.
+// "80,443" -> "80,443", "8000-9000" -> "8000:9000", "22" -> "22"
+func normalizePortSpec(port string) string {
+	port = strings.TrimSpace(port)
+	if port == "" {
+		return ""
+	}
+	// Convert comma-separated to iptables format (already valid)
+	// Convert dash range to colon range: "8000-9000" -> "8000:9000"
+	if strings.Contains(port, "-") && !strings.Contains(port, ":") {
+		parts := strings.SplitN(port, "-", 2)
+		if len(parts) == 2 {
+			return strings.TrimSpace(parts[0]) + ":" + strings.TrimSpace(parts[1])
+		}
+	}
+	return port
+}
+
+func applyDefaultFirewallPolicy(tag, bridge, containerIP string) {
+	// Default DROP: inserted at position 1 so they sit above bridge ACCEPT rules.
+	// The user-defined ACCEPT rules (also at position 1) were inserted first,
+	// so they end up above these DROP defaults after the position-1 insertions.
+	for _, proto := range []string{"tcp", "udp"} {
+		args := []string{
+			"-I", "FORWARD", "1",
+			"-i", bridge,
+			"-d", containerIP + "/32",
+			"-p", proto,
+			"-j", "DROP",
+			"-m", "comment", "--comment", fmt.Sprintf("clicd-%s-fw-default-in-%s", tag, proto),
+		}
+		cmd := exec.Command("iptables", args...)
+		cmd.CombinedOutput()
+	}
+
+	for _, proto := range []string{"tcp", "udp"} {
+		args := []string{
+			"-I", "FORWARD", "1",
+			"-o", bridge,
+			"-s", containerIP + "/32",
+			"-p", proto,
+			"-j", "DROP",
+			"-m", "comment", "--comment", fmt.Sprintf("clicd-%s-fw-default-out-%s", tag, proto),
+		}
+		cmd := exec.Command("iptables", args...)
+		cmd.CombinedOutput()
+	}
 }

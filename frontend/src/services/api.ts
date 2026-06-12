@@ -45,6 +45,17 @@ export interface PortMapping {
   description: string
 }
 
+export interface FirewallRule {
+  id: string
+  direction: 'in' | 'out'
+  protocol: 'tcp' | 'udp' | 'icmp' | 'all'
+  port: string
+  source_ip: string
+  action: 'ACCEPT' | 'DROP'
+  description: string
+  enabled: boolean
+}
+
 export interface PublicIPv4Assignment {
   address: string
   interface?: string
@@ -88,6 +99,8 @@ export interface Container {
   ssh_password: string
   port_mappings: PortMapping[]
   port_mapping_limit: number
+  firewall_enabled: boolean
+  firewall_rules: FirewallRule[]
   snapshot_limit: number
   created_at: string
   expires_at: string
@@ -486,6 +499,12 @@ export const updatePortMapping = (id: ContainerIdentifier, index: number, data: 
 
 export const deletePortMapping = (id: ContainerIdentifier, index: number) =>
   api.delete<APIResponse<PortMapping[]>>(`/containers/${id}/port-mappings/${index}`)
+
+export const getFirewall = (id: ContainerIdentifier) =>
+  api.get<APIResponse<{ enabled: boolean; rules: FirewallRule[] }>>(`/containers/${id}/firewall`)
+
+export const updateFirewall = (id: ContainerIdentifier, data: { enabled?: boolean; rules?: FirewallRule[] }) =>
+  api.put<APIResponse<{ enabled: boolean; rules: FirewallRule[] }>>(`/containers/${id}/firewall`, data)
 
 export const updateContainerExpiry = (id: ContainerIdentifier, expiresAt: string) =>
   api.put<APIResponse>(`/containers/${id}/expiry`, { expires_at: expiresAt })

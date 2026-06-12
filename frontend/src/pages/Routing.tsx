@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Globe2, Network, Pencil, Plus, RefreshCw, Router, Save, Search, Server, Trash2, X } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { useLanguage, type Language } from '../contexts/LanguageContext'
@@ -23,7 +23,8 @@ export default function Routing() {
   const [ipv4EditMode, setIPv4EditMode] = useState<'pool' | 'address'>('pool')
   const [editingIPv4Address, setEditingIPv4Address] = useState('')
   const [savingIPv4, setSavingIPv4] = useState(false)
-  const [ipv4Draft, setIPv4Draft] = useState<PublicIPv4Info[]>([])
+  const [ipv4Draft, setIPv4Draft] = useState<(PublicIPv4Info & { _id: number })[]>([])
+  const nextDraftId = useRef(0)
   const [nat4Page, setNat4Page] = useState(1)
   const [ipv6Page, setIPv6Page] = useState(1)
   const [nat4Search, setNat4Search] = useState('')
@@ -54,7 +55,7 @@ export default function Routing() {
 
   useEffect(() => {
     if (!editingIPv4) {
-      setIPv4Draft(publicIPv4s.map((ip) => ({ ...ip })))
+      setIPv4Draft(publicIPv4s.map((ip) => ({ ...ip, _id: nextDraftId.current++ })))
     }
   }, [editingIPv4, publicIPv4s])
 
@@ -65,14 +66,14 @@ export default function Routing() {
   }, [ipv4Assignments])
 
   const startEditIPv4 = () => {
-    setIPv4Draft(publicIPv4s.map((ip) => ({ ...ip })))
+    setIPv4Draft(publicIPv4s.map((ip) => ({ ...ip, _id: nextDraftId.current++ })))
     setIPv4EditMode('pool')
     setEditingIPv4Address('')
     setEditingIPv4(true)
   }
 
   const startEditIPv4Address = (ip: PublicIPv4Info) => {
-    setIPv4Draft([{ ...ip }])
+    setIPv4Draft([{ ...ip, _id: nextDraftId.current++ }])
     setIPv4EditMode('address')
     setEditingIPv4Address(ip.address)
     setEditingIPv4(true)
@@ -82,13 +83,14 @@ export default function Routing() {
     setEditingIPv4(false)
     setIPv4EditMode('pool')
     setEditingIPv4Address('')
-    setIPv4Draft(publicIPv4s.map((ip) => ({ ...ip })))
+    setIPv4Draft([])
   }
 
   const addIPv4Row = () => {
     setIPv4Draft((items) => [
       ...items,
       {
+        _id: nextDraftId.current++,
         address: '',
         interface: defaultIPv4Interface,
         prefix: '',
@@ -108,7 +110,7 @@ export default function Routing() {
     setSavingIPv4(true)
     try {
       const draftItems = ipv4Draft
-        .map((item) => ({
+        .map(({ _id, ...item }) => ({
           ...item,
           address: (item.address || '').trim(),
           interface: (item.interface || defaultIPv4Interface).trim(),
@@ -187,9 +189,9 @@ export default function Routing() {
       </div>
 
       <div className="grid gap-4 md:grid-cols-3">
-        <CapacityCard title={text.nat4Ports} icon={<Network className="h-5 w-5" />} remaining={routing?.nat4.remaining || '0'} total={routing?.nat4.total || '0'} used={routing?.nat4.used || 0} label={text.remainingTotal} usedLabel={text.used} />
-        <CapacityCard title={text.publicIPv4} icon={<Globe2 className="h-5 w-5" />} remaining={routing?.ipv4.remaining || '0'} total={routing?.ipv4.total || '0'} used={routing?.ipv4.used || 0} label={formatPoolCount(publicIPv4s.length, language)} usedLabel={text.used} />
-        <CapacityCard title="IPv6" icon={<Router className="h-5 w-5" />} remaining={formatCapacity(routing?.ipv6.remaining || '0', language)} total={formatCapacity(routing?.ipv6.total || '0', language)} used={routing?.ipv6.used || 0} label={formatDetectedPrefixCount(ipv6Prefixes.length, language)} usedLabel={text.used} />
+        <CapacityCard title={text.nat4Ports} watermark="NAT4" remaining={routing?.nat4.remaining || '0'} total={routing?.nat4.total || '0'} used={routing?.nat4.used || 0} label={text.remainingTotal} usedLabel={text.used} />
+        <CapacityCard title={text.publicIPv4} watermark="IPv4" remaining={routing?.ipv4.remaining || '0'} total={routing?.ipv4.total || '0'} used={routing?.ipv4.used || 0} label={formatPoolCount(publicIPv4s.length, language)} usedLabel={text.used} />
+        <CapacityCard title="IPv6" watermark="IPv6" remaining={formatCapacity(routing?.ipv6.remaining || '0', language)} total={formatCapacity(routing?.ipv6.total || '0', language)} used={routing?.ipv6.used || 0} label={formatDetectedPrefixCount(ipv6Prefixes.length, language)} usedLabel={text.used} />
       </div>
 
       <Panel
@@ -285,7 +287,7 @@ export default function Routing() {
                 </thead>
                 <tbody className="divide-y divide-gray-100">
                   {ipv4Draft.map((item, index) => (
-                    <tr key={`${item.address}-${index}`}>
+                    <tr key={item._id}>
                       <td className="px-3 py-2"><input value={item.address || ''} onChange={(e) => updateIPv4Draft(index, { address: e.target.value })} placeholder={text.ipv4CIDR} className={smallInputClass} /></td>
                       <td className="px-3 py-2"><input value={item.gateway || ''} onChange={(e) => updateIPv4Draft(index, { gateway: e.target.value })} placeholder={defaultIPv4Gateway || text.gateway} className={smallInputClass} /></td>
                       <td className="px-3 py-2"><input value={item.interface || ''} onChange={(e) => updateIPv4Draft(index, { interface: e.target.value })} placeholder={defaultIPv4Interface} className={smallInputClass} /></td>
@@ -525,9 +527,9 @@ function Pagination({ page, totalPages, totalItems, pageSize, onPageChange, lang
   )
 }
 
-function CapacityCard({ title, icon, remaining, total, used, label, usedLabel }: {
+function CapacityCard({ title, watermark, remaining, total, used, label, usedLabel }: {
   title: string
-  icon: ReactNode
+  watermark: string
   remaining: string
   total: string
   used: number
@@ -535,8 +537,11 @@ function CapacityCard({ title, icon, remaining, total, used, label, usedLabel }:
   usedLabel: string
 }) {
   return (
-    <div className="rounded-lg border border-gray-200 bg-white p-4">
-      <div className="flex items-center justify-between gap-3">
+    <div className="relative overflow-hidden rounded-lg border border-gray-200 bg-white p-4">
+      <div className="pointer-events-none absolute bottom-1 right-3 select-none bg-gradient-to-br from-black via-gray-600 to-gray-300 bg-clip-text text-[44px] font-black italic tracking-wide text-transparent opacity-25 -skew-x-12">
+        {watermark}
+      </div>
+      <div className="relative z-10">
         <div>
           <div className="text-sm font-medium text-gray-700">{title}</div>
           <div className="mt-2 flex items-end gap-2">
@@ -544,10 +549,9 @@ function CapacityCard({ title, icon, remaining, total, used, label, usedLabel }:
             <span className="pb-1 text-sm text-gray-400">/ {total}</span>
           </div>
         </div>
-        <div className="flex h-10 w-10 items-center justify-center rounded-md bg-gray-100 text-gray-700">{icon}</div>
       </div>
-      <div className="mt-3 text-xs text-gray-500">{label}</div>
-      <div className="mt-1 text-xs text-gray-400">{usedLabel} {used}</div>
+      <div className="relative z-10 mt-3 text-xs text-gray-500">{label}</div>
+      <div className="relative z-10 mt-1 text-xs text-gray-400">{usedLabel} {used}</div>
     </div>
   )
 }

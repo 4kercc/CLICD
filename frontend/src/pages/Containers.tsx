@@ -390,6 +390,7 @@ export default function Containers() {
               <tbody className="divide-y divide-gray-100">
                 {pageContainers.map((container) => {
                   const isRunning = container.status === 'running'
+                  const isInitializing = container.status === 'initializing'
                   const task = (container.id > 0 ? taskStatusMap[container.id] : taskNameMap[container.name]) || container.createTask
                   const isPlaceholder = !!container.isPlaceholder
                   const isPolicyBlocked = !!container.policy_blocked
@@ -437,7 +438,7 @@ export default function Containers() {
                         </button>
                       </td>
                       <td className="px-2.5 py-2 align-top">
-                        <StatusBadge running={isRunning} task={task} placeholder={isPlaceholder} policyBlocked={isPolicyBlocked} />
+                        <StatusBadge running={isRunning} initializing={isInitializing} task={task} placeholder={isPlaceholder} policyBlocked={isPolicyBlocked} />
                       </td>
                       <td className="px-2.5 py-2 align-top text-xs text-gray-600 whitespace-nowrap">
                         <span className="inline-flex items-center gap-1">
@@ -483,7 +484,7 @@ export default function Containers() {
                                 try {
                                   const { default: api } = await import('../services/api')
                                   await api.delete(`/tasks/${task.id}`)
-                                  fetchData()
+                                  await Promise.all([fetchData(), fetchTasks()])
                                 } catch { /* ignore */ }
                               }}
                               className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-red-200 text-[11px] text-red-600 hover:bg-red-50 transition-colors whitespace-nowrap"
@@ -581,7 +582,7 @@ type DisplayContainer = Container & {
   createTask?: Task
 }
 
-function StatusBadge({ running, task, placeholder, policyBlocked }: { running: boolean; task?: Task; placeholder?: boolean; policyBlocked?: boolean }) {
+function StatusBadge({ running, initializing, task, placeholder, policyBlocked }: { running: boolean; initializing?: boolean; task?: Task; placeholder?: boolean; policyBlocked?: boolean }) {
   const baseClass = "inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium whitespace-nowrap"
   if (policyBlocked) {
     return (
@@ -636,6 +637,15 @@ function StatusBadge({ running, task, placeholder, policyBlocked }: { running: b
       <span className={`${baseClass} bg-amber-50 text-amber-700`}>
         <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"></span>
         {taskLabels[task.type] || '处理中'}
+      </span>
+    )
+  }
+
+  if (initializing) {
+    return (
+      <span className={`${baseClass} bg-amber-50 text-amber-700`}>
+        <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"></span>
+        正在初始化
       </span>
     )
   }
@@ -714,6 +724,8 @@ function toPlaceholder(cfg: CreateContainerRequest): DisplayContainer {
     ssh_password: '',
     port_mappings: [],
     port_mapping_limit: cfg.assign_nat === false ? 0 : (cfg.port_mapping_count || 0),
+    firewall_enabled: false,
+    firewall_rules: [],
     snapshot_limit: cfg.snapshot_limit || 3,
     created_at: '',
     expires_at: cfg.expires_at,

@@ -66,7 +66,7 @@ export default function Login() {
                 <AppIcon className="w-10 h-10" />
               </div>
               <h1 className="text-2xl font-bold text-gray-950">CLICD</h1>
-              <p className="text-gray-500 mt-1 text-sm">{isAccessCodeLogin ? '容器管理登录' : 'LXC Container Manager'}</p>
+              <p className="text-gray-500 mt-1 text-sm">{isAccessCodeLogin ? '容器管理登录' : 'Container Manager'}</p>
             </div>
 
             <form onSubmit={handleSubmit} className="space-y-5">
@@ -128,7 +128,7 @@ export default function Login() {
           </form>
         </div>
 
-        <p className="text-center text-xs text-gray-400 mt-6">CLICD v1.1.12</p>
+        <p className="text-center text-xs text-gray-400 mt-6">CLICD v1.1.17</p>
       </div>
     </div>
   )

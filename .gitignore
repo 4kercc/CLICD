@@ -13,6 +13,7 @@ backend/internal/server/web/*
 
 # Build artifacts
 /build/
+Mofang/*.zip
 *.exe
 *.dll
 *.so

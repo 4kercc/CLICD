@@ -90,7 +90,7 @@ func hasScope(r *http.Request, scope string) bool {
 
 func subUserScopeAllowed(scope string) bool {
 	switch scope {
-	case "container:read", "container:power", "container:reinstall", "container:network",
+	case "container:read", "container:power", "container:reinstall", "container:password", "container:network",
 		"dashboard:read", "image:read", "task:read", "snapshot:read", "snapshot:create", "snapshot:delete", "snapshot:restore", "snapshot:schedule",
 		"terminal:ssh", "terminal:vnc":
 		return true
