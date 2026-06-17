@@ -454,7 +454,7 @@ func (m *Manager) defineContainer(id int, vmName string, cfg lxc.ContainerConfig
 		}
 		winAdminPassword = generateWindowsPassword()
 		unattendPath := filepath.Join(m.instanceDir(vmName), "unattend.iso")
-		if err := createWindowsUnattendISO(unattendPath, cfg.Name, winAdminPassword, ipv6List, ipv4List); err != nil {
+		if err := createWindowsUnattendISO(unattendPath, cfg.Name, winAdminPassword, mac, ipv6List, ipv4List); err != nil {
 			return nil, err
 		}
 		xml = windowsDomainXML(vmName, int(cfg.VCPU), cfg.RAMMB, diskPath, ImagePath(image.ID), unattendPath, mac, cfg.IOReadMBps, cfg.IOWriteMBps, cfg.NetworkDownMbps, cfg.NetworkUpMbps)
@@ -1680,7 +1680,7 @@ func createEmptyDisk(target string, diskGB int) error {
 	return nil
 }
 
-func createWindowsUnattendISO(target, hostname, adminPassword string, ipv6s []string, ipv4s []string) error {
+func createWindowsUnattendISO(target, hostname, adminPassword, mac string, ipv6s []string, ipv4s []string) error {
 	tool := firstAvailableCommand("genisoimage", "mkisofs", "xorriso")
 	if tool == "" {
 		return fmt.Errorf("one of genisoimage, mkisofs, xorriso is required for Windows unattended setup")
@@ -1706,13 +1706,13 @@ func createWindowsUnattendISO(target, hostname, adminPassword string, ipv6s []st
 	if err := os.WriteFile(filepath.Join(setupScriptsDir, "SetupComplete.cmd"), []byte(windowsSetupCompleteCMD()), 0600); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(clicdDir, "FirstLogon.ps1"), []byte(windowsFirstLogonPowerShell(adminPassword, ipv6s, ipv4s)), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(clicdDir, "FirstLogon.ps1"), []byte(windowsFirstLogonPowerShell(adminPassword, mac, ipv6s, ipv4s)), 0600); err != nil {
 		return err
 	}
 	if err := os.WriteFile(filepath.Join(dir, "SetupComplete.cmd"), []byte(windowsSetupCompleteCMD()), 0600); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(dir, "FirstLogon.ps1"), []byte(windowsFirstLogonPowerShell(adminPassword, ipv6s, ipv4s)), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "FirstLogon.ps1"), []byte(windowsFirstLogonPowerShell(adminPassword, mac, ipv6s, ipv4s)), 0600); err != nil {
 		return err
 	}
 	_ = os.Remove(target)
@@ -1822,7 +1822,7 @@ exit /b 0
 `
 }
 
-func windowsFirstLogonPowerShell(adminPassword string, ipv6s []string, ipv4s []string) string {
+func windowsFirstLogonPowerShell(adminPassword, mac string, ipv6s []string, ipv4s []string) string {
 	commands := []string{
 		"$ErrorActionPreference='Continue'",
 		"$ProgressPreference='SilentlyContinue'",
@@ -1832,9 +1832,9 @@ func windowsFirstLogonPowerShell(adminPassword string, ipv6s []string, ipv4s []s
 		"net user Administrator " + shellQuoteWindows(adminPassword) + " /active:yes",
 		"Set-LocalUser -Name 'Administrator' -PasswordNeverExpires $true -ErrorAction SilentlyContinue",
 		"Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope LocalMachine -Force",
-		"$iface=$null",
-		"for ($i=0; $i -lt 60 -and -not $iface; $i++) { $iface=Get-NetAdapter | Where-Object { $_.Status -eq 'Up' -and $_.HardwareInterface } | Sort-Object ifIndex | Select-Object -First 1; if (-not $iface) { Start-Sleep -Seconds 5 } }",
-		"$iface=Get-NetAdapter | Where-Object { $_.Status -eq 'Up' -and $_.HardwareInterface } | Sort-Object ifIndex | Select-Object -First 1",
+		windowsAdapterDiscoveryPowerShell(mac),
+		"$iface=Wait-ClicdNetworkAdapter",
+		"if ($iface) { Enable-NetAdapter -Name $iface.Name -Confirm:$false -ErrorAction SilentlyContinue; Start-Sleep -Seconds 2; $iface=Get-ClicdNetworkAdapter }",
 		"if ($iface) { Set-NetIPInterface -InterfaceIndex $iface.ifIndex -AddressFamily IPv4 -Dhcp Enabled -ErrorAction SilentlyContinue }",
 		"if ($iface) { Set-DnsClientServerAddress -InterfaceIndex $iface.ifIndex -ResetServerAddresses -ErrorAction SilentlyContinue }",
 		"Get-NetConnectionProfile | Set-NetConnectionProfile -NetworkCategory Private -ErrorAction SilentlyContinue",
@@ -1852,17 +1852,23 @@ func windowsFirstLogonPowerShell(adminPassword string, ipv6s []string, ipv4s []s
 		"Get-Service QEMU-GA,qemu-ga -ErrorAction SilentlyContinue | Set-Service -StartupType Automatic",
 		"Start-Service QEMU-GA,qemu-ga -ErrorAction SilentlyContinue",
 	}
+	networkCommands := []string{}
 	ipv6s = normalizeKVMIPv6List(ipv6s)
 	if len(ipv6s) > 0 {
-		commands = append(commands,
-			windowsIPv6PowerShell(ipv6s),
-		)
+		networkCommands = append(networkCommands, windowsIPv6PowerShell(ipv6s, mac))
 	}
 	ipv4s = normalizeKVMIPv4List(ipv4s)
 	if len(ipv4s) > 0 {
-		commands = append(commands,
-			windowsIPv4PowerShell(ipv4s),
-		)
+		networkCommands = append(networkCommands, windowsIPv4PowerShell(ipv4s, mac))
+	}
+	if len(networkCommands) > 0 {
+		networkScript := strings.Join(append([]string{
+			"$ErrorActionPreference='Continue'",
+			"$ProgressPreference='SilentlyContinue'",
+			"New-Item -ItemType Directory -Force -Path 'C:\\CLICD' | Out-Null",
+		}, networkCommands...), "\r\n") + "\r\n"
+		commands = append(commands, windowsPersistentNetworkTaskPowerShell(networkScript))
+		commands = append(commands, networkCommands...)
 	}
 	commands = append(commands,
 		"New-Item -ItemType File -Force -Path 'C:\\CLICD\\init.done' | Out-Null",
@@ -1871,18 +1877,58 @@ func windowsFirstLogonPowerShell(adminPassword string, ipv6s []string, ipv4s []s
 	return strings.Join(commands, "\r\n") + "\r\n"
 }
 
-func windowsIPv6PowerShell(ipv6s []string) string {
+func windowsPersistentNetworkTaskPowerShell(script string) string {
+	return strings.Join([]string{
+		"$clicdNetworkScript=@'",
+		strings.TrimRight(script, "\r\n"),
+		"'@",
+		"Set-Content -Path 'C:\\CLICD\\ApplyNetwork.ps1' -Value $clicdNetworkScript -Encoding UTF8",
+		"$clicdNetworkAction=New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -ExecutionPolicy Bypass -File C:\\CLICD\\ApplyNetwork.ps1'",
+		"$clicdNetworkTrigger=New-ScheduledTaskTrigger -AtStartup",
+		"Register-ScheduledTask -TaskName 'CLICD Network Init' -Action $clicdNetworkAction -Trigger $clicdNetworkTrigger -RunLevel Highest -Force -ErrorAction SilentlyContinue | Out-Null",
+	}, "\r\n")
+}
+
+func windowsAdapterDiscoveryPowerShell(mac string) string {
+	targetMAC := strings.ToUpper(strings.NewReplacer(":", "", "-", "", " ", "").Replace(strings.TrimSpace(mac)))
+	return strings.Join([]string{
+		"$clicdTargetMac=" + powerShellSingleQuote(targetMAC),
+		"function Get-ClicdNetworkAdapter {",
+		"  $adapters=@(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -ne 'Disabled' })",
+		"  if ($clicdTargetMac) {",
+		"    $matched=$adapters | Where-Object { (($_.MacAddress -replace '[-:]','').ToUpperInvariant()) -eq $clicdTargetMac } | Sort-Object ifIndex | Select-Object -First 1",
+		"    if ($matched) { return $matched }",
+		"  }",
+		"  $up=$adapters | Where-Object { $_.Status -eq 'Up' } | Sort-Object ifIndex | Select-Object -First 1",
+		"  if ($up) { return $up }",
+		"  return $adapters | Sort-Object ifIndex | Select-Object -First 1",
+		"}",
+		"function Wait-ClicdNetworkAdapter {",
+		"  param([int]$Retries=90,[int]$DelaySeconds=4)",
+		"  for ($i=0; $i -lt $Retries; $i++) {",
+		"    $adapter=Get-ClicdNetworkAdapter",
+		"    if ($adapter) { return $adapter }",
+		"    Start-Sleep -Seconds $DelaySeconds",
+		"  }",
+		"  return $null",
+		"}",
+	}, "\r\n")
+}
+
+func windowsIPv6PowerShell(ipv6s []string, mac string) string {
 	ipv6s = normalizeKVMIPv6List(ipv6s)
 	if len(ipv6s) == 0 {
 		return ""
 	}
 	quoted := make([]string, 0, len(ipv6s))
 	for _, ipv6 := range ipv6s {
-		quoted = append(quoted, "'"+strings.ReplaceAll(ipv6, "'", "''")+"'")
+		quoted = append(quoted, powerShellSingleQuote(ipv6))
 	}
 	return strings.Join([]string{
+		windowsAdapterDiscoveryPowerShell(mac),
+		"if (-not $iface) { $iface=Wait-ClicdNetworkAdapter }",
+		"if ($iface) { Enable-NetAdapter -Name $iface.Name -Confirm:$false -ErrorAction SilentlyContinue; Start-Sleep -Seconds 2; $iface=Get-ClicdNetworkAdapter }",
 		"$clicdIPv6=@(" + strings.Join(quoted, ",") + ")",
-		// Reuse $iface already found by the main script
 		"if ($iface) {",
 		"  foreach ($ip in $clicdIPv6) {",
 		"    Get-NetIPAddress -InterfaceIndex $iface.ifIndex -AddressFamily IPv6 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -eq $ip } | Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue",
@@ -1895,18 +1941,20 @@ func windowsIPv6PowerShell(ipv6s []string) string {
 	}, "\r\n")
 }
 
-func windowsIPv4PowerShell(ipv4s []string) string {
+func windowsIPv4PowerShell(ipv4s []string, mac string) string {
 	ipv4s = normalizeKVMIPv4List(ipv4s)
 	if len(ipv4s) == 0 {
 		return ""
 	}
 	quoted := make([]string, 0, len(ipv4s))
 	for _, ipv4 := range ipv4s {
-		quoted = append(quoted, "'"+strings.ReplaceAll(ipv4, "'", "''")+"'")
+		quoted = append(quoted, powerShellSingleQuote(ipv4))
 	}
 	return strings.Join([]string{
+		windowsAdapterDiscoveryPowerShell(mac),
+		"if (-not $iface) { $iface=Wait-ClicdNetworkAdapter }",
+		"if ($iface) { Enable-NetAdapter -Name $iface.Name -Confirm:$false -ErrorAction SilentlyContinue; Start-Sleep -Seconds 2; $iface=Get-ClicdNetworkAdapter }",
 		"$clicdIPv4=@(" + strings.Join(quoted, ",") + ")",
-		// Reuse $iface already found by the main script
 		"if ($iface) {",
 		"  foreach ($ip in $clicdIPv4) {",
 		"    Get-NetIPAddress -InterfaceIndex $iface.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -eq $ip } | Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue",
@@ -1928,6 +1976,10 @@ func normalizeKVMIPv4List(values []string) []string {
 		result = append(result, value)
 	}
 	return result
+}
+
+func powerShellSingleQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
 
 func shellQuoteWindows(value string) string {
@@ -3488,13 +3540,14 @@ func (m *Manager) applyGuestIPv6(c *config.Container) error {
 }
 
 func (m *Manager) applyWindowsGuestIPv6(c *config.Container) error {
-	if c == nil || c.IPv6 == "" {
+	if c == nil || (c.IPv6 == "" && len(c.IPv6Addresses) == 0) {
 		return nil
 	}
 	if err := qemuGuestPing(c.VirshName()); err != nil {
 		return err
 	}
-	script := windowsIPv6PowerShell(c.IPv6AddressStrings())
+	c.NormalizeNetworkAssignments()
+	script := windowsIPv6PowerShell(c.IPv6AddressStrings(), c.MACAddress)
 	return qemuGuestExecCommand(c.VirshName(), "powershell.exe", []string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script}, 60*time.Second)
 }
 
