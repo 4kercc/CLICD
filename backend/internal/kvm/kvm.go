@@ -487,7 +487,10 @@ func (m *Manager) defineContainer(id int, vmName string, cfg lxc.ContainerConfig
 	sshPort := 0
 	portMappings := []config.PortMapping{}
 	if allocatePorts && cfg.WantsNAT() {
-		sshPort = config.AllocateSSHPort()
+		sshPort, err = config.AllocateSSHPort()
+		if err != nil {
+			return nil, err
+		}
 		if IsWindowsImage(image.ID) {
 			// Windows: RDP (3389) instead of SSH (22)
 			portMappings = []config.PortMapping{{
@@ -2406,7 +2409,11 @@ func normalizeKVMManagementPortMapping(c *config.Container) {
 	}
 	hostPort := c.SSHPort
 	if hostPort <= 0 {
-		hostPort = config.AllocateSSHPort()
+		allocated, err := config.AllocateSSHPort()
+		if err != nil {
+			return
+		}
+		hostPort = allocated
 		c.SSHPort = hostPort
 	}
 	desiredPort := 22
@@ -3908,7 +3915,8 @@ func allocateDefaultEqualPorts(c *config.Container, count int) []int {
 		}
 	}
 	ports := make([]int, 0, count)
-	for next := 20000; next <= 65535 && len(ports) < count; next++ {
+	start, end := config.NATPortRange()
+	for next := start; next <= end && len(ports) < count; next++ {
 		if !used[next] {
 			ports = append(ports, next)
 		}

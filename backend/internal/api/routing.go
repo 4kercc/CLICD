@@ -17,6 +17,11 @@ type routeCapacity struct {
 	Total     string `json:"total"`
 }
 
+type nat4PortRange struct {
+	Start int `json:"start"`
+	End   int `json:"end"`
+}
+
 type nat4Route struct {
 	ContainerID   int    `json:"container_id"`
 	ContainerName string `json:"container_name"`
@@ -53,6 +58,7 @@ type ipv6Route struct {
 
 type routingResponse struct {
 	NAT4                routeCapacity        `json:"nat4"`
+	NAT4PortRange       nat4PortRange        `json:"nat4_port_range"`
 	IPv4                routeCapacity        `json:"ipv4"`
 	IPv6                routeCapacity        `json:"ipv6"`
 	HostPublicIPv4      lxc.PublicIPInfo     `json:"host_public_ipv4"`
@@ -64,9 +70,10 @@ type routingResponse struct {
 }
 
 type routingPoolsRequest struct {
-	Addresses    *[]string                      `json:"addresses"`
-	Items        *[]config.PublicIPv4Assignment `json:"items"`
-	IPv6Prefixes *[]config.PublicIPv6Prefix     `json:"ipv6_prefixes"`
+	Addresses     *[]string                      `json:"addresses"`
+	Items         *[]config.PublicIPv4Assignment `json:"items"`
+	IPv6Prefixes  *[]config.PublicIPv6Prefix     `json:"ipv6_prefixes"`
+	NAT4PortRange *nat4PortRange                 `json:"nat4_port_range"`
 }
 
 type publicIPv4ScanRequest struct {
@@ -120,13 +127,12 @@ func handleRoutingGet(w http.ResponseWriter, r *http.Request) {
 	ipv4Assignments := make([]ipv4Route, 0)
 	ipv6Assignments := make([]ipv6Route, 0)
 
-	const nat4StartPort = 20000
-	const nat4EndPort = 65535
+	nat4StartPort, nat4EndPort := config.NATPortRange()
 
 	for i := range config.AppConfig.Containers {
 		c := &config.AppConfig.Containers[i]
 		for _, pm := range c.PortMappings {
-			if pm.HostPort >= nat4StartPort && pm.HostPort <= nat4EndPort {
+			if config.NATPortInRange(pm.HostPort) {
 				usedPorts[pm.HostPort] = true
 			}
 			nat4Mappings = append(nat4Mappings, nat4Route{
@@ -189,7 +195,7 @@ func handleRoutingGet(w http.ResponseWriter, r *http.Request) {
 		return ipv6Assignments[i].Address < ipv6Assignments[j].Address
 	})
 
-	const totalNAT4Ports = nat4EndPort - nat4StartPort + 1
+	totalNAT4Ports := config.NATPortCapacity()
 	nat4Used := len(usedPorts)
 	nat4Remaining := totalNAT4Ports - nat4Used
 	if nat4Remaining < 0 {
@@ -215,6 +221,10 @@ func handleRoutingGet(w http.ResponseWriter, r *http.Request) {
 				Used:      nat4Used,
 				Remaining: strconv.Itoa(nat4Remaining),
 				Total:     strconv.Itoa(totalNAT4Ports),
+			},
+			NAT4PortRange: nat4PortRange{
+				Start: nat4StartPort,
+				End:   nat4EndPort,
 			},
 			IPv4: routeCapacity{
 				Used:      ipv4Used,
@@ -244,6 +254,19 @@ func handleRoutingPoolsUpdate(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Invalid request body"})
 		return
+	}
+
+	if req.NAT4PortRange != nil {
+		start, end, err := config.NormalizeNATPortRange(req.NAT4PortRange.Start, req.NAT4PortRange.End)
+		if err != nil {
+			jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: err.Error()})
+			return
+		}
+		config.AppConfig.NATPortStart = start
+		config.AppConfig.NATPortEnd = end
+		if config.AppConfig.NextSSHPort < start || config.AppConfig.NextSSHPort > end {
+			config.AppConfig.NextSSHPort = start
+		}
 	}
 
 	if req.Items != nil || req.Addresses != nil {

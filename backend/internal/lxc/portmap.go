@@ -395,6 +395,10 @@ func normalizePortMapping(c *config.Container, skipIndex int, pm config.PortMapp
 	if pm.HostPort <= 0 {
 		pm.HostPort = pm.ContainerPort
 	}
+	if pm.HostIP == "" && !config.NATPortInRange(pm.HostPort) {
+		start, end := config.NATPortRange()
+		return pm, fmt.Errorf("host port must be within configured NAT4 range %d-%d", start, end)
+	}
 	// Check current container's own mappings
 	for i, existing := range c.PortMappings {
 		if i == skipIndex {
@@ -444,15 +448,11 @@ func allocateDefaultEqualPorts(c *config.Container, count int) []int {
 		}
 	}
 	ports := make([]int, 0, count)
-	next := 20000
-	for len(ports) < count {
+	start, end := config.NATPortRange()
+	for next := start; next <= end && len(ports) < count; next++ {
 		hostIP := c.PrimaryPublicIPv4()
 		if !used[hostPortKey(hostIP, next)] && !used[next] {
 			ports = append(ports, next)
-		}
-		next++
-		if next > 65535 || len(ports) >= count {
-			break
 		}
 	}
 	return ports

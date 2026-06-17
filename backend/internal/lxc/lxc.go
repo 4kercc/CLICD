@@ -381,7 +381,11 @@ func (m *Manager) CreateContainer(cfg ContainerConfig) error {
 	sshPort := 0
 	portMappings := []config.PortMapping{}
 	if cfg.WantsNAT() {
-		sshPort = config.AllocateSSHPort()
+		sshPort, err = config.AllocateSSHPort()
+		if err != nil {
+			_ = m.cleanupContainerStorage(lxcName)
+			return err
+		}
 
 		// Setup default port mappings (SSH only)
 		portMappings = SetupDefaultPortMappings(sshPort)

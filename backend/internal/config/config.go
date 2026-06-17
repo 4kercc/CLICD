@@ -372,6 +372,8 @@ type ClicdConfig struct {
 	NextContainerID      int                    `json:"next_container_id"`
 	NextVNCPort          int                    `json:"next_vnc_port"`
 	NextSSHPort          int                    `json:"next_ssh_port"`
+	NATPortStart         int                    `json:"nat_port_start"`
+	NATPortEnd           int                    `json:"nat_port_end"`
 	SetupComplete        bool                   `json:"setup_complete"`
 	SubUsers             []SubUser              `json:"sub_users"`
 	ApiKeys              []ApiKeyConfig         `json:"api_keys"`
@@ -393,6 +395,11 @@ var configPath string
 var AppConfig *ClicdConfig
 
 const DefaultSnapshotLimit = 3
+
+const (
+	DefaultNATPortStart = 20000
+	DefaultNATPortEnd   = 65535
+)
 
 func getConfigPath() string {
 	if configPath != "" {
@@ -509,6 +516,8 @@ func InitConfig() (*ClicdConfig, error) {
 		NextContainerID:      1,
 		NextVNCPort:          5900,
 		NextSSHPort:          22000,
+		NATPortStart:         DefaultNATPortStart,
+		NATPortEnd:           DefaultNATPortEnd,
 		SetupComplete:        false,
 		SubUsers:             []SubUser{},
 		AuditLogs:            []AuditLog{},
@@ -550,6 +559,9 @@ func normalizeConfigDefaults(dataDir string) bool {
 	}
 	if AppConfig.NextSSHPort == 0 {
 		AppConfig.NextSSHPort = 22000
+		changed = true
+	}
+	if normalizeNATPortRangeDefaults() {
 		changed = true
 	}
 	if AppConfig.NextContainerID == 0 {
@@ -1168,16 +1180,102 @@ func UpdateVNC(containers []Container) {
 	SaveConfig()
 }
 
-// AllocateSSHPort allocates a new SSH port, skipping ports already used by any container
-func AllocateSSHPort() int {
-	used := collectAllHostPorts()
-	port := AppConfig.NextSSHPort
-	for used[port] {
-		port++
+func NormalizeNATPortRange(start, end int) (int, int, error) {
+	if start == 0 && end == 0 {
+		return DefaultNATPortStart, DefaultNATPortEnd, nil
 	}
-	AppConfig.NextSSHPort = port + 1
-	SaveConfig()
-	return port
+	if start == 0 {
+		start = DefaultNATPortStart
+	}
+	if end == 0 {
+		end = DefaultNATPortEnd
+	}
+	if start < 1 || start > 65535 {
+		return 0, 0, fmt.Errorf("NAT port start must be 1-65535")
+	}
+	if end < 1 || end > 65535 {
+		return 0, 0, fmt.Errorf("NAT port end must be 1-65535")
+	}
+	if start > end {
+		return 0, 0, fmt.Errorf("NAT port start cannot be greater than end")
+	}
+	return start, end, nil
+}
+
+func NATPortRange() (int, int) {
+	if AppConfig == nil {
+		return DefaultNATPortStart, DefaultNATPortEnd
+	}
+	start, end, err := NormalizeNATPortRange(AppConfig.NATPortStart, AppConfig.NATPortEnd)
+	if err != nil {
+		return DefaultNATPortStart, DefaultNATPortEnd
+	}
+	return start, end
+}
+
+func NATPortCapacity() int {
+	start, end := NATPortRange()
+	return end - start + 1
+}
+
+func NATPortInRange(port int) bool {
+	start, end := NATPortRange()
+	return port >= start && port <= end
+}
+
+func SetNATPortRange(start, end int) error {
+	start, end, err := NormalizeNATPortRange(start, end)
+	if err != nil {
+		return err
+	}
+	AppConfig.NATPortStart = start
+	AppConfig.NATPortEnd = end
+	if AppConfig.NextSSHPort < start || AppConfig.NextSSHPort > end {
+		AppConfig.NextSSHPort = start
+	}
+	return SaveConfig()
+}
+
+func normalizeNATPortRangeDefaults() bool {
+	if AppConfig == nil {
+		return false
+	}
+	start, end, err := NormalizeNATPortRange(AppConfig.NATPortStart, AppConfig.NATPortEnd)
+	if err != nil {
+		start, end = DefaultNATPortStart, DefaultNATPortEnd
+	}
+	changed := AppConfig.NATPortStart != start || AppConfig.NATPortEnd != end
+	AppConfig.NATPortStart = start
+	AppConfig.NATPortEnd = end
+	if AppConfig.NextSSHPort < start || AppConfig.NextSSHPort > end {
+		AppConfig.NextSSHPort = start
+		changed = true
+	}
+	return changed
+}
+
+// AllocateSSHPort allocates a new SSH port, skipping ports already used by any container
+func AllocateSSHPort() (int, error) {
+	used := collectAllHostPorts()
+	start, end := NATPortRange()
+	port := AppConfig.NextSSHPort
+	if port < start || port > end {
+		port = start
+	}
+	capacity := end - start + 1
+	for i := 0; i < capacity; i++ {
+		candidate := start + ((port - start + i) % capacity)
+		if used[candidate] {
+			continue
+		}
+		AppConfig.NextSSHPort = candidate + 1
+		if AppConfig.NextSSHPort > end {
+			AppConfig.NextSSHPort = start
+		}
+		SaveConfig()
+		return candidate, nil
+	}
+	return 0, fmt.Errorf("no free NAT4 host port in configured range %d-%d", start, end)
 }
 
 // collectAllHostPorts collects all host ports used by any container (LXC + KVM)
