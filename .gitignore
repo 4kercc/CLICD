@@ -68,3 +68,4 @@ linux.txt
 push-release.ps1
 deploy.ps1
 backend/clicd
+api.md

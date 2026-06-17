@@ -110,6 +110,13 @@ export default defineConfig({
   head: [
     ['link', { rel: 'icon', href: '/favicon.svg' }],
   ],
+  vite: {
+    esbuild: {
+      supported: {
+        destructuring: true,
+      },
+    },
+  },
   locales: {
     root: {
       label: '简体中文',
