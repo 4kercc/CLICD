@@ -13,8 +13,12 @@ type HostMetricPoint = {
   ts: number
   cpu: number
   memory: number
-  network: number
-  diskIO: number
+  network?: number
+  networkRx?: number
+  networkTx?: number
+  diskIO?: number
+  diskRead?: number
+  diskWrite?: number
 }
 
 const hostHistoryKey = 'clicd_host_metric_history_v2'
@@ -58,6 +62,10 @@ export default function Dashboard() {
 
   const filtered = filterHistory(history, range)
   const memoryPct = host && host.ram.total_mb > 0 ? (host.ram.used_mb / host.ram.total_mb) * 100 : 0
+  const networkRxBps = host?.network.rx_bps || 0
+  const networkTxBps = host?.network.tx_bps || 0
+  const diskReadBps = host?.disk_io.read_bps || 0
+  const diskWriteBps = host?.disk_io.write_bps || 0
   const networkBps = (host?.network.rx_bps || 0) + (host?.network.tx_bps || 0)
   const diskIOBps = (host?.disk_io.read_bps || 0) + (host?.disk_io.write_bps || 0)
 
@@ -85,16 +93,24 @@ export default function Dashboard() {
       icon: <Network className="w-5 h-5" />,
       current: networkBps,
       points: toChartPoints(filtered, 'network'),
+      series: [
+        { label: '入', points: toChartPoints(filtered, 'networkRx'), current: networkRxBps, color: '#2563eb' },
+        { label: '出', points: toChartPoints(filtered, 'networkTx'), current: networkTxBps, color: '#16a34a' },
+      ],
       formatValue: formatRate,
-      detail: `入 ${formatRate(host?.network.rx_bps || 0)} / 出 ${formatRate(host?.network.tx_bps || 0)}`,
+      detail: `入 ${formatRate(networkRxBps)} / 出 ${formatRate(networkTxBps)}`,
     },
     {
       title: '磁盘IO',
       icon: <HardDrive className="w-5 h-5" />,
       current: diskIOBps,
       points: toChartPoints(filtered, 'diskIO'),
+      series: [
+        { label: '读', points: toChartPoints(filtered, 'diskRead'), current: diskReadBps, color: '#d97706' },
+        { label: '写', points: toChartPoints(filtered, 'diskWrite'), current: diskWriteBps, color: '#dc2626' },
+      ],
       formatValue: formatRate,
-      detail: `读 ${formatRate(host?.disk_io.read_bps || 0)} / 写 ${formatRate(host?.disk_io.write_bps || 0)}`,
+      detail: `读 ${formatRate(diskReadBps)} / 写 ${formatRate(diskWriteBps)}`,
     },
   ]
 
@@ -157,12 +173,20 @@ function SummaryCard({
 }
 
 function appendHostPoint(host: HostInfo, setHistory: (updater: (prev: HostMetricPoint[]) => HostMetricPoint[]) => void) {
+  const networkRx = host.network.rx_bps || 0
+  const networkTx = host.network.tx_bps || 0
+  const diskRead = host.disk_io.read_bps || 0
+  const diskWrite = host.disk_io.write_bps || 0
   const point: HostMetricPoint = {
     ts: Date.now(),
     cpu: clamp(host.cpu.usage_pct),
     memory: host.ram.total_mb > 0 ? clamp((host.ram.used_mb / host.ram.total_mb) * 100) : 0,
-    network: (host.network.rx_bps || 0) + (host.network.tx_bps || 0),
-    diskIO: (host.disk_io.read_bps || 0) + (host.disk_io.write_bps || 0),
+    network: networkRx + networkTx,
+    networkRx,
+    networkTx,
+    diskIO: diskRead + diskWrite,
+    diskRead,
+    diskWrite,
   }
 
   setHistory((prev) => {
@@ -190,8 +214,11 @@ function filterHistory(history: HostMetricPoint[], range: StatsRangeKey) {
   return history.filter((point) => point.ts >= cutoff)
 }
 
-function toChartPoints<T extends keyof Omit<HostMetricPoint, 'ts'>>(history: HostMetricPoint[], key: T): ChartPoint[] {
-  return history.map((point) => ({ ts: point.ts, value: Number(point[key]) || 0 }))
+function toChartPoints(history: HostMetricPoint[], key: keyof Omit<HostMetricPoint, 'ts'>): ChartPoint[] {
+  return history.flatMap((point) => {
+    const value = Number(point[key])
+    return Number.isFinite(value) ? [{ ts: point.ts, value }] : []
+  })
 }
 
 function clamp(value: number) {

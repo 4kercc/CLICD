@@ -89,8 +89,12 @@ type MetricPoint = {
   ts: number
   cpu: number
   memory: number
-  network: number
-  diskIO: number
+  network?: number
+  networkRx?: number
+  networkTx?: number
+  diskIO?: number
+  diskRead?: number
+  diskWrite?: number
 }
 type MappingDraft = {
   index: number | null
@@ -214,15 +218,21 @@ export default function ContainerDetail() {
     const memoryPct = memoryTotalBytes > 0
       ? (nextUsage.memory_usage_bytes / memoryTotalBytes) * 100
       : 0
-    const networkBps = (nextUsage.network_rx_bps || 0) + (nextUsage.network_tx_bps || 0)
-    const diskIOBps = (nextUsage.disk_read_bps || 0) + (nextUsage.disk_write_bps || 0)
+    const networkRx = nextUsage.network_rx_bps || 0
+    const networkTx = nextUsage.network_tx_bps || 0
+    const diskRead = nextUsage.disk_read_bps || 0
+    const diskWrite = nextUsage.disk_write_bps || 0
 
     const point: MetricPoint = {
       ts: Date.now(),
       cpu: clamp((nextUsage.cpu_usage_pct || 0) / (currentContainer.vcpu || 1)),
       memory: clamp(memoryPct),
-      network: networkBps,
-      diskIO: diskIOBps,
+      network: networkRx + networkTx,
+      networkRx,
+      networkTx,
+      diskIO: diskRead + diskWrite,
+      diskRead,
+      diskWrite,
     }
 
     setHistory((prev) => {
@@ -907,20 +917,23 @@ export default function ContainerDetail() {
   const ramPct = ramTotalBytes > 0 ? clamp(((usage?.memory_usage_bytes || 0) / ramTotalBytes) * 100) : 0
   const loadPct = container.vcpu > 0 ? ((usage?.load1 || 0) / container.vcpu) * 100 : 0
   const diskPct = container.disk_gb > 0 ? clamp(((usage?.disk_usage_bytes || 0) / (container.disk_gb * 1024 * 1024 * 1024)) * 100) : 0
-  const networkBps = (usage?.network_rx_bps || 0) + (usage?.network_tx_bps || 0)
-  const rx = usage?.network_rx_bps || 0
+  const networkRxBps = usage?.network_rx_bps || 0
+  const networkTxBps = usage?.network_tx_bps || 0
+  const networkBps = networkRxBps + networkTxBps
   const networkDownLimit = resourceLimitValue(container.network_down_mbps, container.network_bw_mbps)
   const networkUpLimit = resourceLimitValue(container.network_up_mbps, container.network_bw_mbps)
   const netPct = Math.max(
-    directionUsagePercent(usage?.network_rx_bps || 0, networkDownLimit, 125000, 125000000),
-    directionUsagePercent(usage?.network_tx_bps || 0, networkUpLimit, 125000, 125000000),
+    directionUsagePercent(networkRxBps, networkDownLimit, 125000, 125000000),
+    directionUsagePercent(networkTxBps, networkUpLimit, 125000, 125000000),
   )
-  const diskIOBps = (usage?.disk_read_bps || 0) + (usage?.disk_write_bps || 0)
+  const diskReadBps = usage?.disk_read_bps || 0
+  const diskWriteBps = usage?.disk_write_bps || 0
+  const diskIOBps = diskReadBps + diskWriteBps
   const ioReadLimit = resourceLimitValue(container.io_read_mbps, container.io_speed_mbps)
   const ioWriteLimit = resourceLimitValue(container.io_write_mbps, container.io_speed_mbps)
   const diskIOPct = Math.max(
-    directionUsagePercent(usage?.disk_read_bps || 0, ioReadLimit, 1024 * 1024, 1024 * 1024 * 1024),
-    directionUsagePercent(usage?.disk_write_bps || 0, ioWriteLimit, 1024 * 1024, 1024 * 1024 * 1024),
+    directionUsagePercent(diskReadBps, ioReadLimit, 1024 * 1024, 1024 * 1024 * 1024),
+    directionUsagePercent(diskWriteBps, ioWriteLimit, 1024 * 1024, 1024 * 1024 * 1024),
   )
   const mappingCount = container.port_mappings?.length || 0
   const mappingLimit = Math.max(container.port_mapping_limit || 0, mappingCount)
@@ -967,16 +980,24 @@ export default function ContainerDetail() {
       icon: <Network className="w-5 h-5" />,
       current: networkBps,
       points: toChartPoints(filtered, 'network'),
+      series: [
+        { label: '入', points: toChartPoints(filtered, 'networkRx'), current: networkRxBps, color: '#2563eb' },
+        { label: '出', points: toChartPoints(filtered, 'networkTx'), current: networkTxBps, color: '#16a34a' },
+      ],
       formatValue: formatRate,
-      detail: `入 ${formatRate(usage?.network_rx_bps || 0)} / 出 ${formatRate(usage?.network_tx_bps || 0)}，限速占用 ${netPct.toFixed(1)}%，累计 ${formatBytes((usage?.network_rx_bytes || 0) + (usage?.network_tx_bytes || 0))}`,
+      detail: `入 ${formatRate(networkRxBps)} / 出 ${formatRate(networkTxBps)}，限速占用 ${netPct.toFixed(1)}%，累计 ${formatBytes((usage?.network_rx_bytes || 0) + (usage?.network_tx_bytes || 0))}`,
     },
     {
       title: '磁盘IO',
       icon: <HardDrive className="w-5 h-5" />,
       current: diskIOBps,
       points: toChartPoints(filtered, 'diskIO'),
+      series: [
+        { label: '读', points: toChartPoints(filtered, 'diskRead'), current: diskReadBps, color: '#d97706' },
+        { label: '写', points: toChartPoints(filtered, 'diskWrite'), current: diskWriteBps, color: '#dc2626' },
+      ],
       formatValue: formatRate,
-      detail: `读 ${formatRate(usage?.disk_read_bps || 0)} / 写 ${formatRate(usage?.disk_write_bps || 0)}，限速占用 ${diskIOPct.toFixed(1)}%，累计 ${formatBytes((usage?.disk_read_bytes || 0) + (usage?.disk_write_bytes || 0))}，容量 ${diskPct.toFixed(1)}%`,
+      detail: `读 ${formatRate(diskReadBps)} / 写 ${formatRate(diskWriteBps)}，限速占用 ${diskIOPct.toFixed(1)}%，累计 ${formatBytes((usage?.disk_read_bytes || 0) + (usage?.disk_write_bytes || 0))}，容量 ${diskPct.toFixed(1)}%`,
     },
   ]
 
@@ -2514,8 +2535,11 @@ function formatDirectionalLimit(firstLabel: string, firstValue: number, secondLa
   return `${firstLabel} ${formatLimit(firstValue, unit)} / ${secondLabel} ${formatLimit(secondValue, unit)}`
 }
 
-function toChartPoints<T extends keyof Omit<MetricPoint, 'ts'>>(history: MetricPoint[], key: T): ChartPoint[] {
-  return history.map((point) => ({ ts: point.ts, value: Number(point[key]) || 0 }))
+function toChartPoints(history: MetricPoint[], key: keyof Omit<MetricPoint, 'ts'>): ChartPoint[] {
+  return history.flatMap((point) => {
+    const value = Number(point[key])
+    return Number.isFinite(value) ? [{ ts: point.ts, value }] : []
+  })
 }
 
 function formatPercent(value: number): string {
