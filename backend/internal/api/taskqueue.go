@@ -213,6 +213,10 @@ func (q *TaskQueue) enqueueSingleWithAudit(containerID int, containerName string
 }
 
 func (q *TaskQueue) EnqueueSecurityStop(containerID int, containerName string) (string, bool) {
+	if !config.AppConfig.SecurityAutoShutdown {
+		return "", false
+	}
+
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -228,6 +232,34 @@ func (q *TaskQueue) EnqueueSecurityStop(containerID int, containerName string) (
 	taskID := q.enqueueSingleWithAudit(containerID, containerName, TaskStop, "", "system:security", "", "")
 	q.persistTasks()
 	return taskID, true
+}
+
+func (q *TaskQueue) CancelPendingSecurityStops() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	cancelled := 0
+	newOpQueue := make([]*Task, 0, len(q.opQueue))
+	for _, task := range q.opQueue {
+		if isSecurityStopTask(task) && task.Status == "pending" {
+			delete(q.tasks, task.ID)
+			cancelled++
+			continue
+		}
+		newOpQueue = append(newOpQueue, task)
+	}
+	q.opQueue = newOpQueue
+
+	for id, task := range q.tasks {
+		if isSecurityStopTask(task) && task.Status == "pending" {
+			delete(q.tasks, id)
+			cancelled++
+		}
+	}
+	if cancelled > 0 {
+		q.persistTasks()
+	}
+	return cancelled
 }
 
 // createWorker handles TaskCreate: lxc-create, resource setup, start, and SSH init.
@@ -324,6 +356,7 @@ func (q *TaskQueue) opWorker() {
 		q.mu.Unlock()
 
 		var err error
+		skipped := false
 		err = resolveTaskContainer(task)
 		// Block operations on expired or traffic-exceeded containers (except stop/delete)
 		if err == nil && (task.Type == TaskStart || task.Type == TaskRestart || task.Type == TaskReinstall) {
@@ -336,27 +369,32 @@ func (q *TaskQueue) opWorker() {
 				}
 			}
 		}
+		if err == nil && isSecurityStopTask(task) && !config.AppConfig.SecurityAutoShutdown {
+			skipped = true
+		}
 		if err == nil {
-			switch task.Type {
-			case TaskStart:
-				err = startByRuntime(task.ContainerID)
-			case TaskStop:
-				err = stopByRuntime(task.ContainerID)
-			case TaskRestart:
-				err = restartByRuntime(task.ContainerID)
-			case TaskDelete:
-				err = destroyByRuntime(task.ContainerID)
-				if err == nil {
-					time.Sleep(1 * time.Second)
-					if config.FindContainer(task.ContainerID) != nil {
-						err = fmt.Errorf("container still exists after delete: %d", task.ContainerID)
+			if !skipped {
+				switch task.Type {
+				case TaskStart:
+					err = startByRuntime(task.ContainerID)
+				case TaskStop:
+					err = stopByRuntime(task.ContainerID)
+				case TaskRestart:
+					err = restartByRuntime(task.ContainerID)
+				case TaskDelete:
+					err = destroyByRuntime(task.ContainerID)
+					if err == nil {
+						time.Sleep(1 * time.Second)
+						if config.FindContainer(task.ContainerID) != nil {
+							err = fmt.Errorf("container still exists after delete: %d", task.ContainerID)
+						}
 					}
-				}
-			case TaskReinstall:
-				if lxc.HasSSHAuthOptions(task.Config) {
-					err = reinstallByRuntime(task.ContainerID, task.TemplateID, task.Config)
-				} else {
-					err = reinstallByRuntime(task.ContainerID, task.TemplateID)
+				case TaskReinstall:
+					if lxc.HasSSHAuthOptions(task.Config) {
+						err = reinstallByRuntime(task.ContainerID, task.TemplateID, task.Config)
+					} else {
+						err = reinstallByRuntime(task.ContainerID, task.TemplateID)
+					}
 				}
 			}
 		}
@@ -370,6 +408,9 @@ func (q *TaskQueue) opWorker() {
 			task.Status = "failed"
 			task.Error = err.Error()
 			config.AddAuditLogFull(string(task.Type), task.ContainerName, "失败: "+err.Error(), auditUser, task.IP, task.UserAgent, false, err.Error())
+		} else if skipped {
+			task.Status = "done"
+			config.AddAuditLogFull(string(task.Type), task.ContainerName, "跳过: 安全告警自动关机已关闭", auditUser, task.IP, task.UserAgent, true, "")
 		} else {
 			task.Status = "done"
 			config.AddAuditLogFull(string(task.Type), task.ContainerName, "成功", auditUser, task.IP, task.UserAgent, true, "")
@@ -389,6 +430,10 @@ func (q *TaskQueue) opWorker() {
 		q.persistTasks()
 		q.mu.Unlock()
 	}
+}
+
+func isSecurityStopTask(task *Task) bool {
+	return task != nil && task.Type == TaskStop && task.User == "system:security"
 }
 
 func clearPolicyBlockAfterAdminRecovery(task *Task) {
@@ -817,6 +862,9 @@ func HandleTasks(w http.ResponseWriter, r *http.Request) {
 // RestoreTasks restores task queue from config
 func RestoreTasks() {
 	for _, st := range config.AppConfig.Tasks {
+		if st.Type == string(TaskStop) && st.User == "system:security" && !config.AppConfig.SecurityAutoShutdown {
+			continue
+		}
 		var cfg lxc.ContainerConfig
 		if st.Config != "" {
 			json.Unmarshal([]byte(st.Config), &cfg)
