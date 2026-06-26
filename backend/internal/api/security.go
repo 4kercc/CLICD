@@ -49,15 +49,19 @@ type connEntry struct {
 }
 
 type trafficStats struct {
-	total           int
-	totalSynSent    int
-	destCounts      map[string]int
-	destPorts       map[string]map[int]int
-	portDestCounts  map[int]map[string]int
-	portTotalCounts map[int]int
-	udpDestCounts   map[int]map[string]int
-	udpTotalCounts  map[int]int
-	synSentByDst    map[string]int
+	total                 int
+	totalSynSent          int
+	destCounts            map[string]int
+	destPorts             map[string]map[int]int
+	portDestCounts        map[int]map[string]int
+	portTotalCounts       map[int]int
+	udpDestCounts         map[int]map[string]int
+	udpTotalCounts        map[int]int
+	udpDestTotalCounts    map[string]int
+	synSentByDst          map[string]int
+	tcpSynDestPorts       map[string]map[int]int
+	tcpSynPortDestCounts  map[int]map[string]int
+	tcpSynPortTotalCounts map[int]int
 }
 
 var scanner *SecurityScanner
@@ -232,13 +236,17 @@ func (ss *SecurityScanner) checkContainer(name, ip string) {
 
 func newTrafficStats() *trafficStats {
 	return &trafficStats{
-		destCounts:      make(map[string]int),
-		destPorts:       make(map[string]map[int]int),
-		portDestCounts:  make(map[int]map[string]int),
-		portTotalCounts: make(map[int]int),
-		udpDestCounts:   make(map[int]map[string]int),
-		udpTotalCounts:  make(map[int]int),
-		synSentByDst:    make(map[string]int),
+		destCounts:            make(map[string]int),
+		destPorts:             make(map[string]map[int]int),
+		portDestCounts:        make(map[int]map[string]int),
+		portTotalCounts:       make(map[int]int),
+		udpDestCounts:         make(map[int]map[string]int),
+		udpTotalCounts:        make(map[int]int),
+		synSentByDst:          make(map[string]int),
+		udpDestTotalCounts:    make(map[string]int),
+		tcpSynDestPorts:       make(map[string]map[int]int),
+		tcpSynPortDestCounts:  make(map[int]map[string]int),
+		tcpSynPortTotalCounts: make(map[int]int),
 	}
 }
 
@@ -264,52 +272,64 @@ func (ts *trafficStats) add(conn connEntry) {
 			}
 			ts.udpDestCounts[conn.dstPort][conn.dstIP]++
 			ts.udpTotalCounts[conn.dstPort]++
+			ts.udpDestTotalCounts[conn.dstIP]++
 		}
 	}
 
-	if conn.state == "SYN_SENT" {
+	if conn.proto == "tcp" && conn.state == "SYN_SENT" {
 		ts.totalSynSent++
 		ts.synSentByDst[conn.dstIP]++
+		if conn.dstPort > 0 {
+			if ts.tcpSynDestPorts[conn.dstIP] == nil {
+				ts.tcpSynDestPorts[conn.dstIP] = make(map[int]int)
+			}
+			ts.tcpSynDestPorts[conn.dstIP][conn.dstPort]++
+			if ts.tcpSynPortDestCounts[conn.dstPort] == nil {
+				ts.tcpSynPortDestCounts[conn.dstPort] = make(map[string]int)
+			}
+			ts.tcpSynPortDestCounts[conn.dstPort][conn.dstIP]++
+			ts.tcpSynPortTotalCounts[conn.dstPort]++
+		}
 	}
 }
 
 func (ss *SecurityScanner) detectPortScans(name, ip string, stats *trafficStats) {
-	for dstIP, portCounts := range stats.destPorts {
+	for dstIP, portCounts := range stats.tcpSynDestPorts {
 		uniquePorts := len(portCounts)
 		switch {
-		case uniquePorts >= 20:
+		case uniquePorts >= 25:
 			ss.addAlert(name, "port_scan", "high", ip, dstIP, 0,
-				fmt.Sprintf("端口扫描: 同一目标 %s 出现 %d 个不同目标端口", dstIP, uniquePorts),
+				fmt.Sprintf("端口扫描: 同一目标 %s 出现 %d 个不同 TCP 半开目标端口", dstIP, uniquePorts),
 				"")
-		case uniquePorts >= 8:
+		case uniquePorts >= 12:
 			ss.addAlert(name, "port_scan", "medium", ip, dstIP, 0,
-				fmt.Sprintf("可疑端口探测: 同一目标 %s 出现 %d 个不同目标端口", dstIP, uniquePorts),
+				fmt.Sprintf("可疑端口探测: 同一目标 %s 出现 %d 个不同 TCP 半开目标端口", dstIP, uniquePorts),
 				"")
 		}
 	}
 
-	for port, targets := range stats.portDestCounts {
+	for port, targets := range stats.tcpSynPortDestCounts {
 		uniqueTargets := len(targets)
 		if service, ok := bruteForcePorts[port]; ok {
 			if uniqueTargets >= 30 {
 				ss.addAlert(name, "brute_force", "critical", ip, "*", port,
-					fmt.Sprintf("横向爆破: 目标服务 %s(%d) 覆盖 %d 个不同 IP", service, port, uniqueTargets),
+					fmt.Sprintf("横向爆破: 目标服务 %s(%d) 出现 TCP 半开连接并覆盖 %d 个不同 IP", service, port, uniqueTargets),
 					"")
-			} else if uniqueTargets >= 10 {
+			} else if uniqueTargets >= 12 {
 				ss.addAlert(name, "brute_force", "high", ip, "*", port,
-					fmt.Sprintf("疑似横向爆破: 目标服务 %s(%d) 覆盖 %d 个不同 IP", service, port, uniqueTargets),
+					fmt.Sprintf("疑似横向爆破: 目标服务 %s(%d) 出现 TCP 半开连接并覆盖 %d 个不同 IP", service, port, uniqueTargets),
 					"")
 			}
 			continue
 		}
 
-		if uniqueTargets >= 40 {
+		if uniqueTargets >= 50 {
 			ss.addAlert(name, "horizontal_scan", "high", ip, "*", port,
-				fmt.Sprintf("横向扫描: 同一端口 %d 覆盖 %d 个不同目标", port, uniqueTargets),
+				fmt.Sprintf("横向扫描: 同一 TCP 端口 %d 出现半开连接并覆盖 %d 个不同目标", port, uniqueTargets),
 				"")
-		} else if uniqueTargets >= 15 {
+		} else if uniqueTargets >= 20 {
 			ss.addAlert(name, "horizontal_scan", "medium", ip, "*", port,
-				fmt.Sprintf("可疑横向探测: 同一端口 %d 覆盖 %d 个不同目标", port, uniqueTargets),
+				fmt.Sprintf("可疑横向探测: 同一 TCP 端口 %d 出现半开连接并覆盖 %d 个不同目标", port, uniqueTargets),
 				"")
 		}
 	}
@@ -323,13 +343,25 @@ func (ss *SecurityScanner) detectBruteForce(name, ip string, stats *trafficStats
 				continue
 			}
 
-			if count >= 20 {
+			synCount := 0
+			if ports := stats.tcpSynDestPorts[dstIP]; ports != nil {
+				synCount = ports[port]
+			}
+			if synCount >= 25 {
 				ss.addAlert(name, "brute_force", "critical", ip, dstIP, port,
-					fmt.Sprintf("暴力破解: %s(%d) 当前连接数 %d", service, port, count),
+					fmt.Sprintf("暴力破解: %s(%d) 当前 TCP 半开连接 %d 条", service, port, synCount),
 					"")
-			} else if count >= 10 {
+			} else if synCount >= 12 {
 				ss.addAlert(name, "brute_force", "high", ip, dstIP, port,
-					fmt.Sprintf("疑似暴力破解: %s(%d) 当前连接数 %d", service, port, count),
+					fmt.Sprintf("疑似暴力破解: %s(%d) 当前 TCP 半开连接 %d 条", service, port, synCount),
+					"")
+			} else if count >= 60 {
+				ss.addAlert(name, "brute_force", "critical", ip, dstIP, port,
+					fmt.Sprintf("暴力破解: %s(%d) 当前连接数 %d 条", service, port, count),
+					"")
+			} else if count >= 30 {
+				ss.addAlert(name, "brute_force", "high", ip, dstIP, port,
+					fmt.Sprintf("疑似暴力破解: %s(%d) 当前连接数 %d 条", service, port, count),
 					"")
 			}
 		}
@@ -356,30 +388,41 @@ func (ss *SecurityScanner) detectSpam(name, ip string, stats *trafficStats) {
 func (ss *SecurityScanner) detectMassAbuse(name, ip string, stats *trafficStats) {
 	targets := len(stats.destCounts)
 	switch {
-	case targets >= 100:
+	case targets >= 120 && stats.total >= 600:
 		ss.addAlert(name, "ddos", "critical", ip, "*", 0,
-			fmt.Sprintf("大规模对外连接: 当前覆盖 %d 个不同目标", targets),
+			fmt.Sprintf("大规模对外连接: 当前 conntrack 出站记录 %d 条，覆盖 %d 个不同目标", stats.total, targets),
 			"")
-	case targets >= 35:
+	case targets >= 60 && stats.total >= 300:
 		ss.addAlert(name, "ddos", "high", ip, "*", 0,
-			fmt.Sprintf("大量对外连接: 当前覆盖 %d 个不同目标", targets),
+			fmt.Sprintf("大量对外连接: 当前 conntrack 出站记录 %d 条，覆盖 %d 个不同目标", stats.total, targets),
 			"")
 	}
 
+	synTargets := len(stats.synSentByDst)
 	switch {
-	case stats.total >= 500:
+	case stats.totalSynSent >= 250 || (synTargets >= 80 && stats.totalSynSent >= 160):
 		ss.addAlert(name, "ddos", "critical", ip, "*", 0,
-			fmt.Sprintf("异常大量连接: 当前 conntrack 出站记录 %d 条", stats.total),
+			fmt.Sprintf("大量半开连接: 当前 TCP SYN_SENT %d 条，覆盖 %d 个不同目标", stats.totalSynSent, synTargets),
 			"")
-	case stats.total >= 200:
+	case stats.totalSynSent >= 100 || (synTargets >= 35 && stats.totalSynSent >= 70):
 		ss.addAlert(name, "ddos", "high", ip, "*", 0,
-			fmt.Sprintf("高连接数: 当前 conntrack 出站记录 %d 条", stats.total),
+			fmt.Sprintf("可疑大量半开连接: 当前 TCP SYN_SENT %d 条，覆盖 %d 个不同目标", stats.totalSynSent, synTargets),
 			"")
 	}
 
-	if stats.totalSynSent >= 100 {
+	udpTargets := len(stats.udpDestTotalCounts)
+	udpTotal := 0
+	for _, count := range stats.udpTotalCounts {
+		udpTotal += count
+	}
+	switch {
+	case udpTargets >= 120 && udpTotal >= 300:
 		ss.addAlert(name, "ddos", "critical", ip, "*", 0,
-			fmt.Sprintf("大量半开连接: 当前 SYN_SENT %d 条", stats.totalSynSent),
+			fmt.Sprintf("UDP 大规模外发: 当前 UDP 连接 %d 条，覆盖 %d 个不同目标", udpTotal, udpTargets),
+			"")
+	case udpTargets >= 50 && udpTotal >= 120:
+		ss.addAlert(name, "ddos", "high", ip, "*", 0,
+			fmt.Sprintf("可疑 UDP 大规模外发: 当前 UDP 连接 %d 条，覆盖 %d 个不同目标", udpTotal, udpTargets),
 			"")
 	}
 
@@ -404,11 +447,18 @@ func (ss *SecurityScanner) detectReflectionAbuse(name, ip string, stats *traffic
 			continue
 		}
 
-		if targets >= 30 || total >= 100 {
+		criticalTargets, criticalTotal := 40, 120
+		highTargets, highTotal := 15, 45
+		if port == 53 {
+			criticalTargets, criticalTotal = 75, 300
+			highTargets, highTotal = 25, 100
+		}
+
+		if targets >= criticalTargets && total >= criticalTotal {
 			ss.addAlert(name, "reflection", "critical", ip, "*", port,
 				fmt.Sprintf("UDP 反射放大: %s(%d) 当前 UDP 连接 %d 条，覆盖 %d 个目标", service, port, total, targets),
 				"")
-		} else if targets >= 10 || total >= 30 {
+		} else if targets >= highTargets && total >= highTotal {
 			ss.addAlert(name, "reflection", "high", ip, "*", port,
 				fmt.Sprintf("疑似 UDP 反射放大: %s(%d) 当前 UDP 连接 %d 条，覆盖 %d 个目标", service, port, total, targets),
 				"")
@@ -645,6 +695,9 @@ func severityRank(severity string) int {
 }
 
 func autoShutdownAlertContainer(containerName, alertType, severity string) {
+	if !config.AppConfig.SecurityAutoShutdown {
+		return
+	}
 	c := config.FindContainerByName(containerName)
 	if c == nil || c.Status != "running" {
 		return
@@ -658,6 +711,24 @@ func autoShutdownAlertContainer(containerName, alertType, severity string) {
 	if queued {
 		config.AddAuditLog("security_auto_shutdown", c.Name, fmt.Sprintf("[%s] %s 告警触发自动关机任务 %s", severity, alertType, taskID), "system")
 	}
+}
+
+func clearSecurityPolicyBlocks() int {
+	cleared := 0
+	for i := range config.AppConfig.Containers {
+		c := &config.AppConfig.Containers[i]
+		if !c.PolicyBlocked || !isSecurityPolicyBlockReason(c.PolicyBlockedReason) {
+			continue
+		}
+		config.SetContainerPolicyBlock(c.ID, false, "")
+		config.AddAuditLog("security_policy_unblock", c.Name, "关闭安全告警自动关机后解除策略临时封禁", "system")
+		cleared++
+	}
+	return cleared
+}
+
+func isSecurityPolicyBlockReason(reason string) bool {
+	return strings.Contains(reason, "告警触发策略临时封禁")
 }
 
 // HandleSecurityAlerts returns all security alerts.
@@ -699,9 +770,17 @@ func HandleSecuritySettings(w http.ResponseWriter, r *http.Request) {
 			jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: err.Error()})
 			return
 		}
+		cancelledTasks := 0
+		clearedBlocks := 0
+		if !req.AutoShutdown {
+			cancelledTasks = globalQueue.CancelPendingSecurityStops()
+			clearedBlocks = clearSecurityPolicyBlocks()
+		}
 		auditRequest(r, "security.settings", "auto_shutdown", fmt.Sprintf("auto_shutdown=%v", req.AutoShutdown), true, "")
-		jsonResponse(w, http.StatusOK, APIResponse{Success: true, Data: map[string]bool{
-			"auto_shutdown": config.AppConfig.SecurityAutoShutdown,
+		jsonResponse(w, http.StatusOK, APIResponse{Success: true, Data: map[string]interface{}{
+			"auto_shutdown":   config.AppConfig.SecurityAutoShutdown,
+			"cancelled_tasks": cancelledTasks,
+			"cleared_blocks":  clearedBlocks,
 		}})
 	default:
 		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})

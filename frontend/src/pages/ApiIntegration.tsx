@@ -914,6 +914,7 @@ const responseSamples: Record<string, unknown> = {
     success: true,
     data: {
       nat4: { used: 62, remaining: '45474', total: '45536' },
+      nat4_port_range: { start: 20000, end: 65535 },
       ipv4: { used: 1, remaining: '3', total: '4' },
       ipv6: { used: 31, remaining: 'large', total: 'large' },
       public_ipv4_addresses: [{ address: '203.0.113.10', interface: 'eth0', prefix_len: 32, gateway: '203.0.113.1' }],
@@ -927,6 +928,8 @@ const responseSamples: Record<string, unknown> = {
   'PUT /api/v1/routing': {
     success: true,
     data: {
+      nat4: { used: 62, remaining: '45474', total: '45536' },
+      nat4_port_range: { start: 20000, end: 65535 },
       ipv4: { used: 1, remaining: '3', total: '4' },
       public_ipv4_addresses: [{ address: '203.0.113.10', interface: 'eth0', prefix_len: 32, gateway: '203.0.113.1' }],
       ipv6_prefixes: [{ interface: 'eth0', address: '2001:db8:100::2', prefix: '2001:db8:100::/64', prefix_len: 64, gateway: '2001:db8:100::1' }],
@@ -1196,7 +1199,7 @@ function endpointNoteFor(key: string) {
     notes.push('When action=reinstall, you can include template_id, ssh_auth_mode, ssh_password, and ssh_public_key. Other actions ignore these reinstall fields.')
   }
   if (key === 'PUT /api/v1/routing') {
-    notes.push('Updating public address pools requires routing:write. Addresses already assigned to containers cannot be removed from the pool.')
+    notes.push('Updating NAT4 port range and public address pools requires routing:write. Addresses already assigned to containers cannot be removed from the pool.')
   }
   if (key === 'POST /api/v1/routing/ipv4-scan') {
     notes.push('Scanning public IPv4 prefixes requires routing:write. When verify=true, the API also attempts to check address availability.')

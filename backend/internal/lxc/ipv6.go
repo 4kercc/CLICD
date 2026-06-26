@@ -74,6 +74,9 @@ func (m *Manager) DetectIPv6Status() IPv6Status {
 }
 
 func DetectPublicIPv6Prefixes() []IPv6PrefixInfo {
+	if configured := ConfiguredPublicIPv6Prefixes(); len(configured) > 0 {
+		return configured
+	}
 	return detectPublicIPv6Prefixes(detectIPv6DefaultRoutes())
 }
 

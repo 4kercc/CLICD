@@ -582,9 +582,14 @@ func getRandomPort(w http.ResponseWriter, r *http.Request, id int) {
 		return
 	}
 	hostIP := strings.TrimSpace(r.URL.Query().Get("host_ip"))
-	// Try random ports
-	for tries := 0; tries < 100; tries++ {
-		port := 10000 + (int(time.Now().UnixNano()) % 55535)
+	start, end := config.NATPortRange()
+	capacity := end - start + 1
+	offset := 0
+	if capacity > 0 {
+		offset = int(time.Now().UnixNano() % int64(capacity))
+	}
+	for tries := 0; tries < capacity; tries++ {
+		port := start + ((offset + tries) % capacity)
 		if lxc.HostPortAvailable(c, hostIP, port, "tcp") {
 			jsonResponse(w, http.StatusOK, APIResponse{Success: true, Data: map[string]int{"port": port}})
 			return

@@ -4,9 +4,13 @@ import { useNavigate } from 'react-router-dom'
 import { useLanguage, type Language } from '../contexts/LanguageContext'
 import {
   getRoutingInfo,
+  updateRoutingIPv6Prefixes,
   updateRoutingIPv4Pool,
+  updateRoutingPools,
   type IPv4Route,
   type IPv6Route,
+  type IPv6PrefixInfo,
+  type NAT4PortRange,
   type NAT4Route,
   type PublicIPv4Info,
   type RoutingInfo,
@@ -25,6 +29,12 @@ export default function Routing() {
   const [savingIPv4, setSavingIPv4] = useState(false)
   const [ipv4Draft, setIPv4Draft] = useState<(PublicIPv4Info & { _id: number })[]>([])
   const nextDraftId = useRef(0)
+  const [editingNAT4, setEditingNAT4] = useState(false)
+  const [savingNAT4, setSavingNAT4] = useState(false)
+  const [nat4Draft, setNAT4Draft] = useState<NAT4PortRange>({ start: 20000, end: 65535 })
+  const [editingIPv6, setEditingIPv6] = useState(false)
+  const [savingIPv6, setSavingIPv6] = useState(false)
+  const [ipv6Draft, setIPv6Draft] = useState<(IPv6PrefixInfo & { _id: number })[]>([])
   const [nat4Page, setNat4Page] = useState(1)
   const [ipv6Page, setIPv6Page] = useState(1)
   const [nat4Search, setNat4Search] = useState('')
@@ -49,9 +59,12 @@ export default function Routing() {
   const nat4Mappings = routing?.nat4_mappings || []
   const ipv6Prefixes = routing?.ipv6_prefixes || []
   const ipv6Assignments = routing?.ipv6_assignments || []
+  const nat4Range = routing?.nat4_port_range || { start: 20000, end: 65535 }
   const defaultIPv4Interface = routing?.host_public_ipv4?.interface || publicIPv4s[0]?.interface || 'eth0'
   const defaultIPv4Gateway = routing?.host_public_ipv4?.gateway || publicIPv4s[0]?.gateway || ''
   const defaultIPv4PrefixLen = routing?.host_public_ipv4?.prefix_len || publicIPv4s[0]?.prefix_len || 32
+  const defaultIPv6Interface = ipv6Prefixes[0]?.interface || defaultIPv4Interface
+  const defaultIPv6Gateway = ipv6Prefixes[0]?.gateway || ''
 
   useEffect(() => {
     if (!editingIPv4) {
@@ -139,6 +152,81 @@ export default function Routing() {
     }
   }
 
+  const startEditNAT4 = () => {
+    setNAT4Draft({ start: nat4Range.start || 20000, end: nat4Range.end || 65535 })
+    setEditingNAT4(true)
+  }
+
+  const saveNAT4Range = async () => {
+    const start = Math.round(Number(nat4Draft.start || 0))
+    const end = Math.round(Number(nat4Draft.end || 0))
+    if (start < 1 || start > 65535 || end < 1 || end > 65535 || start > end) {
+      alert(text.nat4RangeInvalid)
+      return
+    }
+    setSavingNAT4(true)
+    try {
+      const res = await updateRoutingPools({ nat4_port_range: { start, end } })
+      setRouting(res.data.data || null)
+      setEditingNAT4(false)
+    } catch (err: any) {
+      alert(err?.response?.data?.message || text.saveNAT4RangeFailed)
+    } finally {
+      setSavingNAT4(false)
+    }
+  }
+
+  const startEditIPv6 = () => {
+    setIPv6Draft(ipv6Prefixes.map((prefix) => ({ ...prefix, _id: nextDraftId.current++ })))
+    setEditingIPv6(true)
+  }
+
+  const addIPv6Row = () => {
+    setIPv6Draft((items) => [
+      ...items,
+      {
+        _id: nextDraftId.current++,
+        prefix: '',
+        address: '',
+        prefix_len: 64,
+        interface: defaultIPv6Interface,
+        gateway: defaultIPv6Gateway,
+        source: 'manual',
+      },
+    ])
+  }
+
+  const updateIPv6Draft = (index: number, patch: Partial<IPv6PrefixInfo>) => {
+    setIPv6Draft((items) => items.map((item, i) => (i === index ? { ...item, ...patch } : item)))
+  }
+
+  const saveIPv6Prefixes = async () => {
+    setSavingIPv6(true)
+    try {
+      const items = ipv6Draft
+        .map(({ _id, ...item }) => ({
+          ...item,
+          prefix: (item.prefix || '').trim(),
+          address: (item.address || '').trim(),
+          interface: (item.interface || defaultIPv6Interface).trim(),
+          gateway: (item.gateway || '').trim(),
+          prefix_len: Number(item.prefix_len || 0),
+        }))
+        .filter((item) => item.prefix || item.address)
+      if (items.some((item) => !item.interface)) {
+        alert(text.ipv6InterfaceRequired)
+        return
+      }
+      const res = await updateRoutingIPv6Prefixes(items)
+      setRouting(res.data.data || null)
+      setEditingIPv6(false)
+    } catch (err: any) {
+      alert(err?.response?.data?.message || text.saveIPv6PrefixesFailed)
+    } finally {
+      setSavingIPv6(false)
+    }
+  }
+
   const filteredNat4 = useMemo(() => {
     const q = nat4Search.toLowerCase().trim()
     if (!q) return nat4Mappings
@@ -189,10 +277,44 @@ export default function Routing() {
       </div>
 
       <div className="grid gap-4 md:grid-cols-3">
-        <CapacityCard title={text.nat4Ports} watermark="NAT4" remaining={routing?.nat4.remaining || '0'} total={routing?.nat4.total || '0'} used={routing?.nat4.used || 0} label={text.remainingTotal} usedLabel={text.used} />
+        <CapacityCard
+          title={text.nat4Ports}
+          watermark="NAT4"
+          remaining={routing?.nat4.remaining || '0'}
+          total={routing?.nat4.total || '0'}
+          used={routing?.nat4.used || 0}
+          label={text.remainingTotal}
+          usedLabel={text.used}
+          detail={formatNATRange(nat4Range, language)}
+          action={
+            <button onClick={startEditNAT4} className="rounded p-1.5 text-gray-500 hover:bg-gray-100 hover:text-black" title={text.editNAT4Range}>
+              <Pencil className="h-4 w-4" />
+            </button>
+          }
+        />
         <CapacityCard title={text.publicIPv4} watermark="IPv4" remaining={routing?.ipv4.remaining || '0'} total={routing?.ipv4.total || '0'} used={routing?.ipv4.used || 0} label={formatPoolCount(publicIPv4s.length, language)} usedLabel={text.used} />
         <CapacityCard title="IPv6" watermark="IPv6" remaining={formatCapacity(routing?.ipv6.remaining || '0', language)} total={formatCapacity(routing?.ipv6.total || '0', language)} used={routing?.ipv6.used || 0} label={formatDetectedPrefixCount(ipv6Prefixes.length, language)} usedLabel={text.used} />
       </div>
+
+      {editingNAT4 && (
+        <RouteModal title={text.editNAT4Range} onClose={() => setEditingNAT4(false)}>
+          <div className="space-y-4">
+            <div className="grid gap-3 sm:grid-cols-2">
+              <LabeledNumberInput label={text.rangeStart} value={nat4Draft.start} onChange={(value) => setNAT4Draft((draft) => ({ ...draft, start: value }))} min={1} max={65535} />
+              <LabeledNumberInput label={text.rangeEnd} value={nat4Draft.end} onChange={(value) => setNAT4Draft((draft) => ({ ...draft, end: value }))} min={1} max={65535} />
+            </div>
+            <div className="flex items-center justify-end gap-2">
+              <button onClick={() => setEditingNAT4(false)} disabled={savingNAT4} className="rounded-md border border-gray-300 px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-50">
+                {text.cancel}
+              </button>
+              <button onClick={saveNAT4Range} disabled={savingNAT4} className="inline-flex items-center gap-1.5 rounded-md bg-black px-3 py-1.5 text-xs text-white hover:bg-gray-800 disabled:opacity-50">
+                <Save className="h-3.5 w-3.5" />
+                {savingNAT4 ? text.saving : text.save}
+              </button>
+            </div>
+          </div>
+        </RouteModal>
+      )}
 
       <Panel
         title={text.publicIPv4Pool}
@@ -328,8 +450,19 @@ export default function Routing() {
         </RouteModal>
       )}
 
-      {ipv6Prefixes.length > 0 && (
-        <Panel title={text.detectedIPv6Prefixes} subtitle={formatPrefixCount(ipv6Prefixes.length, language)}>
+      <Panel
+        title={text.detectedIPv6Prefixes}
+        subtitle={formatPrefixCount(ipv6Prefixes.length, language)}
+        action={
+          <button onClick={startEditIPv6} className="inline-flex items-center gap-1.5 rounded-md border border-gray-300 px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50">
+            <Pencil className="h-3.5 w-3.5" />
+            {text.editPrefixes}
+          </button>
+        }
+      >
+        {ipv6Prefixes.length === 0 ? (
+          <EmptyState text={text.noIPv6Prefixes} icon={<Router className="h-7 w-7" />} />
+        ) : (
           <div className="overflow-x-auto">
             <table className="w-full min-w-[760px] text-sm">
               <thead className="border-b border-gray-200 bg-gray-50 text-xs text-gray-500">
@@ -354,7 +487,58 @@ export default function Routing() {
               </tbody>
             </table>
           </div>
-        </Panel>
+        )}
+      </Panel>
+
+      {editingIPv6 && (
+        <RouteModal title={text.editIPv6Prefixes} onClose={() => setEditingIPv6(false)} wide>
+          <div className="space-y-3">
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[860px] text-sm">
+                <thead className="border-b border-gray-200 bg-gray-50 text-xs text-gray-500">
+                  <tr>
+                    <th className="px-3 py-2 text-left font-medium">{text.prefix}</th>
+                    <th className="px-3 py-2 text-left font-medium">{text.hostAddress}</th>
+                    <th className="px-3 py-2 text-left font-medium">{text.interface}</th>
+                    <th className="px-3 py-2 text-left font-medium">{text.gateway}</th>
+                    <th className="px-3 py-2 text-right font-medium">{text.action}</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {ipv6Draft.map((item, index) => (
+                    <tr key={item._id}>
+                      <td className="px-3 py-2"><input value={item.prefix || ''} onChange={(e) => updateIPv6Draft(index, { prefix: e.target.value })} placeholder="2001:db8:100::/64" className={smallInputClass} /></td>
+                      <td className="px-3 py-2"><input value={item.address || ''} onChange={(e) => updateIPv6Draft(index, { address: e.target.value })} placeholder="2001:db8:100::1" className={smallInputClass} /></td>
+                      <td className="px-3 py-2"><input value={item.interface || ''} onChange={(e) => updateIPv6Draft(index, { interface: e.target.value })} placeholder={defaultIPv6Interface} className={smallInputClass} /></td>
+                      <td className="px-3 py-2"><input value={item.gateway || ''} onChange={(e) => updateIPv6Draft(index, { gateway: e.target.value })} placeholder={text.gateway} className={smallInputClass} /></td>
+                      <td className="px-3 py-2 text-right">
+                        <button onClick={() => setIPv6Draft((items) => items.filter((_, i) => i !== index))} className="inline-flex items-center justify-center rounded p-1.5 text-gray-400 hover:bg-red-50 hover:text-red-600">
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                  {ipv6Draft.length === 0 && <EmptyRow colSpan={5} text={text.noIPv6Prefixes} />}
+                </tbody>
+              </table>
+            </div>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <button onClick={addIPv6Row} className="inline-flex items-center gap-1.5 rounded-md border border-gray-300 px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50">
+                <Plus className="h-3.5 w-3.5" />
+                {text.addIPv6Prefix}
+              </button>
+              <div className="flex items-center gap-2">
+                <button onClick={() => setEditingIPv6(false)} disabled={savingIPv6} className="rounded-md border border-gray-300 px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-50">
+                  {text.cancel}
+                </button>
+                <button onClick={saveIPv6Prefixes} disabled={savingIPv6} className="inline-flex items-center gap-1.5 rounded-md bg-black px-3 py-1.5 text-xs text-white hover:bg-gray-800 disabled:opacity-50">
+                  <Save className="h-3.5 w-3.5" />
+                  {savingIPv6 ? text.saving : text.save}
+                </button>
+              </div>
+            </div>
+          </div>
+        </RouteModal>
       )}
 
       <Panel title={text.ipv4NAT} subtitle={formatMappingSubtitle(filteredNat4.length, nat4Mappings.length, language)} action={<SearchBox value={nat4Search} onChange={setNat4Search} placeholder={text.searchNAT} />}>
@@ -527,7 +711,7 @@ function Pagination({ page, totalPages, totalItems, pageSize, onPageChange, lang
   )
 }
 
-function CapacityCard({ title, watermark, remaining, total, used, label, usedLabel }: {
+function CapacityCard({ title, watermark, remaining, total, used, label, usedLabel, detail, action }: {
   title: string
   watermark: string
   remaining: string
@@ -535,6 +719,8 @@ function CapacityCard({ title, watermark, remaining, total, used, label, usedLab
   used: number
   label: string
   usedLabel: string
+  detail?: string
+  action?: ReactNode
 }) {
   return (
     <div className="relative overflow-hidden rounded-lg border border-gray-200 bg-white p-4">
@@ -542,17 +728,43 @@ function CapacityCard({ title, watermark, remaining, total, used, label, usedLab
         {watermark}
       </div>
       <div className="relative z-10">
-        <div>
+        <div className="flex items-start justify-between gap-3">
+          <div>
           <div className="text-sm font-medium text-gray-700">{title}</div>
           <div className="mt-2 flex items-end gap-2">
             <span className="text-2xl font-semibold text-black">{remaining}</span>
             <span className="pb-1 text-sm text-gray-400">/ {total}</span>
           </div>
+          </div>
+          {action}
         </div>
       </div>
       <div className="relative z-10 mt-3 text-xs text-gray-500">{label}</div>
       <div className="relative z-10 mt-1 text-xs text-gray-400">{usedLabel} {used}</div>
+      {detail && <div className="relative z-10 mt-1 font-mono text-xs text-gray-400">{detail}</div>}
     </div>
+  )
+}
+
+function LabeledNumberInput({ label, value, onChange, min, max }: {
+  label: string
+  value: number
+  onChange: (value: number) => void
+  min: number
+  max: number
+}) {
+  return (
+    <label className="block">
+      <span className="mb-1 block text-xs font-medium text-gray-500">{label}</span>
+      <input
+        type="number"
+        min={min}
+        max={max}
+        value={value || ''}
+        onChange={(event) => onChange(Number(event.target.value))}
+        className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-800 focus:outline-none focus:ring-1 focus:ring-black"
+      />
+    </label>
   )
 }
 
@@ -632,6 +844,11 @@ const routingText = {
     pageSubtitle: 'NAT4、公网 IPv4 池和 IPv6 地址分配',
     refresh: '刷新',
     nat4Ports: 'NAT4 端口',
+    editNAT4Range: '编辑 NAT4 范围',
+    rangeStart: '起始端口',
+    rangeEnd: '结束端口',
+    nat4RangeInvalid: 'NAT4 范围必须是 1-65535，且起始端口不能大于结束端口',
+    saveNAT4RangeFailed: '保存 NAT4 范围失败',
     remainingTotal: '剩余 / 总数',
     publicIPv4: '公网 IPv4',
     publicIPv4Pool: '公网 IPv4 池',
@@ -661,10 +878,17 @@ const routingText = {
     save: '保存',
     saving: '保存中...',
     detectedIPv6Prefixes: '检测到的 IPv6 前缀',
+    editPrefixes: '编辑前缀',
+    editIPv6Prefixes: '编辑 IPv6 前缀',
+    addIPv6Prefix: '添加 IPv6 前缀',
+    noIPv6Prefixes: '暂无 IPv6 前缀',
+    ipv6InterfaceRequired: 'IPv6 网卡不能为空',
+    saveIPv6PrefixesFailed: '保存 IPv6 前缀失败',
     prefix: '前缀',
     hostAddress: '宿主地址',
     source: '来源',
     local: '本机',
+    manual: '手动',
     ipv4NAT: 'IPv4 NAT',
     searchNAT: '搜索 NAT...',
     noIPv4NATMappings: '暂无 IPv4 NAT 映射',
@@ -691,6 +915,11 @@ const routingText = {
     pageSubtitle: 'NAT4, public IPv4 pool, and IPv6 assignments',
     refresh: 'Refresh',
     nat4Ports: 'NAT4 ports',
+    editNAT4Range: 'Edit NAT4 range',
+    rangeStart: 'Start port',
+    rangeEnd: 'End port',
+    nat4RangeInvalid: 'NAT4 range must be 1-65535, and start cannot be greater than end',
+    saveNAT4RangeFailed: 'Save NAT4 range failed',
     remainingTotal: 'remaining / total',
     publicIPv4: 'Public IPv4',
     publicIPv4Pool: 'Public IPv4 pool',
@@ -720,10 +949,17 @@ const routingText = {
     save: 'Save',
     saving: 'Saving...',
     detectedIPv6Prefixes: 'Detected IPv6 prefixes',
+    editPrefixes: 'Edit prefixes',
+    editIPv6Prefixes: 'Edit IPv6 prefixes',
+    addIPv6Prefix: 'Add IPv6 prefix',
+    noIPv6Prefixes: 'No IPv6 prefixes',
+    ipv6InterfaceRequired: 'IPv6 interface is required',
+    saveIPv6PrefixesFailed: 'Save IPv6 prefixes failed',
     prefix: 'Prefix',
     hostAddress: 'Host address',
     source: 'Source',
     local: 'local',
+    manual: 'manual',
     ipv4NAT: 'IPv4 NAT',
     searchNAT: 'Search NAT...',
     noIPv4NATMappings: 'No IPv4 NAT mappings',
@@ -761,6 +997,10 @@ function formatDetectedPrefixCount(count: number, language: Language) {
   return language === 'en'
     ? `${count} detected ${count === 1 ? 'prefix' : 'prefixes'}`
     : `检测到 ${count} 个前缀`
+}
+
+function formatNATRange(range: NAT4PortRange, language: Language) {
+  return language === 'en' ? `range ${range.start}-${range.end}` : `范围 ${range.start}-${range.end}`
 }
 
 function formatPrefixCount(count: number, language: Language) {
@@ -801,6 +1041,7 @@ function formatContainerStatus(status: string, language: Language) {
 
 function formatSource(source: string | undefined, language: Language) {
   if (!source || source === 'local') return routingText[language].local
+  if (source === 'manual') return routingText[language].manual
   return source
 }
 

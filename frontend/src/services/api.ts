@@ -535,6 +535,11 @@ export interface RouteCapacity {
   total: string
 }
 
+export interface NAT4PortRange {
+  start: number
+  end: number
+}
+
 export interface NAT4Route {
   container_id: number
   container_name: string
@@ -571,6 +576,7 @@ export interface IPv6Route {
 
 export interface RoutingInfo {
   nat4: RouteCapacity
+  nat4_port_range: NAT4PortRange
   ipv4: RouteCapacity
   ipv6: RouteCapacity
   host_public_ipv4?: PublicIPv4Info
@@ -590,7 +596,7 @@ export interface PublicIPv4ScanResult extends PublicIPv4Info {
 export const getRoutingInfo = () =>
   api.get<APIResponse<RoutingInfo>>('/routing')
 
-export const updateRoutingPools = (payload: { items?: PublicIPv4Info[]; ipv6_prefixes?: IPv6PrefixInfo[] }) =>
+export const updateRoutingPools = (payload: { items?: PublicIPv4Info[]; ipv6_prefixes?: IPv6PrefixInfo[]; nat4_port_range?: NAT4PortRange }) =>
   api.put<APIResponse<RoutingInfo>>('/routing', payload)
 
 export const updateRoutingIPv4Pool = (items: PublicIPv4Info[]) =>
