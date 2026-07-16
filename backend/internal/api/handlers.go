@@ -452,12 +452,11 @@ func updateResourceLimit(w http.ResponseWriter, r *http.Request, id int) {
 	config.NormalizeContainerResourceAliases(c)
 	config.SaveConfig()
 
-	// Re-apply resource limits to running container
-	if c.Status == "running" {
-		if err := applyLimitsByRuntime(c); err != nil {
-			jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: err.Error()})
-			return
-		}
+	// Re-apply persisted/runtime limits. LXC also uses this path to migrate
+	// old managed config lines such as lxc.prlimit.nproc.
+	if err := applyLimitsByRuntime(c); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: err.Error()})
+		return
 	}
 
 	msg := "Resource limits updated"

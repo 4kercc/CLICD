@@ -632,8 +632,7 @@ func (m *Manager) applyResourceLimits(lxcName string, cfg ContainerConfig) error
 	// Keep sys_admin: unprivileged containers need it to mount tmpfs (/dev/shm, /run, etc.)
 	// All capabilities are already confined to the container's user namespace.
 	newLines = append(newLines, "lxc.cap.drop = mac_admin mac_override sys_module sys_rawio sys_time sys_boot sys_nice sys_resource sys_ptrace sys_pacct mknod audit_control audit_read")
-	newLines = append(newLines, "lxc.prlimit.nofile = 1024:4096")
-	newLines = append(newLines, "lxc.prlimit.nproc = 128:256")
+	newLines = append(newLines, managedPrlimitLines()...)
 	newLines = append(newLines, "", "# clicd managed resource limits (cgroup v2)")
 
 	if cfg.VCPU > 0 {
@@ -661,6 +660,13 @@ func (m *Manager) applyResourceLimits(lxcName string, cfg ContainerConfig) error
 		return fmt.Errorf("failed to write container config: %v", err)
 	}
 	return nil
+}
+
+func managedPrlimitLines() []string {
+	// Do not set lxc.prlimit.nproc for unprivileged containers: RLIMIT_NPROC is
+	// accounted by the host-mapped UID, so containers sharing a uid_map would
+	// consume one shared quota and fail to fork/exec during batch starts.
+	return []string{"lxc.prlimit.nofile = 1024:4096"}
 }
 
 func (m *Manager) ioLimitLines(lxcName string, readMBps int, writeMBps int) ([]string, error) {
@@ -1523,13 +1529,35 @@ func (m *Manager) waitForLXCStartup(lxcName, logFile, consoleLog string) error {
 }
 
 // applyBandwidthLimit applies tc-based bandwidth limit on container's veth interface
-// ApplyContainerLimits re-applies resource limits (CPU, RAM, IO, BW) to a running container.
+// ApplyContainerLimits re-applies persisted LXC config limits and, when running,
+// runtime cgroup/tc limits.
 func (m *Manager) ApplyContainerLimits(c *config.Container) error {
-	if c == nil || c.Status != "running" {
+	if c == nil {
 		return nil
 	}
 	config.NormalizeContainerResourceAliases(c)
 	lxcName := c.LxcName()
+	if err := m.applyResourceLimits(lxcName, ContainerConfig{
+		Name:             c.Name,
+		TemplateID:       c.Template,
+		VCPU:             c.VCPU,
+		RAMMB:            c.RAMMB,
+		DiskGB:           c.DiskGB,
+		NetworkBWMbps:    c.NetworkBWMbps,
+		NetworkDownMbps:  c.NetworkDownMbps,
+		NetworkUpMbps:    c.NetworkUpMbps,
+		MonthlyTrafficGB: c.MonthlyTrafficGB,
+		IOSpeedMBps:      c.IOSpeedMBps,
+		IOReadMBps:       c.IOReadMBps,
+		IOWriteMBps:      c.IOWriteMBps,
+		AssignIPv6:       c.IPv6 != "" || len(c.IPv6Addresses) > 0,
+		ExpiresAt:        c.ExpiresAt,
+	}); err != nil {
+		return err
+	}
+	if c.Status != "running" {
+		return nil
+	}
 
 	// CPU: write cpu.max
 	cpuQuota := int(c.VCPU * 100000)

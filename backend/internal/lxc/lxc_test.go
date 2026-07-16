@@ -113,6 +113,14 @@ open_by_handle_at errno 1
 	}
 }
 
+func TestManagedPrlimitLinesDoNotSetNproc(t *testing.T) {
+	for _, line := range managedPrlimitLines() {
+		if strings.HasPrefix(strings.TrimSpace(line), "lxc.prlimit.nproc") {
+			t.Fatalf("managed prlimit lines must not set nproc: %q", line)
+		}
+	}
+}
+
 func TestAppendMissingSeccompRulesAddsFutexMitigationOnce(t *testing.T) {
 	base := "2\ndenylist\n[all]\nopen_by_handle_at errno 1\n"
 
