@@ -376,6 +376,10 @@ func (m *Manager) CreateContainer(cfg lxc.ContainerConfig) error {
 	if cfg.SnapshotLimit <= 0 {
 		cfg.SnapshotLimit = config.DefaultSnapshotLimit
 	}
+	if !cfg.ImageLimitConfigured && len(cfg.AllowedImageIDs) == 0 && cfg.TemplateID != "" {
+		cfg.AllowedImageIDs = []string{cfg.TemplateID}
+		cfg.ImageLimitConfigured = true
+	}
 
 	id := config.AllocateContainerID()
 	vmName := fmt.Sprintf("vm-%d", id)
@@ -567,11 +571,13 @@ func (m *Manager) defineContainer(id int, vmName string, cfg lxc.ContainerConfig
 			}
 			return sshPassword
 		}(),
-		PortMappings:     portMappings,
-		PortMappingLimit: cfg.PortMappingCount,
-		SnapshotLimit:    config.NormalizeSnapshotLimit(cfg.SnapshotLimit),
-		CreatedAt:        now,
-		ExpiresAt:        cfg.ExpiresAt,
+		PortMappings:         portMappings,
+		PortMappingLimit:     cfg.PortMappingCount,
+		AllowedImageIDs:      append([]string(nil), cfg.AllowedImageIDs...),
+		ImageLimitConfigured: cfg.ImageLimitConfigured,
+		SnapshotLimit:        config.NormalizeSnapshotLimit(cfg.SnapshotLimit),
+		CreatedAt:            now,
+		ExpiresAt:            cfg.ExpiresAt,
 	}
 	container.NormalizeNetworkAssignments()
 	return container, nil

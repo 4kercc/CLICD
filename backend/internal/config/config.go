@@ -143,6 +143,8 @@ type Container struct {
 	FirewallEnabled               bool                   `json:"firewall_enabled"`
 	FirewallDefaultAction         string                 `json:"firewall_default_action"`
 	FirewallRules                 []FirewallRule         `json:"firewall_rules"`
+	AllowedImageIDs               []string               `json:"allowed_image_ids,omitempty"`
+	ImageLimitConfigured          bool                   `json:"image_limit_configured,omitempty"`
 	SnapshotLimit                 int                    `json:"snapshot_limit"`
 	CreatedAt                     string                 `json:"created_at"`
 	ExpiresAt                     string                 `json:"expires_at"`
@@ -319,16 +321,18 @@ func DeleteApiKey(id string) {
 }
 
 type SubUser struct {
-	ID             string   `json:"id"`
-	Username       string   `json:"username"`
-	Password       string   `json:"password,omitempty"`
-	PassHash       string   `json:"pass_hash"`
-	ContainerNames []string `json:"container_names"`
-	ContainerUUIDs []string `json:"container_uuids,omitempty"`
-	Token          string   `json:"-"`
-	AccessCode     string   `json:"access_code"`
-	CreatedAt      string   `json:"created_at"`
-	TokenVersion   int      `json:"token_version"`
+	ID                   string   `json:"id"`
+	Username             string   `json:"username"`
+	Password             string   `json:"password,omitempty"`
+	PassHash             string   `json:"pass_hash"`
+	ContainerNames       []string `json:"container_names"`
+	ContainerUUIDs       []string `json:"container_uuids,omitempty"`
+	AllowedImageIDs      []string `json:"allowed_image_ids,omitempty"`
+	ImageLimitConfigured bool     `json:"image_limit_configured,omitempty"`
+	Token                string   `json:"-"`
+	AccessCode           string   `json:"access_code"`
+	CreatedAt            string   `json:"created_at"`
+	TokenVersion         int      `json:"token_version"`
 }
 
 type Snapshot struct {

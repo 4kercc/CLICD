@@ -523,10 +523,12 @@ export default function ContainerDetail() {
 
   const openReinstall = async () => {
     try {
-      const res = await getEnabledImages(container?.virtualization || 'lxc')
+      const res = await getEnabledImages(container?.virtualization || 'lxc', containerIdentifier)
       if (res.data.data) {
-        setTemplates(res.data.data)
-        setSelectedTemplate(res.data.data[0]?.id || '')
+        const data = res.data.data
+        setTemplates(data)
+        const currentTemplate = container?.template || ''
+        setSelectedTemplate(data.some((template) => template.id === currentTemplate) ? currentTemplate : (data[0]?.id || ''))
       }
       setReinstallAuthMode('keep')
       setReinstallPasswordDraft('')

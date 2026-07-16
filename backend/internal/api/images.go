@@ -541,6 +541,24 @@ func HandleEnabledImages(w http.ResponseWriter, r *http.Request) {
 
 	runtime := runtimeFromRequest(r.URL.Query().Get("type"))
 	enabledSet := getEnabledImageSet()
+	var subUser *config.SubUser
+	var targetContainer *config.Container
+	currentImageIDs := map[string]bool{}
+	if isSubUserRequest(r) {
+		subUser = subUserFromRequest(r)
+		if identifier := r.URL.Query().Get("container"); identifier != "" {
+			targetContainer = containerByIdentifier(identifier)
+			if targetContainer == nil || !isContainerAllowedForRequest(r, identifier) {
+				jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "Access denied to this container"})
+				return
+			}
+			currentImageIDs[targetContainer.Template] = true
+		} else {
+			for _, id := range subUserCurrentImageIDs(subUser) {
+				currentImageIDs[id] = true
+			}
+		}
+	}
 
 	result := make([]map[string]string, 0)
 	if runtime == config.VirtualizationKVM {
@@ -549,7 +567,10 @@ func HandleEnabledImages(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for _, t := range kvm.GetImages() {
-			if downloaded, _ := kvm.ImageDownloadedInfo(t.ID); enabledSet[t.ID] && downloaded {
+			if subUser != nil && !isImageAllowedForSubUser(subUser, targetContainer, t.ID) {
+				continue
+			}
+			if downloaded, _ := kvm.ImageDownloadedInfo(t.ID); downloaded && (enabledSet[t.ID] || currentImageIDs[t.ID]) {
 				result = append(result, map[string]string{
 					"id": t.ID, "name": t.Name, "distro": t.Distro, "release": t.Release, "arch": t.Arch,
 					"description": t.Description, "type": config.VirtualizationKVM, "desktop": t.Desktop,
@@ -558,7 +579,10 @@ func HandleEnabledImages(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		for _, t := range lxc.GetTemplates() {
-			if enabledSet[t.ID] && isImageDownloaded(t.Distro, t.Release, t.Arch) {
+			if subUser != nil && !isImageAllowedForSubUser(subUser, targetContainer, t.ID) {
+				continue
+			}
+			if downloaded := isImageDownloaded(t.Distro, t.Release, t.Arch); downloaded && (enabledSet[t.ID] || currentImageIDs[t.ID]) {
 				result = append(result, map[string]string{
 					"id": t.ID, "name": t.Name, "distro": t.Distro, "release": t.Release, "arch": t.Arch,
 					"variant": t.Variant, "description": t.Description, "type": config.VirtualizationLXC,
@@ -572,6 +596,42 @@ func HandleEnabledImages(w http.ResponseWriter, r *http.Request) {
 
 func isTemplateEnabledAndDownloaded(templateID string) bool {
 	return isImageEnabledAndDownloaded(templateID, runtimeFromTemplateID(templateID))
+}
+
+func imageTemplateExists(templateID string) bool {
+	return lxc.FindTemplate(templateID) != nil || kvm.FindImage(templateID) != nil
+}
+
+func isImageDownloadedForRuntime(templateID string, runtime string) bool {
+	runtime = runtimeFromRequest(runtime)
+	if runtime == config.VirtualizationKVM {
+		if !hostKVMAvailable() {
+			return false
+		}
+		image := kvm.FindImage(templateID)
+		if image == nil {
+			return false
+		}
+		downloaded, _ := kvm.ImageDownloadedInfo(image.ID)
+		return downloaded
+	}
+	tmpl := lxc.FindTemplate(templateID)
+	if tmpl == nil {
+		return false
+	}
+	return isImageDownloaded(tmpl.Distro, tmpl.Release, tmpl.Arch)
+}
+
+func isTemplateAvailableForRequest(r *http.Request, c *config.Container, templateID string, runtime string) bool {
+	if isSubUserRequest(r) {
+		if !isTemplateAllowedForRequest(r, c, templateID) {
+			return false
+		}
+		if c != nil && c.Template == templateID {
+			return isImageDownloadedForRuntime(templateID, runtime)
+		}
+	}
+	return isImageEnabledAndDownloaded(templateID, runtime)
 }
 
 func isImageEnabledAndDownloaded(templateID string, runtime string) bool {

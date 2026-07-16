@@ -20,37 +20,39 @@ var (
 )
 
 type savedTaskConfig struct {
-	Name             string   `json:"name"`
-	Virtualization   string   `json:"virtualization,omitempty"`
-	TemplateID       string   `json:"template_id"`
-	VCPU             float64  `json:"vcpu"`
-	CPUPercent       int      `json:"cpu_percent"`
-	RAMMB            int      `json:"ram_mb"`
-	DiskGB           int      `json:"disk_gb"`
-	NetworkBWMbps    int      `json:"network_bw_mbps"`
-	NetworkDownMbps  int      `json:"network_down_mbps"`
-	NetworkUpMbps    int      `json:"network_up_mbps"`
-	MonthlyTrafficGB int      `json:"monthly_traffic_gb"`
-	TrafficMode      string   `json:"traffic_mode"`
-	TrafficInGB      int      `json:"traffic_in_gb"`
-	TrafficOutGB     int      `json:"traffic_out_gb"`
-	IOSpeedMBps      int      `json:"io_speed_mbps"`
-	IOReadMBps       int      `json:"io_read_mbps"`
-	IOWriteMBps      int      `json:"io_write_mbps"`
-	ExtraPorts       []int    `json:"extra_ports"`
-	PortMappingCount int      `json:"port_mapping_count"`
-	AssignNAT        *bool    `json:"assign_nat,omitempty"`
-	SnapshotLimit    int      `json:"snapshot_limit"`
-	AssignIPv4       bool     `json:"assign_ipv4"`
-	IPv4Count        int      `json:"ipv4_count,omitempty"`
-	PublicIPv4s      []string `json:"public_ipv4s,omitempty"`
-	AssignIPv6       bool     `json:"assign_ipv6"`
-	IPv6Count        int      `json:"ipv6_count,omitempty"`
-	IPv6Addresses    []string `json:"ipv6_addresses,omitempty"`
-	SSHAuthMode      string   `json:"ssh_auth_mode,omitempty"`
-	SSHPassword      string   `json:"ssh_password,omitempty"`
-	SSHPublicKey     string   `json:"ssh_public_key,omitempty"`
-	ExpiresAt        string   `json:"expires_at"`
+	Name                 string   `json:"name"`
+	Virtualization       string   `json:"virtualization,omitempty"`
+	TemplateID           string   `json:"template_id"`
+	VCPU                 float64  `json:"vcpu"`
+	CPUPercent           int      `json:"cpu_percent"`
+	RAMMB                int      `json:"ram_mb"`
+	DiskGB               int      `json:"disk_gb"`
+	NetworkBWMbps        int      `json:"network_bw_mbps"`
+	NetworkDownMbps      int      `json:"network_down_mbps"`
+	NetworkUpMbps        int      `json:"network_up_mbps"`
+	MonthlyTrafficGB     int      `json:"monthly_traffic_gb"`
+	TrafficMode          string   `json:"traffic_mode"`
+	TrafficInGB          int      `json:"traffic_in_gb"`
+	TrafficOutGB         int      `json:"traffic_out_gb"`
+	IOSpeedMBps          int      `json:"io_speed_mbps"`
+	IOReadMBps           int      `json:"io_read_mbps"`
+	IOWriteMBps          int      `json:"io_write_mbps"`
+	ExtraPorts           []int    `json:"extra_ports"`
+	PortMappingCount     int      `json:"port_mapping_count"`
+	AssignNAT            *bool    `json:"assign_nat,omitempty"`
+	SnapshotLimit        int      `json:"snapshot_limit"`
+	AllowedImageIDs      []string `json:"allowed_image_ids,omitempty"`
+	ImageLimitConfigured bool     `json:"image_limit_configured,omitempty"`
+	AssignIPv4           bool     `json:"assign_ipv4"`
+	IPv4Count            int      `json:"ipv4_count,omitempty"`
+	PublicIPv4s          []string `json:"public_ipv4s,omitempty"`
+	AssignIPv6           bool     `json:"assign_ipv6"`
+	IPv6Count            int      `json:"ipv6_count,omitempty"`
+	IPv6Addresses        []string `json:"ipv6_addresses,omitempty"`
+	SSHAuthMode          string   `json:"ssh_auth_mode,omitempty"`
+	SSHPassword          string   `json:"ssh_password,omitempty"`
+	SSHPublicKey         string   `json:"ssh_public_key,omitempty"`
+	ExpiresAt            string   `json:"expires_at"`
 }
 
 func parseSavedTaskConfig(raw string) savedTaskConfig {
@@ -222,7 +224,9 @@ func ensureSchema() error {
 			snapshot_schedule_created_by TEXT,
 			policy_blocked INTEGER,
 			policy_blocked_reason TEXT,
-			policy_blocked_at TEXT
+			policy_blocked_at TEXT,
+			allowed_image_ids TEXT,
+			image_limit_configured INTEGER NOT NULL DEFAULT 0
 		)`,
 		`CREATE TABLE IF NOT EXISTS port_mappings (
 			container_id INTEGER NOT NULL,
@@ -258,7 +262,9 @@ func ensureSchema() error {
 			pass_hash TEXT,
 			access_code TEXT,
 			created_at TEXT,
-			token_version INTEGER
+			token_version INTEGER,
+			allowed_image_ids TEXT,
+			image_limit_configured INTEGER NOT NULL DEFAULT 0
 		)`,
 		`CREATE TABLE IF NOT EXISTS sub_user_container_names (
 			sub_user_id TEXT NOT NULL,
@@ -348,6 +354,8 @@ func ensureSchema() error {
 			cfg_ssh_auth_mode TEXT,
 			cfg_ssh_password TEXT,
 			cfg_ssh_public_key TEXT,
+			cfg_allowed_image_ids TEXT,
+			cfg_image_limit_configured INTEGER NOT NULL DEFAULT 0,
 			cfg_expires_at TEXT
 		)`,
 		`CREATE TABLE IF NOT EXISTS task_extra_ports (
@@ -415,9 +423,13 @@ func ensureSchemaMigrations() error {
 		{"tasks", "cfg_ssh_auth_mode", "TEXT"},
 		{"tasks", "cfg_ssh_password", "TEXT"},
 		{"tasks", "cfg_ssh_public_key", "TEXT"},
+		{"tasks", "cfg_allowed_image_ids", "TEXT"},
+		{"tasks", "cfg_image_limit_configured", "INTEGER NOT NULL DEFAULT 0"},
 		{"port_mappings", "host_ip", "TEXT"},
 		{"container_public_ipv4s", "prefix_len", "INTEGER"},
 		{"container_public_ipv4s", "gateway", "TEXT"},
+		{"sub_users", "allowed_image_ids", "TEXT"},
+		{"sub_users", "image_limit_configured", "INTEGER NOT NULL DEFAULT 0"},
 		{"containers", "network_down_mbps", "INTEGER NOT NULL DEFAULT 0"},
 		{"containers", "network_up_mbps", "INTEGER NOT NULL DEFAULT 0"},
 		{"containers", "io_read_mbps", "INTEGER NOT NULL DEFAULT 0"},
@@ -425,6 +437,8 @@ func ensureSchemaMigrations() error {
 		{"containers", "firewall_enabled", "INTEGER NOT NULL DEFAULT 0"},
 		{"containers", "firewall_default_action", "TEXT NOT NULL DEFAULT 'DROP'"},
 		{"containers", "firewall_rules", "TEXT"},
+		{"containers", "allowed_image_ids", "TEXT"},
+		{"containers", "image_limit_configured", "INTEGER NOT NULL DEFAULT 0"},
 	} {
 		wasAdded, err := ensureColumn(column.table, column.name, column.def)
 		if err != nil {
@@ -677,6 +691,7 @@ func saveMeta(tx *sql.Tx) error {
 func saveContainers(tx *sql.Tx) error {
 	for _, c := range AppConfig.Containers {
 		NormalizeContainerResourceAliases(&c)
+		allowedImageIDs := encodeStringSlice(c.AllowedImageIDs)
 		if _, err := tx.Exec(`INSERT INTO containers (
 			id, uuid, name, virtualization, lxc_name, kvm_name, disk_image, mac_address, template,
 			vcpu, ram_mb, disk_gb, network_bw_mbps, network_down_mbps, network_up_mbps,
@@ -688,8 +703,8 @@ func saveContainers(tx *sql.Tx) error {
 			snapshot_schedule_enabled, snapshot_schedule_interval_hours, snapshot_schedule_time,
 			snapshot_schedule_last_run, snapshot_schedule_next_run, snapshot_schedule_created_by,
 			policy_blocked, policy_blocked_reason, policy_blocked_at,
-			firewall_enabled, firewall_default_action, firewall_rules
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			firewall_enabled, firewall_default_action, firewall_rules, allowed_image_ids, image_limit_configured
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			c.ID, c.UUID, c.Name, c.Virtualization, c.LXCName, c.KVMName, c.DiskImage, c.MACAddress, c.Template,
 			c.VCPU, c.RAMMB, c.DiskGB, c.NetworkBWMbps, c.NetworkDownMbps, c.NetworkUpMbps,
 			c.MonthlyTrafficGB, c.TrafficMode, c.TrafficInGB,
@@ -700,7 +715,7 @@ func saveContainers(tx *sql.Tx) error {
 			boolInt(c.SnapshotScheduleEnabled), c.SnapshotScheduleIntervalHours, c.SnapshotScheduleTime,
 			c.SnapshotScheduleLastRun, c.SnapshotScheduleNextRun, c.SnapshotScheduleCreatedBy,
 			boolInt(c.PolicyBlocked), c.PolicyBlockedReason, c.PolicyBlockedAt,
-			boolInt(c.FirewallEnabled), normalizeFirewallDefaultAction(c.FirewallDefaultAction), marshalFirewallRules(c.FirewallRules),
+			boolInt(c.FirewallEnabled), normalizeFirewallDefaultAction(c.FirewallDefaultAction), marshalFirewallRules(c.FirewallRules), allowedImageIDs, boolInt(c.ImageLimitConfigured),
 		); err != nil {
 			return err
 		}
@@ -728,8 +743,9 @@ func saveContainers(tx *sql.Tx) error {
 
 func saveSubUsers(tx *sql.Tx) error {
 	for _, su := range AppConfig.SubUsers {
-		if _, err := tx.Exec(`INSERT INTO sub_users(id, username, password, pass_hash, access_code, created_at, token_version)
-			VALUES (?, ?, ?, ?, ?, ?, ?)`, su.ID, su.Username, su.Password, su.PassHash, su.AccessCode, su.CreatedAt, su.TokenVersion); err != nil {
+		allowedImageIDs := encodeStringSlice(su.AllowedImageIDs)
+		if _, err := tx.Exec(`INSERT INTO sub_users(id, username, password, pass_hash, access_code, created_at, token_version, allowed_image_ids, image_limit_configured)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, su.ID, su.Username, su.Password, su.PassHash, su.AccessCode, su.CreatedAt, su.TokenVersion, allowedImageIDs, boolInt(su.ImageLimitConfigured)); err != nil {
 			return err
 		}
 		for i, name := range su.ContainerNames {
@@ -840,8 +856,8 @@ func saveTasksDB(tx *sql.Tx) error {
 			cfg_traffic_out_gb, cfg_io_speed_mbps, cfg_io_read_mbps, cfg_io_write_mbps,
 			cfg_port_mapping_count, cfg_assign_nat, cfg_snapshot_limit,
 			cfg_assign_ipv4, cfg_ipv4_count, cfg_public_ipv4s, cfg_assign_ipv6, cfg_ipv6_count, cfg_ipv6_addresses,
-			cfg_ssh_auth_mode, cfg_ssh_password, cfg_ssh_public_key, cfg_expires_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			cfg_ssh_auth_mode, cfg_ssh_password, cfg_ssh_public_key, cfg_allowed_image_ids, cfg_image_limit_configured, cfg_expires_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			task.ID, task.Type, task.ContainerID, task.ContainerName, task.Status, task.Error, task.CreatedAt, task.TemplateID, task.User, task.IP, task.UserAgent,
 			cfg.Name, cfg.Virtualization, cfg.TemplateID, cfg.VCPU, cfg.CPUPercent, cfg.RAMMB, cfg.DiskGB,
 			cfg.NetworkBWMbps, cfg.NetworkDownMbps, cfg.NetworkUpMbps,
@@ -850,7 +866,7 @@ func saveTasksDB(tx *sql.Tx) error {
 			cfg.PortMappingCount, boolPtrInt(cfg.AssignNAT), cfg.SnapshotLimit,
 			boolInt(cfg.AssignIPv4), cfg.IPv4Count, encodeStringSlice(cfg.PublicIPv4s),
 			boolInt(cfg.AssignIPv6), cfg.IPv6Count, encodeStringSlice(cfg.IPv6Addresses),
-			cfg.SSHAuthMode, cfg.SSHPassword, cfg.SSHPublicKey, cfg.ExpiresAt,
+			cfg.SSHAuthMode, cfg.SSHPassword, cfg.SSHPublicKey, encodeStringSlice(cfg.AllowedImageIDs), boolInt(cfg.ImageLimitConfigured), cfg.ExpiresAt,
 		); err != nil {
 			return err
 		}
@@ -904,7 +920,7 @@ func loadContainers() ([]Container, error) {
 		snapshot_schedule_enabled, snapshot_schedule_interval_hours, snapshot_schedule_time,
 		snapshot_schedule_last_run, snapshot_schedule_next_run, snapshot_schedule_created_by,
 		policy_blocked, policy_blocked_reason, policy_blocked_at,
-		firewall_enabled, firewall_default_action, firewall_rules
+		firewall_enabled, firewall_default_action, firewall_rules, allowed_image_ids, image_limit_configured
 		FROM containers ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -914,9 +930,9 @@ func loadContainers() ([]Container, error) {
 	result := []Container{}
 	for rows.Next() {
 		var c Container
-		var scheduleEnabled, policyBlocked, firewallEnabled int
+		var scheduleEnabled, policyBlocked, firewallEnabled, imageLimitConfigured int
 		var firewallDefaultAction string
-		var firewallRulesJSON sql.NullString
+		var firewallRulesJSON, allowedImageIDs sql.NullString
 		if err := rows.Scan(
 			&c.ID, &c.UUID, &c.Name, &c.Virtualization, &c.LXCName, &c.KVMName, &c.DiskImage, &c.MACAddress, &c.Template,
 			&c.VCPU, &c.RAMMB, &c.DiskGB, &c.NetworkBWMbps, &c.NetworkDownMbps, &c.NetworkUpMbps,
@@ -928,7 +944,7 @@ func loadContainers() ([]Container, error) {
 			&scheduleEnabled, &c.SnapshotScheduleIntervalHours, &c.SnapshotScheduleTime,
 			&c.SnapshotScheduleLastRun, &c.SnapshotScheduleNextRun, &c.SnapshotScheduleCreatedBy,
 			&policyBlocked, &c.PolicyBlockedReason, &c.PolicyBlockedAt,
-			&firewallEnabled, &firewallDefaultAction, &firewallRulesJSON,
+			&firewallEnabled, &firewallDefaultAction, &firewallRulesJSON, &allowedImageIDs, &imageLimitConfigured,
 		); err != nil {
 			return nil, err
 		}
@@ -936,9 +952,11 @@ func loadContainers() ([]Container, error) {
 		c.PolicyBlocked = policyBlocked != 0
 		c.FirewallEnabled = firewallEnabled != 0
 		c.FirewallDefaultAction = normalizeFirewallDefaultAction(firewallDefaultAction)
+		c.ImageLimitConfigured = imageLimitConfigured != 0
 		if firewallRulesJSON.Valid && strings.TrimSpace(firewallRulesJSON.String) != "" {
 			_ = json.Unmarshal([]byte(firewallRulesJSON.String), &c.FirewallRules)
 		}
+		c.AllowedImageIDs = decodeStringSlice(allowedImageIDs.String)
 		NormalizeContainerResourceAliases(&c)
 		result = append(result, c)
 	}
@@ -1034,7 +1052,7 @@ func loadContainerIPv6Addresses(containerID int) ([]IPv6Assignment, error) {
 }
 
 func loadSubUsers() ([]SubUser, error) {
-	rows, err := db.Query(`SELECT id, username, password, pass_hash, access_code, created_at, token_version FROM sub_users ORDER BY created_at, id`)
+	rows, err := db.Query(`SELECT id, username, password, pass_hash, access_code, created_at, token_version, allowed_image_ids, image_limit_configured FROM sub_users ORDER BY created_at, id`)
 	if err != nil {
 		return nil, err
 	}
@@ -1042,9 +1060,13 @@ func loadSubUsers() ([]SubUser, error) {
 	result := []SubUser{}
 	for rows.Next() {
 		var su SubUser
-		if err := rows.Scan(&su.ID, &su.Username, &su.Password, &su.PassHash, &su.AccessCode, &su.CreatedAt, &su.TokenVersion); err != nil {
+		var allowedImageIDs sql.NullString
+		var imageLimitConfigured int
+		if err := rows.Scan(&su.ID, &su.Username, &su.Password, &su.PassHash, &su.AccessCode, &su.CreatedAt, &su.TokenVersion, &allowedImageIDs, &imageLimitConfigured); err != nil {
 			return nil, err
 		}
+		su.AllowedImageIDs = decodeStringSlice(allowedImageIDs.String)
+		su.ImageLimitConfigured = imageLimitConfigured != 0
 		result = append(result, su)
 	}
 	if err := rows.Err(); err != nil {
@@ -1138,7 +1160,7 @@ func loadTasks() ([]SavedTask, error) {
 		cfg_traffic_out_gb, cfg_io_speed_mbps, cfg_io_read_mbps, cfg_io_write_mbps,
 		cfg_port_mapping_count, cfg_assign_nat, cfg_snapshot_limit,
 		cfg_assign_ipv4, cfg_ipv4_count, cfg_public_ipv4s, cfg_assign_ipv6, cfg_ipv6_count, cfg_ipv6_addresses,
-		cfg_ssh_auth_mode, cfg_ssh_password, cfg_ssh_public_key, cfg_expires_at
+		cfg_ssh_auth_mode, cfg_ssh_password, cfg_ssh_public_key, cfg_allowed_image_ids, cfg_image_limit_configured, cfg_expires_at
 		FROM tasks ORDER BY created_at, id`)
 	if err != nil {
 		return nil, err
@@ -1149,9 +1171,9 @@ func loadTasks() ([]SavedTask, error) {
 	for rows.Next() {
 		var t SavedTask
 		var cfg savedTaskConfig
-		var assignIPv4, assignIPv6 int
+		var assignIPv4, assignIPv6, imageLimitConfigured int
 		var ip, userAgent, publicIPv4s, ipv6Addresses sql.NullString
-		var sshAuthMode, sshPassword, sshPublicKey sql.NullString
+		var sshAuthMode, sshPassword, sshPublicKey, allowedImageIDs sql.NullString
 		var assignNAT, ipv4Count, ipv6Count sql.NullInt64
 		if err := rows.Scan(
 			&t.ID, &t.Type, &t.ContainerID, &t.ContainerName, &t.Status, &t.Error, &t.CreatedAt, &t.TemplateID, &t.User, &ip, &userAgent,
@@ -1161,7 +1183,7 @@ func loadTasks() ([]SavedTask, error) {
 			&cfg.TrafficOutGB, &cfg.IOSpeedMBps, &cfg.IOReadMBps, &cfg.IOWriteMBps,
 			&cfg.PortMappingCount, &assignNAT, &cfg.SnapshotLimit,
 			&assignIPv4, &ipv4Count, &publicIPv4s, &assignIPv6, &ipv6Count, &ipv6Addresses,
-			&sshAuthMode, &sshPassword, &sshPublicKey, &cfg.ExpiresAt,
+			&sshAuthMode, &sshPassword, &sshPublicKey, &allowedImageIDs, &imageLimitConfigured, &cfg.ExpiresAt,
 		); err != nil {
 			return nil, err
 		}
@@ -1184,6 +1206,8 @@ func loadTasks() ([]SavedTask, error) {
 		cfg.SSHAuthMode = sshAuthMode.String
 		cfg.SSHPassword = sshPassword.String
 		cfg.SSHPublicKey = sshPublicKey.String
+		cfg.AllowedImageIDs = decodeStringSlice(allowedImageIDs.String)
+		cfg.ImageLimitConfigured = imageLimitConfigured != 0
 		normalizeSavedTaskConfigLimits(&cfg)
 		result = append(result, t)
 		configs = append(configs, cfg)

@@ -22,24 +22,30 @@ func generateRandomStr(length int) string {
 }
 
 type subUserResponse struct {
-	ID             string   `json:"id"`
-	Username       string   `json:"username"`
-	Password       string   `json:"password,omitempty"`
-	ContainerNames []string `json:"container_names"`
-	ContainerUUIDs []string `json:"container_uuids,omitempty"`
-	AccessCode     string   `json:"access_code"`
-	CreatedAt      string   `json:"created_at"`
+	ID                   string   `json:"id"`
+	Username             string   `json:"username"`
+	Password             string   `json:"password,omitempty"`
+	ContainerNames       []string `json:"container_names"`
+	ContainerUUIDs       []string `json:"container_uuids,omitempty"`
+	AllowedImageIDs      []string `json:"allowed_image_ids,omitempty"`
+	ImageLimitConfigured bool     `json:"image_limit_configured,omitempty"`
+	CurrentImageIDs      []string `json:"current_image_ids,omitempty"`
+	AccessCode           string   `json:"access_code"`
+	CreatedAt            string   `json:"created_at"`
 }
 
 func newSubUserResponse(su config.SubUser, password string) subUserResponse {
 	return subUserResponse{
-		ID:             su.ID,
-		Username:       su.Username,
-		Password:       password,
-		ContainerNames: su.ContainerNames,
-		ContainerUUIDs: su.ContainerUUIDs,
-		AccessCode:     su.AccessCode,
-		CreatedAt:      su.CreatedAt,
+		ID:                   su.ID,
+		Username:             su.Username,
+		Password:             password,
+		ContainerNames:       su.ContainerNames,
+		ContainerUUIDs:       su.ContainerUUIDs,
+		AllowedImageIDs:      effectiveSubUserAllowedImageIDs(&su),
+		ImageLimitConfigured: su.ImageLimitConfigured,
+		CurrentImageIDs:      subUserCurrentImageIDs(&su),
+		AccessCode:           su.AccessCode,
+		CreatedAt:            su.CreatedAt,
 	}
 }
 
@@ -94,6 +100,10 @@ func HandleSubUserCreate(w http.ResponseWriter, r *http.Request) {
 				}
 				su.ContainerNames = appendUniqueString(su.ContainerNames, containerName)
 				su.ContainerUUIDs = appendUniqueString(su.ContainerUUIDs, c.UUID)
+				if !su.ImageLimitConfigured && len(su.AllowedImageIDs) == 0 {
+					su.AllowedImageIDs = effectiveContainerAllowedImageIDs(c)
+					su.ImageLimitConfigured = true
+				}
 				config.SaveConfig()
 				jsonResponse(w, http.StatusOK, APIResponse{
 					Success: true,
@@ -114,14 +124,16 @@ func HandleSubUserCreate(w http.ResponseWriter, r *http.Request) {
 	accessCode := generateRandomStr(8)
 
 	subUser := config.SubUser{
-		ID:             "sub-" + generateRandomStr(8),
-		Username:       username,
-		Password:       password,
-		PassHash:       string(hash),
-		ContainerNames: []string{containerName},
-		ContainerUUIDs: []string{c.UUID},
-		AccessCode:     accessCode,
-		CreatedAt:      time.Now().Format("2006-01-02 15:04:05"),
+		ID:                   "sub-" + generateRandomStr(8),
+		Username:             username,
+		Password:             password,
+		PassHash:             string(hash),
+		ContainerNames:       []string{containerName},
+		ContainerUUIDs:       []string{c.UUID},
+		AllowedImageIDs:      effectiveContainerAllowedImageIDs(c),
+		ImageLimitConfigured: true,
+		AccessCode:           accessCode,
+		CreatedAt:            time.Now().Format("2006-01-02 15:04:05"),
 	}
 
 	config.AppConfig.SubUsers = append(config.AppConfig.SubUsers, subUser)
@@ -304,6 +316,155 @@ func requestAllowedContainers(r *http.Request) (subUserAccess, bool) {
 		}
 	}
 	return subUserAllowedContainers(r)
+}
+
+func subUserFromRequest(r *http.Request) *config.SubUser {
+	username := ""
+	if ctx, ok := authContextFromRequest(r); ok && ctx.Type == authTypeSubUser {
+		username = ctx.Username
+	}
+	if username == "" {
+		if claims, ok := claimsFromRequest(r); ok {
+			username, _ = claims["sub_user"].(string)
+		}
+	}
+	if username == "" {
+		return nil
+	}
+	for i := range config.AppConfig.SubUsers {
+		if config.AppConfig.SubUsers[i].Username == username {
+			return &config.AppConfig.SubUsers[i]
+		}
+	}
+	return nil
+}
+
+func normalizeAllowedImageIDs(ids []string) ([]string, error) {
+	seen := map[string]bool{}
+	result := make([]string, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" || seen[id] {
+			continue
+		}
+		if !imageTemplateExists(id) {
+			return nil, fmt.Errorf("unknown image template: %s", id)
+		}
+		seen[id] = true
+		result = append(result, id)
+	}
+	return result, nil
+}
+
+func isTemplateAllowedForRequest(r *http.Request, c *config.Container, templateID string) bool {
+	if !isSubUserRequest(r) {
+		return true
+	}
+	return isImageAllowedForSubUser(subUserFromRequest(r), c, templateID)
+}
+
+func isImageAllowedForSubUser(su *config.SubUser, c *config.Container, templateID string) bool {
+	if su == nil || strings.TrimSpace(templateID) == "" {
+		return false
+	}
+	for _, id := range effectiveSubUserAllowedImageIDs(su) {
+		if id == templateID {
+			return true
+		}
+	}
+	return false
+}
+
+func effectiveContainerAllowedImageIDs(c *config.Container) []string {
+	if c == nil {
+		return nil
+	}
+	if c.ImageLimitConfigured || len(c.AllowedImageIDs) > 0 {
+		return cleanImageIDList(c.AllowedImageIDs)
+	}
+	if c.Template != "" {
+		return []string{c.Template}
+	}
+	return nil
+}
+
+func effectiveSubUserAllowedImageIDs(su *config.SubUser) []string {
+	if su == nil {
+		return nil
+	}
+	if su.ImageLimitConfigured || len(su.AllowedImageIDs) > 0 {
+		return cleanImageIDList(su.AllowedImageIDs)
+	}
+	result := []string{}
+	seen := map[string]bool{}
+	for _, c := range subUserAssignedContainers(su) {
+		for _, id := range effectiveContainerAllowedImageIDs(c) {
+			if id != "" && !seen[id] {
+				seen[id] = true
+				result = append(result, id)
+			}
+		}
+	}
+	return result
+}
+
+func cleanImageIDList(ids []string) []string {
+	result := make([]string, 0, len(ids))
+	seen := map[string]bool{}
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		result = append(result, id)
+	}
+	return result
+}
+
+func subUserCurrentImageIDs(su *config.SubUser) []string {
+	seen := map[string]bool{}
+	result := []string{}
+	for _, c := range subUserAssignedContainers(su) {
+		if c.Template != "" && !seen[c.Template] {
+			seen[c.Template] = true
+			result = append(result, c.Template)
+		}
+	}
+	return result
+}
+
+func subUserAssignedContainers(su *config.SubUser) []*config.Container {
+	if su == nil {
+		return nil
+	}
+	result := make([]*config.Container, 0, len(su.ContainerUUIDs)+len(su.ContainerNames))
+	seen := map[string]bool{}
+	for _, uuid := range su.ContainerUUIDs {
+		if c := config.FindContainerByUUID(uuid); c != nil {
+			key := c.UUID
+			if key == "" {
+				key = c.Name
+			}
+			if !seen[key] {
+				seen[key] = true
+				result = append(result, c)
+			}
+		}
+	}
+	for _, name := range su.ContainerNames {
+		if c := config.FindContainerByName(name); c != nil {
+			key := c.UUID
+			if key == "" {
+				key = c.Name
+			}
+			if !seen[key] {
+				seen[key] = true
+				result = append(result, c)
+			}
+		}
+	}
+	return result
 }
 
 func isAccessRestrictedRequest(r *http.Request) bool {
@@ -580,18 +741,21 @@ func splitBy(s, sep string) []string {
 
 // SubUserListItem is the enriched sub-user info returned by the list API
 type SubUserListItem struct {
-	ID             string   `json:"id"`
-	Username       string   `json:"username"`
-	ContainerNames []string `json:"container_names"`
-	ContainerUUIDs []string `json:"container_uuids"`
-	ContainerName  string   `json:"container_name"`
-	ContainerUUID  string   `json:"container_uuid"`
-	AccessCode     string   `json:"access_code"`
-	Password       string   `json:"password,omitempty"`
-	CreatedAt      string   `json:"created_at"`
-	LastLogin      string   `json:"last_login"`
-	LastLoginIP    string   `json:"last_login_ip"`
-	LastLoginUA    string   `json:"last_login_ua"`
+	ID                   string   `json:"id"`
+	Username             string   `json:"username"`
+	ContainerNames       []string `json:"container_names"`
+	ContainerUUIDs       []string `json:"container_uuids"`
+	AllowedImageIDs      []string `json:"allowed_image_ids"`
+	ImageLimitConfigured bool     `json:"image_limit_configured"`
+	CurrentImageIDs      []string `json:"current_image_ids"`
+	ContainerName        string   `json:"container_name"`
+	ContainerUUID        string   `json:"container_uuid"`
+	AccessCode           string   `json:"access_code"`
+	Password             string   `json:"password,omitempty"`
+	CreatedAt            string   `json:"created_at"`
+	LastLogin            string   `json:"last_login"`
+	LastLoginIP          string   `json:"last_login_ip"`
+	LastLoginUA          string   `json:"last_login_ua"`
 }
 
 // HandleSubUserList returns the list of all sub-users with container info
@@ -607,13 +771,16 @@ func HandleSubUserList(w http.ResponseWriter, r *http.Request) {
 	result := make([]SubUserListItem, 0, len(config.AppConfig.SubUsers))
 	for _, su := range config.AppConfig.SubUsers {
 		item := SubUserListItem{
-			ID:             su.ID,
-			Username:       su.Username,
-			ContainerNames: su.ContainerNames,
-			ContainerUUIDs: su.ContainerUUIDs,
-			AccessCode:     su.AccessCode,
-			Password:       su.Password,
-			CreatedAt:      su.CreatedAt,
+			ID:                   su.ID,
+			Username:             su.Username,
+			ContainerNames:       su.ContainerNames,
+			ContainerUUIDs:       su.ContainerUUIDs,
+			AllowedImageIDs:      effectiveSubUserAllowedImageIDs(&su),
+			ImageLimitConfigured: su.ImageLimitConfigured,
+			CurrentImageIDs:      subUserCurrentImageIDs(&su),
+			AccessCode:           su.AccessCode,
+			Password:             su.Password,
+			CreatedAt:            su.CreatedAt,
 		}
 
 		// Resolve container name from first active UUID
@@ -710,6 +877,28 @@ func HandleSubUserAction(w http.ResponseWriter, r *http.Request) {
 		// Filter login logs for this sub-user
 		logs := filterSubUserLoginLogs(target.Username)
 		jsonResponse(w, http.StatusOK, APIResponse{Success: true, Data: logs})
+
+	case action == "images" && r.Method == http.MethodPut:
+		if !requireScope(w, r, "subuser:update") {
+			return
+		}
+		var req struct {
+			AllowedImageIDs []string `json:"allowed_image_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Invalid request body"})
+			return
+		}
+		ids, err := normalizeAllowedImageIDs(req.AllowedImageIDs)
+		if err != nil {
+			jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: err.Error()})
+			return
+		}
+		target.AllowedImageIDs = ids
+		target.ImageLimitConfigured = true
+		target.TokenVersion++
+		config.SaveConfig()
+		jsonResponse(w, http.StatusOK, APIResponse{Success: true, Data: newSubUserResponse(*target, target.Password)})
 
 	default:
 		jsonResponse(w, http.StatusNotFound, APIResponse{Success: false, Message: "Action not found"})

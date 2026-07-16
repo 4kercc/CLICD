@@ -240,6 +240,12 @@ func createContainer(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "Template is not enabled or downloaded"})
 		return
 	}
+	if ids, err := normalizeAllowedImageIDs(cfg.AllowedImageIDs); err != nil {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: err.Error()})
+		return
+	} else {
+		cfg.AllowedImageIDs = ids
+	}
 	if cfg.VCPU <= 0 {
 		cfg.VCPU = 1
 	}

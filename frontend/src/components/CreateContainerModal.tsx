@@ -43,6 +43,8 @@ const defaultForm: CreateContainerRequest = {
   ssh_auth_mode: 'auto_password',
   ssh_password: '',
   ssh_public_key: '',
+  allowed_image_ids: [],
+  image_limit_configured: false,
   expires_at: '',
 }
 
@@ -67,7 +69,14 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
         setTemplates(data)
         setForm((prev) => {
           const templateID = data.some((item) => item.id === prev.template_id) ? prev.template_id : (data[0]?.id || '')
-          return applyTemplateDefaults({ ...prev, template_id: templateID })
+          const allowed = new Set(data.map((item) => item.id))
+          const selectedAllowedIDs = (prev.allowed_image_ids || []).filter((id) => allowed.has(id))
+          return applyTemplateDefaults({
+            ...prev,
+            template_id: templateID,
+            allowed_image_ids: prev.image_limit_configured ? selectedAllowedIDs : (templateID ? [templateID] : []),
+            image_limit_configured: true,
+          })
         })
       })
       .catch(console.error)
@@ -197,7 +206,7 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
       await onSuccess(containers)
       onClose()
       setBatchCount(1)
-      setForm({ ...defaultForm, template_id: templates[0]?.id || '' })
+      setForm({ ...defaultForm, template_id: templates[0]?.id || '', allowed_image_ids: templates[0]?.id ? [templates[0].id] : [], image_limit_configured: true })
     } catch (err: unknown) {
       const error = err as { response?: { data?: { message?: string } } }
       dialog.alert('创建失败', error.response?.data?.message || '请稍后重试')
@@ -241,7 +250,7 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
             <div className="grid grid-cols-2 gap-2">
               <button
                 type="button"
-                onClick={() => setForm((prev) => applyTemplateDefaults({ ...prev, virtualization: 'lxc', template_id: '' }))}
+                onClick={() => setForm((prev) => applyTemplateDefaults({ ...prev, virtualization: 'lxc', template_id: '', allowed_image_ids: [], image_limit_configured: false }))}
                 className={`rounded-md border px-3 py-2 text-sm font-medium transition-colors ${form.virtualization === 'lxc' ? 'border-black bg-black text-white' : 'border-gray-300 text-gray-700 hover:bg-gray-50'}`}
               >
                 LXC 容器
@@ -252,7 +261,7 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
                 title={kvmAvailable ? '' : '当前宿主机不支持 KVM'}
                 onClick={() => {
                   if (kvmAvailable) {
-                    setForm((prev) => applyTemplateDefaults({ ...prev, virtualization: 'kvm', template_id: '' }))
+                    setForm((prev) => applyTemplateDefaults({ ...prev, virtualization: 'kvm', template_id: '', allowed_image_ids: [], image_limit_configured: false }))
                   }
                 }}
                 className={`rounded-md border px-3 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:border-gray-200 disabled:bg-gray-50 disabled:text-gray-400 ${form.virtualization === 'kvm' ? 'border-black bg-black text-white' : 'border-gray-300 text-gray-700 hover:bg-gray-50'}`}
@@ -270,7 +279,12 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
             ) : (
             <select
               value={form.template_id}
-              onChange={(event) => setForm(applyTemplateDefaults({ ...form, template_id: event.target.value }))}
+              onChange={(event) => {
+                const templateID = event.target.value
+                const allowed = new Set(form.allowed_image_ids || [])
+                if (templateID) allowed.add(templateID)
+                setForm(applyTemplateDefaults({ ...form, template_id: templateID, allowed_image_ids: Array.from(allowed), image_limit_configured: true }))
+              }}
               className={inputClass}
             >
               {templates.map((template) => (
@@ -282,6 +296,38 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
             )}
 
           </Field>
+
+          {templates.length > 0 && (
+            <Field label="子用户可用镜像">
+              <div className="rounded-md border border-gray-200 bg-gray-50 p-3">
+                <div className="mb-2 text-xs text-gray-500">默认勾选当前系统；取消后，子用户也不能重装该系统。</div>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {templates.map((template) => {
+                    const checked = (form.allowed_image_ids || []).includes(template.id)
+                    const current = template.id === form.template_id
+                    return (
+                      <label key={template.id} className={`flex cursor-pointer items-start gap-2 rounded border px-2.5 py-2 text-xs ${checked ? 'border-black bg-white' : 'border-gray-200 bg-white hover:bg-gray-50'}`}>
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => {
+                            const currentIDs = form.allowed_image_ids || []
+                            const next = checked ? currentIDs.filter((id) => id !== template.id) : [...currentIDs, template.id]
+                            setForm({ ...form, allowed_image_ids: next, image_limit_configured: true })
+                          }}
+                          className="mt-0.5 h-4 w-4 rounded border-gray-300 text-black focus:ring-black"
+                        />
+                        <span className="min-w-0">
+                          <span className="block truncate font-medium text-gray-800">{template.name}{current ? '（当前系统）' : ''}</span>
+                          <span className="block text-gray-500">{template.arch} · {template.distro} {template.release}</span>
+                        </span>
+                      </label>
+                    )
+                  })}
+                </div>
+              </div>
+            </Field>
+          )}
 
           {linuxTemplate && (
             <div className="rounded-md border border-gray-200 bg-white px-3 py-3 text-sm">

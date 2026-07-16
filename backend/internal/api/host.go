@@ -22,12 +22,13 @@ import (
 )
 
 type HostInfo struct {
-	CPU     CpuInfo     `json:"cpu"`
-	RAM     MemoryInfo  `json:"ram"`
-	Disk    DiskInfo    `json:"disk"`
-	Network NetworkInfo `json:"network"`
-	DiskIO  DiskIOInfo  `json:"disk_io"`
-	Load    LoadInfo    `json:"load"`
+	CPU     CpuInfo          `json:"cpu"`
+	RAM     MemoryInfo       `json:"ram"`
+	Disk    DiskInfo         `json:"disk"`
+	Network NetworkInfo      `json:"network"`
+	DiskIO  DiskIOInfo       `json:"disk_io"`
+	Load    LoadInfo         `json:"load"`
+	Runtime HostRuntimeProbe `json:"runtime"`
 }
 
 type HostProbeReport struct {
@@ -247,7 +248,30 @@ func getHostInfo() HostInfo {
 	info.CPU.Usage = getCPUUsage()
 	info.Network, info.DiskIO = getHostRates()
 	info.Load = getLoadInfo()
+	info.Runtime = detectRuntimeProbeQuick()
 	return info
+}
+
+func detectRuntimeProbeQuick() HostRuntimeProbe {
+	devKVM := fileExists("/dev/kvm")
+	nested, detail := detectNestedVirtualization()
+	lxcOK := commandExists("lxc-create")
+	kvmSupportedArch := runtime.GOARCH == "amd64" || runtime.GOARCH == "arm64"
+	kvmOK := kvmSupportedArch && devKVM && commandExists("virsh") && commandExists(kvmQEMUCheckKey())
+	probe := HostRuntimeProbe{
+		LXCAvailable:         lxcOK,
+		KVMAvailable:         kvmOK,
+		DevKVM:               devKVM,
+		NestedVirtualization: nested,
+		NestedDetail:         detail,
+		SupportMode:          "unsupported",
+	}
+	if probe.KVMAvailable {
+		probe.SupportMode = "kvm_lxc"
+	} else if probe.LXCAvailable {
+		probe.SupportMode = "lxc_only"
+	}
+	return probe
 }
 
 func getMemoryInfo() MemoryInfo {

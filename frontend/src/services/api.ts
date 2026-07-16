@@ -164,6 +164,8 @@ export interface CreateContainerRequest {
   ssh_auth_mode?: string
   ssh_password?: string
   ssh_public_key?: string
+  allowed_image_ids?: string[]
+  image_limit_configured?: boolean
   expires_at: string
 }
 
@@ -657,8 +659,8 @@ export const deleteImage = (templateId: string) =>
 export const toggleImage = (templateId: string, enabled: boolean) =>
   api.put<APIResponse>('/images/toggle', { template_id: templateId, enabled })
 
-export const getEnabledImages = (virtualization = 'lxc') =>
-  api.get<APIResponse<Template[]>>('/images/enabled', { params: { type: virtualization } })
+export const getEnabledImages = (virtualization = 'lxc', container?: ContainerIdentifier) =>
+  api.get<APIResponse<Template[]>>('/images/enabled', { params: { type: virtualization, ...(container ? { container: String(container) } : {}) } })
 
 // Dashboard
 export const getDashboard = () =>
@@ -771,12 +773,18 @@ export interface SubUser {
   password?: string
   container_names: string[]
   container_uuids?: string[]
+  allowed_image_ids?: string[]
+  image_limit_configured?: boolean
+  current_image_ids?: string[]
   access_code: string
   created_at: string
 }
 
 export const createSubUser = (containerId: ContainerIdentifier) =>
   api.post<APIResponse<SubUser>>('/sub-user/create', { container_name: String(containerId) })
+
+export const updateSubUserImages = (id: string, allowedImageIds: string[]) =>
+  api.put<APIResponse<SubUser>>(`/sub-users/${id}/images`, { allowed_image_ids: allowedImageIds })
 
 // Audit Logs
 export interface AuditLog {

@@ -218,37 +218,39 @@ func NewManager() *Manager {
 
 // ContainerConfig defines container creation parameters
 type ContainerConfig struct {
-	Name             string   `json:"name"`
-	Virtualization   string   `json:"virtualization,omitempty"`
-	TemplateID       string   `json:"template_id"`
-	VCPU             float64  `json:"vcpu"`
-	CPUPercent       int      `json:"cpu_percent"`
-	RAMMB            int      `json:"ram_mb"`
-	DiskGB           int      `json:"disk_gb"`
-	NetworkBWMbps    int      `json:"network_bw_mbps"`
-	NetworkDownMbps  int      `json:"network_down_mbps"`
-	NetworkUpMbps    int      `json:"network_up_mbps"`
-	MonthlyTrafficGB int      `json:"monthly_traffic_gb"`
-	TrafficMode      string   `json:"traffic_mode"`   // "total" or "in_out"
-	TrafficInGB      int      `json:"traffic_in_gb"`  // 0=unlimited
-	TrafficOutGB     int      `json:"traffic_out_gb"` // 0=unlimited
-	IOSpeedMBps      int      `json:"io_speed_mbps"`
-	IOReadMBps       int      `json:"io_read_mbps"`
-	IOWriteMBps      int      `json:"io_write_mbps"`
-	ExtraPorts       []int    `json:"extra_ports"`
-	PortMappingCount int      `json:"port_mapping_count"`
-	AssignNAT        *bool    `json:"assign_nat,omitempty"`
-	SnapshotLimit    int      `json:"snapshot_limit"`
-	AssignIPv4       bool     `json:"assign_ipv4"`
-	IPv4Count        int      `json:"ipv4_count,omitempty"`
-	PublicIPv4s      []string `json:"public_ipv4s,omitempty"`
-	AssignIPv6       bool     `json:"assign_ipv6"`
-	IPv6Count        int      `json:"ipv6_count,omitempty"`
-	IPv6Addresses    []string `json:"ipv6_addresses,omitempty"`
-	SSHAuthMode      string   `json:"ssh_auth_mode,omitempty"`
-	SSHPassword      string   `json:"ssh_password,omitempty"`
-	SSHPublicKey     string   `json:"ssh_public_key,omitempty"`
-	ExpiresAt        string   `json:"expires_at"`
+	Name                 string   `json:"name"`
+	Virtualization       string   `json:"virtualization,omitempty"`
+	TemplateID           string   `json:"template_id"`
+	VCPU                 float64  `json:"vcpu"`
+	CPUPercent           int      `json:"cpu_percent"`
+	RAMMB                int      `json:"ram_mb"`
+	DiskGB               int      `json:"disk_gb"`
+	NetworkBWMbps        int      `json:"network_bw_mbps"`
+	NetworkDownMbps      int      `json:"network_down_mbps"`
+	NetworkUpMbps        int      `json:"network_up_mbps"`
+	MonthlyTrafficGB     int      `json:"monthly_traffic_gb"`
+	TrafficMode          string   `json:"traffic_mode"`   // "total" or "in_out"
+	TrafficInGB          int      `json:"traffic_in_gb"`  // 0=unlimited
+	TrafficOutGB         int      `json:"traffic_out_gb"` // 0=unlimited
+	IOSpeedMBps          int      `json:"io_speed_mbps"`
+	IOReadMBps           int      `json:"io_read_mbps"`
+	IOWriteMBps          int      `json:"io_write_mbps"`
+	ExtraPorts           []int    `json:"extra_ports"`
+	PortMappingCount     int      `json:"port_mapping_count"`
+	AssignNAT            *bool    `json:"assign_nat,omitempty"`
+	SnapshotLimit        int      `json:"snapshot_limit"`
+	AllowedImageIDs      []string `json:"allowed_image_ids,omitempty"`
+	ImageLimitConfigured bool     `json:"image_limit_configured,omitempty"`
+	AssignIPv4           bool     `json:"assign_ipv4"`
+	IPv4Count            int      `json:"ipv4_count,omitempty"`
+	PublicIPv4s          []string `json:"public_ipv4s,omitempty"`
+	AssignIPv6           bool     `json:"assign_ipv6"`
+	IPv6Count            int      `json:"ipv6_count,omitempty"`
+	IPv6Addresses        []string `json:"ipv6_addresses,omitempty"`
+	SSHAuthMode          string   `json:"ssh_auth_mode,omitempty"`
+	SSHPassword          string   `json:"ssh_password,omitempty"`
+	SSHPublicKey         string   `json:"ssh_public_key,omitempty"`
+	ExpiresAt            string   `json:"expires_at"`
 }
 
 func (cfg *ContainerConfig) NormalizeResourceAliases() {
@@ -305,6 +307,10 @@ func (m *Manager) CreateContainer(cfg ContainerConfig) error {
 	}
 	if cfg.SnapshotLimit <= 0 {
 		cfg.SnapshotLimit = config.DefaultSnapshotLimit
+	}
+	if !cfg.ImageLimitConfigured && len(cfg.AllowedImageIDs) == 0 && cfg.TemplateID != "" {
+		cfg.AllowedImageIDs = []string{cfg.TemplateID}
+		cfg.ImageLimitConfigured = true
 	}
 
 	if !config.IsValidContainerName(cfg.Name) {
@@ -424,37 +430,39 @@ func (m *Manager) CreateContainer(cfg ContainerConfig) error {
 	trafficResetDate := now[:7] // YYYY-MM for monthly tracking
 
 	container := config.Container{
-		ID:               id,
-		UUID:             config.NewContainerUUID(),
-		Name:             cfg.Name,
-		Virtualization:   config.VirtualizationLXC,
-		Template:         cfg.TemplateID,
-		VCPU:             cfg.VCPU,
-		RAMMB:            cfg.RAMMB,
-		DiskGB:           cfg.DiskGB,
-		NetworkBWMbps:    cfg.NetworkBWMbps,
-		NetworkDownMbps:  cfg.NetworkDownMbps,
-		NetworkUpMbps:    cfg.NetworkUpMbps,
-		MonthlyTrafficGB: cfg.MonthlyTrafficGB,
-		TrafficMode:      trafficMode,
-		TrafficInGB:      cfg.TrafficInGB,
-		TrafficOutGB:     cfg.TrafficOutGB,
-		TrafficResetDate: trafficResetDate,
-		IOSpeedMBps:      cfg.IOSpeedMBps,
-		IOReadMBps:       cfg.IOReadMBps,
-		IOWriteMBps:      cfg.IOWriteMBps,
-		Status:           "stopped",
-		IP:               "",
-		PublicIPv4s:      publicIPv4s,
-		IPv6Addresses:    ipv6Assignments,
-		VNCPort:          0,
-		SSHPort:          sshPort,
-		SSHPassword:      sshPassword,
-		PortMappings:     portMappings,
-		PortMappingLimit: cfg.PortMappingCount,
-		SnapshotLimit:    config.NormalizeSnapshotLimit(cfg.SnapshotLimit),
-		CreatedAt:        now,
-		ExpiresAt:        cfg.ExpiresAt,
+		ID:                   id,
+		UUID:                 config.NewContainerUUID(),
+		Name:                 cfg.Name,
+		Virtualization:       config.VirtualizationLXC,
+		Template:             cfg.TemplateID,
+		VCPU:                 cfg.VCPU,
+		RAMMB:                cfg.RAMMB,
+		DiskGB:               cfg.DiskGB,
+		NetworkBWMbps:        cfg.NetworkBWMbps,
+		NetworkDownMbps:      cfg.NetworkDownMbps,
+		NetworkUpMbps:        cfg.NetworkUpMbps,
+		MonthlyTrafficGB:     cfg.MonthlyTrafficGB,
+		TrafficMode:          trafficMode,
+		TrafficInGB:          cfg.TrafficInGB,
+		TrafficOutGB:         cfg.TrafficOutGB,
+		TrafficResetDate:     trafficResetDate,
+		IOSpeedMBps:          cfg.IOSpeedMBps,
+		IOReadMBps:           cfg.IOReadMBps,
+		IOWriteMBps:          cfg.IOWriteMBps,
+		Status:               "stopped",
+		IP:                   "",
+		PublicIPv4s:          publicIPv4s,
+		IPv6Addresses:        ipv6Assignments,
+		VNCPort:              0,
+		SSHPort:              sshPort,
+		SSHPassword:          sshPassword,
+		PortMappings:         portMappings,
+		PortMappingLimit:     cfg.PortMappingCount,
+		AllowedImageIDs:      append([]string(nil), cfg.AllowedImageIDs...),
+		ImageLimitConfigured: cfg.ImageLimitConfigured,
+		SnapshotLimit:        config.NormalizeSnapshotLimit(cfg.SnapshotLimit),
+		CreatedAt:            now,
+		ExpiresAt:            cfg.ExpiresAt,
 	}
 	container.NormalizeNetworkAssignments()
 	config.AddContainer(container)

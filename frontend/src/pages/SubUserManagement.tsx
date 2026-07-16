@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Copy, KeyRound, LogIn, RefreshCw, ScrollText, UserCog, X } from 'lucide-react'
+import { Copy, HardDrive, KeyRound, LogIn, RefreshCw, Save, ScrollText, UserCog, X } from 'lucide-react'
 import { useDialog } from '../components/Dialog'
-import api, { AuditLog, LoginLog } from '../services/api'
+import api, { AuditLog, ImageInfo, LoginLog, getImages, updateSubUserImages } from '../services/api'
 import { copyToClipboard } from '../utils/clipboard'
 
 interface SubUserItem {
@@ -9,6 +9,9 @@ interface SubUserItem {
   username: string
   container_names: string[]
   container_uuids: string[]
+  allowed_image_ids?: string[]
+  image_limit_configured?: boolean
+  current_image_ids?: string[]
   container_name: string
   container_uuid: string
   access_code: string
@@ -34,6 +37,11 @@ export default function SubUserManagement() {
   const [loginLogs, setLoginLogs] = useState<LoginLog[] | null>(null)
   const [modalTitle, setModalTitle] = useState('')
   const [passwordUser, setPasswordUser] = useState<SubUserItem | null>(null)
+  const [imageUser, setImageUser] = useState<SubUserItem | null>(null)
+  const [images, setImages] = useState<ImageInfo[]>([])
+  const [selectedImageIDs, setSelectedImageIDs] = useState<string[]>([])
+  const [imagesLoading, setImagesLoading] = useState(false)
+  const [savingImages, setSavingImages] = useState(false)
   const [rotatingPassword, setRotatingPassword] = useState(false)
   const [logPage, setLogPage] = useState(1)
   const [logPageSize, setLogPageSize] = useState(10)
@@ -75,6 +83,46 @@ export default function SubUserManagement() {
       dialog.alert('轮换失败', error.response?.data?.message || '请稍后重试')
     } finally {
       setRotatingPassword(false)
+    }
+  }
+
+  const openImageLimit = async (user: SubUserItem) => {
+    setImageUser(user)
+    setSelectedImageIDs(user.allowed_image_ids || [])
+    setImagesLoading(true)
+    try {
+      const res = await getImages()
+      const currentIDs = new Set(user.current_image_ids || [])
+      setImages((res.data.data || []).filter((image) => image.downloaded && (image.enabled || currentIDs.has(image.id))))
+    } catch (err: unknown) {
+      const error = err as { response?: { data?: { message?: string } } }
+      dialog.alert('加载失败', error.response?.data?.message || '获取镜像列表失败')
+    } finally {
+      setImagesLoading(false)
+    }
+  }
+
+  const toggleImageID = (id: string) => {
+    setSelectedImageIDs((prev) => prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id])
+  }
+
+  const saveImageLimit = async () => {
+    if (!imageUser) return
+    setSavingImages(true)
+    try {
+      const res = await updateSubUserImages(imageUser.id, selectedImageIDs)
+      const updated = {
+        ...imageUser,
+        allowed_image_ids: res.data.data?.allowed_image_ids || selectedImageIDs,
+        image_limit_configured: true,
+      }
+      setUsers((prev) => prev.map((item) => (item.id === imageUser.id ? { ...item, allowed_image_ids: updated.allowed_image_ids, image_limit_configured: true } : item)))
+      setImageUser(null)
+    } catch (err: unknown) {
+      const error = err as { response?: { data?: { message?: string } } }
+      dialog.alert('保存失败', error.response?.data?.message || '保存可用镜像失败')
+    } finally {
+      setSavingImages(false)
     }
   }
 
@@ -190,6 +238,14 @@ export default function SubUserManagement() {
                         <LogIn className="w-3.5 h-3.5" />
                         登录日志
                       </button>
+                      <button
+                        onClick={() => openImageLimit(user)}
+                        className="inline-flex items-center gap-1 px-2 py-1.5 rounded text-xs text-purple-600 hover:bg-purple-50 dark:hover:bg-purple-900/30 transition-colors"
+                        title="可用镜像"
+                      >
+                        <HardDrive className="w-3.5 h-3.5" />
+                        可用镜像
+                      </button>
                     </div>
                   </td>
                 </tr>
@@ -247,6 +303,75 @@ export default function SubUserManagement() {
                     )}
                   </div>
                 </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {imageUser && (
+        <div className="fixed inset-0 bg-black/50 dark:bg-black/70 flex items-center justify-center z-50 p-4">
+          <div className="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-700 shadow-xl w-full max-w-2xl max-h-[85vh] overflow-hidden flex flex-col">
+            <div className="flex items-center justify-between gap-3 px-5 py-3 border-b border-gray-200 dark:border-gray-700">
+              <div>
+                <h3 className="text-sm font-semibold text-black dark:text-white">可用镜像</h3>
+                <p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">{imageUser.username} · 默认勾选当前系统，取消后将禁止重装该系统</p>
+              </div>
+              <button onClick={() => setImageUser(null)} className="p-1 text-gray-400 hover:text-black dark:hover:text-white rounded">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-5">
+              {imagesLoading ? (
+                <div className="flex items-center justify-center py-12">
+                  <div className="h-7 w-7 animate-spin rounded-full border-b-2 border-black" />
+                </div>
+              ) : images.length === 0 ? (
+                <div className="rounded-lg border border-dashed border-gray-300 px-4 py-10 text-center text-sm text-gray-500">
+                  暂无已下载并启用的镜像
+                </div>
+              ) : (
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {images.map((image) => {
+                    const checked = selectedImageIDs.includes(image.id)
+                    const current = (imageUser.current_image_ids || []).includes(image.id)
+                    return (
+                      <label
+                        key={image.id}
+                        className={`flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-3 text-sm transition-colors ${checked ? 'border-black bg-gray-50 dark:border-white dark:bg-gray-800' : 'border-gray-200 hover:bg-gray-50 dark:border-gray-700 dark:hover:bg-gray-800'}`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => toggleImageID(image.id)}
+                          className="mt-1 h-4 w-4 rounded border-gray-300 text-black focus:ring-black"
+                        />
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate font-medium text-black dark:text-white">{image.name}{current ? '（当前系统）' : ''}</span>
+                          <span className="mt-1 block text-xs text-gray-500 dark:text-gray-400">
+                            {image.type.toUpperCase()} · {image.arch} · {image.distro} {image.release}
+                          </span>
+                        </span>
+                      </label>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+            <div className="flex items-center justify-between gap-3 border-t border-gray-200 dark:border-gray-700 px-5 py-3">
+              <span className="text-xs text-gray-500 dark:text-gray-400">已选择 {selectedImageIDs.length} 个镜像</span>
+              <div className="flex items-center gap-2">
+                <button onClick={() => setImageUser(null)} className="px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-800 rounded-md">
+                  取消
+                </button>
+                <button
+                  onClick={saveImageLimit}
+                  disabled={savingImages || imagesLoading}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 text-sm bg-black text-white rounded-md hover:bg-gray-800 disabled:opacity-50"
+                >
+                  <Save className="h-4 w-4" />
+                  {savingImages ? '保存中...' : '保存'}
+                </button>
               </div>
             </div>
           </div>

@@ -560,7 +560,11 @@ func HandleSingleTaskAction(w http.ResponseWriter, r *http.Request, id int, acti
 		if c := config.FindContainer(id); c != nil {
 			runtime = c.Runtime()
 		}
-		if !isImageEnabledAndDownloaded(templateID, runtime) {
+		if !isTemplateAllowedForRequest(r, c, templateID) {
+			jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "Template is not allowed for this user"})
+			return
+		}
+		if !isTemplateAvailableForRequest(r, c, templateID, runtime) {
 			jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "Template is not enabled or downloaded"})
 			return
 		}
@@ -655,6 +659,12 @@ func HandleBatchCreate(w http.ResponseWriter, r *http.Request) {
 		if !isImageEnabledAndDownloaded(req.Containers[i].TemplateID, req.Containers[i].Virtualization) {
 			jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: name + ": template is not enabled or downloaded"})
 			return
+		}
+		if ids, err := normalizeAllowedImageIDs(req.Containers[i].AllowedImageIDs); err != nil {
+			jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: name + ": " + err.Error()})
+			return
+		} else {
+			req.Containers[i].AllowedImageIDs = ids
 		}
 		if req.Containers[i].PortMappingCount < 0 {
 			jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: name + ": port mapping count cannot be negative"})
@@ -775,6 +785,10 @@ func HandleBatchAction(w http.ResponseWriter, r *http.Request) {
 		c := config.FindContainer(id)
 		if c == nil || !isContainerAllowedForRequest(r, c.UUID) {
 			jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "Access denied to one or more containers"})
+			return
+		}
+		if taskType == TaskReinstall && !isTemplateAllowedForRequest(r, c, req.TemplateID) {
+			jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: c.Name + ": template is not allowed for this user"})
 			return
 		}
 		if taskConfig != nil {
