@@ -252,6 +252,7 @@ func EnsureForwardRules(bridge string) {
 	if bridge == "" {
 		bridge = "lxcbr0"
 	}
+	ensureLibvirtForwardRules(bridge)
 	rules := [][]string{
 		{"-i", bridge, "-j", "ACCEPT"},
 		{"-o", bridge, "-j", "ACCEPT"},
@@ -266,6 +267,33 @@ func EnsureForwardRules(bridge string) {
 		}
 		appendArgs := append([]string{"-A", "FORWARD"}, args...)
 		exec.Command("iptables", appendArgs...).Run()
+	}
+}
+
+func ensureLibvirtForwardRules(bridge string) {
+	if bridge != "virbr0" || exec.Command("iptables", "-L", "LIBVIRT_FWI", "-n").Run() != nil {
+		return
+	}
+	rules := []struct {
+		chain string
+		args  []string
+	}{
+		{chain: "LIBVIRT_FWI", args: []string{"-o", bridge, "-j", "ACCEPT"}},
+		{chain: "LIBVIRT_FWO", args: []string{"-i", bridge, "-j", "ACCEPT"}},
+		{chain: "LIBVIRT_FWX", args: []string{"-i", bridge, "-o", bridge, "-j", "ACCEPT"}},
+	}
+	for _, rule := range rules {
+		if exec.Command("iptables", "-L", rule.chain, "-n").Run() != nil {
+			continue
+		}
+		for {
+			deleteArgs := append([]string{"-D", rule.chain}, rule.args...)
+			if exec.Command("iptables", deleteArgs...).Run() != nil {
+				break
+			}
+		}
+		insertArgs := append([]string{"-I", rule.chain, "1"}, rule.args...)
+		exec.Command("iptables", insertArgs...).Run()
 	}
 }
 
