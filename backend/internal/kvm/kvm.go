@@ -20,6 +20,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -1538,7 +1539,13 @@ func (m *Manager) validateHost(skipCloudInit bool) error {
 			return err
 		}
 	}
+	if err := requireCommand(kvmEmulatorCommand()); err != nil {
+		return err
+	}
 	if skipCloudInit {
+		if runtime.GOARCH != "amd64" {
+			return fmt.Errorf("Windows KVM is currently supported only on x86_64/amd64 hosts")
+		}
 		if err := requireAnyCommand("genisoimage", "mkisofs", "xorriso"); err != nil {
 			return fmt.Errorf("%w (needed to generate Windows unattended setup ISO)", err)
 		}
@@ -1570,6 +1577,40 @@ func requireAnyCommand(names ...string) error {
 		}
 	}
 	return fmt.Errorf("one of %s is required for KVM support", strings.Join(names, ", "))
+}
+
+func kvmLibvirtArch() string {
+	switch runtime.GOARCH {
+	case "arm64":
+		return "aarch64"
+	default:
+		return "x86_64"
+	}
+}
+
+func kvmMachineType() string {
+	switch runtime.GOARCH {
+	case "arm64":
+		return "virt"
+	default:
+		return "pc"
+	}
+}
+
+func kvmEmulatorCommand() string {
+	switch runtime.GOARCH {
+	case "arm64":
+		return "qemu-system-aarch64"
+	default:
+		return "qemu-system-x86_64"
+	}
+}
+
+func kvmEmulatorPath() string {
+	if path, err := exec.LookPath(kvmEmulatorCommand()); err == nil {
+		return path
+	}
+	return "/usr/bin/" + kvmEmulatorCommand()
 }
 
 func ensureDefaultNetwork() error {
@@ -2186,6 +2227,26 @@ func domainXML(name string, vcpu int, ramMB int, diskPath, seedPath, mac string,
 		video = "<video><model type='qxl' ram='65536' vram='65536' heads='1' primary='yes'/></video>"
 		input = "\n\t    <input type='tablet' bus='usb'/>"
 	}
+	osAttrs := ""
+	features := "<features><acpi/><apic/></features>"
+	if runtime.GOARCH == "arm64" {
+		osAttrs = " firmware='efi'"
+		features = "<features><acpi/><gic version='3'/></features>"
+	}
+	seedDisk := fmt.Sprintf(`<disk type='file' device='cdrom'>
+      <driver name='qemu' type='raw'/>
+      <source file='%s'/>
+      <target dev='hdb' bus='ide'/>
+      <readonly/>
+    </disk>`, xmlEscape(seedPath))
+	if runtime.GOARCH == "arm64" {
+		seedDisk = fmt.Sprintf(`<disk type='file' device='disk'>
+      <driver name='qemu' type='raw'/>
+      <source file='%s'/>
+      <target dev='vdb' bus='virtio'/>
+      <readonly/>
+    </disk>`, xmlEscape(seedPath))
+	}
 	return fmt.Sprintf(`<domain type='kvm'>
   <name>%s</name>
   %s
@@ -2193,29 +2254,24 @@ func domainXML(name string, vcpu int, ramMB int, diskPath, seedPath, mac string,
   <currentMemory unit='MiB'>%d</currentMemory>
   <vcpu placement='static' current='%d'>%d</vcpu>
   <cputune><shares>2048</shares></cputune>
-  <os>
-    <type arch='x86_64' machine='pc'>hvm</type>
+  <os%s>
+    <type arch='%s' machine='%s'>hvm</type>
     <boot dev='hd'/>
   </os>
-  <features><acpi/><apic/></features>
+  %s
   <cpu mode='host-passthrough' check='none'/>
   <clock offset='utc'/>
   <on_poweroff>destroy</on_poweroff>
   <on_reboot>restart</on_reboot>
   <on_crash>restart</on_crash>
   <devices>
-    <emulator>/usr/bin/qemu-system-x86_64</emulator>
+    <emulator>%s</emulator>
     <disk type='file' device='disk'>
       <driver name='qemu' type='qcow2' cache='none'/>
       <source file='%s'/>
       <target dev='vda' bus='virtio'/>%s
     </disk>
-    <disk type='file' device='cdrom'>
-      <driver name='qemu' type='raw'/>
-      <source file='%s'/>
-      <target dev='hdb' bus='ide'/>
-      <readonly/>
-    </disk>
+    %s
     <interface type='network'>
       <mac address='%s'/>
       <source network='default'/>
@@ -2232,7 +2288,7 @@ func domainXML(name string, vcpu int, ramMB int, diskPath, seedPath, mac string,
     <graphics type='vnc' port='-1' autoport='yes' listen='127.0.0.1'/>%s
     %s
   </devices>
-</domain>`, xmlEscape(name), domainUUIDXML(name), ramMB, ramMB, vcpu, vcpu, xmlEscape(diskPath), iotune, xmlEscape(seedPath), xmlEscape(mac), bandwidth, input, video)
+</domain>`, xmlEscape(name), domainUUIDXML(name), ramMB, ramMB, vcpu, vcpu, osAttrs, kvmLibvirtArch(), kvmMachineType(), features, xmlEscape(kvmEmulatorPath()), xmlEscape(diskPath), iotune, seedDisk, xmlEscape(mac), bandwidth, input, video)
 }
 
 func windowsDomainXML(name string, vcpu int, ramMB int, diskPath, winISOPath, unattendISOPath, mac string, ioReadMBps int, ioWriteMBps int, networkDownMbps int, networkUpMbps int) string {

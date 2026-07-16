@@ -98,6 +98,13 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
   const manualIPv4s = form.public_ipv4s || []
   const maxVCPU = hostInfo?.cpu.cores || 64
   const maxRAMMB = hostInfo?.ram.total_mb ? Number(hostInfo.ram.total_mb) : undefined
+  const kvmAvailable = !!hostInfo?.runtime?.kvm_available
+
+  useEffect(() => {
+    if (hostInfo && !kvmAvailable && form.virtualization === 'kvm') {
+      setForm((prev) => applyTemplateDefaults({ ...prev, virtualization: 'lxc', template_id: '' }))
+    }
+  }, [hostInfo, kvmAvailable, form.virtualization])
   const maxDiskGB = hostInfo?.disk.total_gb ? Math.max(1, Math.floor(hostInfo.disk.total_gb)) : undefined
   const resourceErrors = validateResourceInputs(form, maxVCPU, maxRAMMB, maxDiskGB)
   const natEnabled = form.assign_nat !== false
@@ -241,8 +248,14 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
               </button>
               <button
                 type="button"
-                onClick={() => setForm((prev) => applyTemplateDefaults({ ...prev, virtualization: 'kvm', template_id: '' }))}
-                className={`rounded-md border px-3 py-2 text-sm font-medium transition-colors ${form.virtualization === 'kvm' ? 'border-black bg-black text-white' : 'border-gray-300 text-gray-700 hover:bg-gray-50'}`}
+                disabled={!kvmAvailable}
+                title={kvmAvailable ? '' : '当前宿主机不支持 KVM'}
+                onClick={() => {
+                  if (kvmAvailable) {
+                    setForm((prev) => applyTemplateDefaults({ ...prev, virtualization: 'kvm', template_id: '' }))
+                  }
+                }}
+                className={`rounded-md border px-3 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:border-gray-200 disabled:bg-gray-50 disabled:text-gray-400 ${form.virtualization === 'kvm' ? 'border-black bg-black text-white' : 'border-gray-300 text-gray-700 hover:bg-gray-50'}`}
               >
                 KVM 虚拟机
               </button>
@@ -408,7 +421,7 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
                 <span className="min-w-0">
               <span className="block font-medium text-gray-800">{networkText.publicIPv6}</span>
               <span className="block text-xs text-gray-500 truncate">
-                    {ipv6Available ? `${networkText.use} ${ipv6Prefix}` : (ipv6Status?.reason || networkText.checkingIPv6Prefix)}
+                    {ipv6Available ? `${networkText.use} ${ipv6Prefix}` : formatIPv6StatusReason(ipv6Status?.reason, language, networkText.checkingIPv6Prefix)}
               </span>
                 </span>
               </label>
@@ -762,7 +775,7 @@ const createNetworkText = {
   zh: {
     publicIPv4: '公网 IPv4',
     noAllocatableIPv4: '未检测到可分配公网 IPv4',
-    publicIPv6: '公网 IPv6',
+    publicIPv6: '可分配 IPv6 前缀',
     use: '使用',
     checkingIPv6Prefix: '正在检测 IPv6 前缀...',
     publicNAT: '公网 NAT',
@@ -771,13 +784,28 @@ const createNetworkText = {
   en: {
     publicIPv4: 'Public IPv4',
     noAllocatableIPv4: 'No allocatable public IPv4 detected',
-    publicIPv6: 'Public IPv6',
+    publicIPv6: 'Allocatable IPv6 Prefix',
     use: 'Use',
     checkingIPv6Prefix: 'Checking IPv6 prefix...',
     publicNAT: 'Public NAT',
     noNATPorts: 'No NAT ports will be assigned',
   },
 } as const
+
+function formatIPv6StatusReason(reason: string | undefined, language: Language, fallback: string) {
+  if (!reason) return fallback
+  if (reason.includes('/128 single-address IPv6 is not assignable')) {
+    return language === 'en'
+      ? 'No allocatable IPv6 prefix. The host only has a /128 single IPv6 address.'
+      : '未检测到可分配 IPv6 前缀；宿主机只有 /128 单个 IPv6 地址，不能分配给容器。'
+  }
+  if (reason.includes('outbound IPv6 connectivity test failed')) {
+    return language === 'en'
+      ? reason
+      : '宿主机检测到 IPv6 前缀，但 IPv6 出站连通性测试失败。'
+  }
+  return reason
+}
 
 function formatAllocatableIPv4Count(count: number, language: Language) {
   return language === 'en'

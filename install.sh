@@ -3,13 +3,86 @@ set -eu
 
 REPO="${CLICD_REPO:-MengMengCode/CLICD}"
 CLICD_INSTALL_VERSION="${CLICD_VERSION:-latest}"
-ASSET="clicd-linux-amd64.tar.gz"
 ACTION="${1:-install}"
 ACTION_CONFIRM="${2:-}"
 ISSUE_URL="https://github.com/${REPO}/issues"
 LOG_FILE="${CLICD_LOG_FILE:-/var/log/clicd-install.log}"
 INSTALL_DOWNLOAD_MARKER="${CLICD_INSTALL_DOWNLOAD_MARKER:-/tmp/clicd-install-dir.$$}"
 LIBVIRT_DEFAULT_MARKER="/var/lib/clicd/kvm/default-network.created"
+
+normalize_clicd_arch() {
+    arch="$1"
+    case "$(printf '%s' "$arch" | tr 'A-Z' 'a-z')" in
+        x86_64|amd64) echo amd64 ;;
+        aarch64|arm64) echo arm64 ;;
+        *) echo "" ;;
+    esac
+}
+
+HOST_ARCH_RAW="$(uname -m 2>/dev/null || echo unknown)"
+CLICD_ARCH_NORMALIZED="$(normalize_clicd_arch "${CLICD_ARCH:-$HOST_ARCH_RAW}")"
+ASSET_DIR="clicd-linux-${CLICD_ARCH_NORMALIZED:-unknown}"
+ASSET="${ASSET_DIR}.tar.gz"
+BINARY_ASSET="$ASSET_DIR"
+
+kvm_supported_arch() {
+    [ "$CLICD_ARCH_NORMALIZED" = "amd64" ] || [ "$CLICD_ARCH_NORMALIZED" = "arm64" ]
+}
+
+warn_kvm_unsupported_arch() {
+    if ! kvm_supported_arch; then
+        warn "当前架构 ${CLICD_ARCH_NORMALIZED:-unknown} 已适配 CLICD/LXC；KVM 功能当前支持 x86_64/amd64 和 aarch64/arm64，将跳过 KVM 专用依赖。"
+    fi
+}
+
+qemu_system_package_apk() {
+    case "$CLICD_ARCH_NORMALIZED" in
+        arm64) echo qemu-system-aarch64 ;;
+        *) echo qemu-system-x86_64 ;;
+    esac
+}
+
+qemu_system_package_apt() {
+    case "$CLICD_ARCH_NORMALIZED" in
+        arm64) echo qemu-system-arm ;;
+        *) echo qemu-system-x86 ;;
+    esac
+}
+
+qemu_system_package_rpm() {
+    case "$CLICD_ARCH_NORMALIZED" in
+        arm64) echo qemu-system-aarch64 ;;
+        *) echo qemu-kvm ;;
+    esac
+}
+
+qemu_emulator_cmd() {
+    case "$CLICD_ARCH_NORMALIZED" in
+        arm64) echo qemu-system-aarch64 ;;
+        *) echo qemu-system-x86_64 ;;
+    esac
+}
+
+qemu_efi_package_apt() {
+    case "$CLICD_ARCH_NORMALIZED" in
+        arm64) echo qemu-efi-aarch64 ;;
+        *) echo ovmf ;;
+    esac
+}
+
+qemu_efi_package_apk() {
+    case "$CLICD_ARCH_NORMALIZED" in
+        arm64) echo edk2-aarch64 ;;
+        *) echo ovmf ;;
+    esac
+}
+
+qemu_efi_package_rpm() {
+    case "$CLICD_ARCH_NORMALIZED" in
+        arm64) echo edk2-aarch64 ;;
+        *) echo edk2-ovmf ;;
+    esac
+}
 
 normalize_lang() {
     lang="$1"
@@ -286,14 +359,8 @@ run_step() {
 }
 
 check_os_compatibility() {
-    log "系统检测：ID=${OS_ID} ID_LIKE=${OS_LIKE} ARCH=$(uname -m 2>/dev/null || echo unknown)"
-    case "$(uname -m 2>/dev/null || echo unknown)" in
-        x86_64|amd64)
-            ;;
-        *)
-            die "当前安装包仅支持 x86_64/amd64，当前架构：$(uname -m 2>/dev/null || echo unknown)。"
-            ;;
-    esac
+    log "系统检测：ID=${OS_ID} ID_LIKE=${OS_LIKE} ARCH=${HOST_ARCH_RAW} CLICD_ARCH=${CLICD_ARCH_NORMALIZED:-unsupported}"
+    [ -n "$CLICD_ARCH_NORMALIZED" ] || die "当前安装包支持 x86_64/amd64 和 aarch64/arm64，当前架构：${HOST_ARCH_RAW}。"
     if ! is_systemd && ! is_openrc; then
         die "未检测到 systemd 或 OpenRC，无法安装服务。"
     fi
@@ -476,7 +543,16 @@ remove_clicd_lxc_image_cache() {
         "centos 9-Stream amd64" \
         "archlinux current amd64" \
         "fedora 44 amd64" \
-        "rockylinux 10 amd64"
+        "rockylinux 10 amd64" \
+        "ubuntu noble arm64" \
+        "ubuntu jammy arm64" \
+        "debian bookworm arm64" \
+        "debian bullseye arm64" \
+        "alpine 3.21 arm64" \
+        "centos 9-Stream arm64" \
+        "archlinux current arm64" \
+        "fedora 44 arm64" \
+        "rockylinux 10 arm64"
     do
         set -- $image
         distro="$1"
@@ -950,15 +1026,21 @@ install_apk() {
         iproute2 \
         iptables \
         dnsmasq \
-        dbus \
-        qemu-system-x86_64 \
+        dbus
+
+    if kvm_supported_arch; then
+        apk add --no-cache \
+        "$(qemu_system_package_apk)" \
         qemu-img \
         libvirt \
         libvirt-daemon \
         libvirt-client \
         libvirt-qemu
+    else
+        warn_kvm_unsupported_arch
+    fi
 
-    for pkg in lxcfs shadow conntrack-tools quota-tools e2fsprogs xfsprogs cloud-utils genisoimage xorriso smartmontools; do
+    for pkg in lxcfs shadow conntrack-tools quota-tools e2fsprogs xfsprogs cloud-utils genisoimage xorriso smartmontools "$(qemu_efi_package_apk)"; do
         apk add --no-cache "$pkg" >/dev/null 2>&1 || warn "可选依赖未安装：$pkg"
     done
 }
@@ -985,18 +1067,39 @@ install_apt() {
         quota \
         e2fsprogs \
         xfsprogs \
-        dnsmasq-base \
-        qemu-kvm \
-        qemu-system-x86 \
-        qemu-utils \
-        libvirt-daemon-system \
-        libvirt-clients \
-        cloud-image-utils \
-        genisoimage \
-        xorriso \
-        smartmontools \
-        virtinst \
-        ovmf
+        dnsmasq-base
+
+    if kvm_supported_arch; then
+        if [ "$CLICD_ARCH_NORMALIZED" = "arm64" ]; then
+            apt-get install -y \
+                "$(qemu_system_package_apt)" \
+                qemu-utils \
+                libvirt-daemon-system \
+                libvirt-clients \
+                cloud-image-utils \
+                genisoimage \
+                xorriso \
+                smartmontools \
+                virtinst \
+                "$(qemu_efi_package_apt)"
+        else
+            apt-get install -y \
+                qemu-kvm \
+                "$(qemu_system_package_apt)" \
+                qemu-utils \
+                libvirt-daemon-system \
+                libvirt-clients \
+                cloud-image-utils \
+                genisoimage \
+                xorriso \
+                smartmontools \
+                virtinst \
+                "$(qemu_efi_package_apt)"
+        fi
+    else
+        warn_kvm_unsupported_arch
+        apt-get install -y qemu-utils genisoimage xorriso smartmontools >/dev/null 2>&1 || true
+    fi
 }
 
 enable_el_repos() {
@@ -1032,8 +1135,11 @@ install_dnf() {
         quota \
         e2fsprogs \
         xfsprogs \
-        dnsmasq \
-        qemu-kvm \
+        dnsmasq
+
+    if kvm_supported_arch; then
+        dnf install -y \
+        "$(qemu_system_package_rpm)" \
         qemu-img \
         libvirt \
         libvirt-daemon-kvm \
@@ -1041,8 +1147,12 @@ install_dnf() {
         virt-install \
         cloud-utils \
         genisoimage
+    else
+        warn_kvm_unsupported_arch
+        dnf install -y qemu-img genisoimage >/dev/null 2>&1 || true
+    fi
 
-    for pkg in lxcfs xorriso edk2-ovmf smartmontools; do
+    for pkg in lxcfs xorriso "$(qemu_efi_package_rpm)" smartmontools; do
         dnf install -y "$pkg" >/dev/null 2>&1 || warn "可选依赖未安装：$pkg"
     done
 }
@@ -1067,8 +1177,11 @@ install_yum() {
         quota \
         e2fsprogs \
         xfsprogs \
-        dnsmasq \
-        qemu-kvm \
+        dnsmasq
+
+    if kvm_supported_arch; then
+        yum install -y \
+        "$(qemu_system_package_rpm)" \
         qemu-img \
         libvirt \
         libvirt-daemon-kvm \
@@ -1076,8 +1189,12 @@ install_yum() {
         virt-install \
         cloud-utils \
         genisoimage
+    else
+        warn_kvm_unsupported_arch
+        yum install -y qemu-img genisoimage >/dev/null 2>&1 || true
+    fi
 
-    for pkg in lxcfs xorriso edk2-ovmf smartmontools; do
+    for pkg in lxcfs xorriso "$(qemu_efi_package_rpm)" smartmontools; do
         yum install -y "$pkg" >/dev/null 2>&1 || warn "可选依赖未安装：$pkg"
     done
 }
@@ -1117,14 +1234,19 @@ install_dependencies() {
     has_cmd lxc-create || die "依赖安装后仍未找到 lxc-create，请检查 LXC 软件源/安装日志。"
     has_cmd iptables || die "依赖安装后仍未找到 iptables，请检查系统网络工具包。"
     has_cmd ip || die "依赖安装后仍未找到 ip 命令，请检查 iproute2 安装。"
-    has_cmd virsh || die "依赖安装后仍未找到 virsh，请检查 libvirt-client/libvirt-clients 安装。"
-    has_cmd qemu-img || die "依赖安装后仍未找到 qemu-img，请检查 qemu-utils/qemu-img 安装。"
-    has_cmd cloud-localds || die "依赖安装后仍未找到 cloud-localds，请检查 cloud-image-utils/cloud-utils 安装。"
-    if ! has_cmd genisoimage && ! has_cmd mkisofs && ! has_cmd xorriso; then
-        die "Windows KVM 初始化需要 genisoimage、mkisofs 或 xorriso 中任意一个。"
-    fi
-    if [ ! -e /dev/kvm ]; then
-        warn "未检测到 /dev/kvm。LXC 可用，但 KVM 虚拟机需要硬件虚拟化或嵌套虚拟化。"
+    if kvm_supported_arch; then
+        has_cmd virsh || die "依赖安装后仍未找到 virsh，请检查 libvirt-client/libvirt-clients 安装。"
+        has_cmd "$(qemu_emulator_cmd)" || die "依赖安装后仍未找到 $(qemu_emulator_cmd)，请检查 QEMU 安装。"
+        has_cmd qemu-img || die "依赖安装后仍未找到 qemu-img，请检查 qemu-utils/qemu-img 安装。"
+        has_cmd cloud-localds || die "依赖安装后仍未找到 cloud-localds，请检查 cloud-image-utils/cloud-utils 安装。"
+        if ! has_cmd genisoimage && ! has_cmd mkisofs && ! has_cmd xorriso; then
+            die "Windows KVM 初始化需要 genisoimage、mkisofs 或 xorriso 中任意一个。"
+        fi
+        if [ ! -e /dev/kvm ]; then
+            warn "未检测到 /dev/kvm。LXC 可用，但 KVM 虚拟机需要硬件虚拟化或嵌套虚拟化。"
+        fi
+    else
+        warn_kvm_unsupported_arch
     fi
 }
 
@@ -1384,7 +1506,7 @@ download_release_if_needed() {
     if [ "$archive_ok" = "1" ]; then
         tar -xzf "$archive_path" -C "$tmp_dir" || die "Failed to extract release package: $archive_path"
     else
-        binary_asset="clicd-linux-amd64"
+        binary_asset="$BINARY_ASSET"
         if [ "$CLICD_INSTALL_VERSION" = "latest" ]; then
             binary_url="https://github.com/${REPO}/releases/latest/download/${binary_asset}"
         else
@@ -1402,9 +1524,9 @@ download_release_if_needed() {
             [ -n "$url" ] || continue
             log "Trying release binary: $url"
             if download_file "$url" "$binary_path" && [ -s "$binary_path" ]; then
-                mkdir -p "$tmp_dir/clicd-linux-amd64"
-                cp "$binary_path" "$tmp_dir/clicd-linux-amd64/clicd"
-                chmod +x "$tmp_dir/clicd-linux-amd64/clicd"
+                mkdir -p "$tmp_dir/$ASSET_DIR"
+                cp "$binary_path" "$tmp_dir/$ASSET_DIR/clicd"
+                chmod +x "$tmp_dir/$ASSET_DIR/clicd"
                 binary_ok=1
                 break
             fi
@@ -1414,8 +1536,8 @@ download_release_if_needed() {
         [ "$binary_ok" = "1" ] || die "Release package download failed: $download_url"
     fi
 
-    [ -d "$tmp_dir/clicd-linux-amd64" ] || die "Release package layout is invalid: missing clicd-linux-amd64 directory"
-    [ -f "$tmp_dir/clicd-linux-amd64/clicd" ] || die "下载的发行版包中未找到 clicd 二进制。"
+    [ -d "$tmp_dir/$ASSET_DIR" ] || die "Release package layout is invalid: missing $ASSET_DIR directory"
+    [ -f "$tmp_dir/$ASSET_DIR/clicd" ] || die "下载的发行版包中未找到 clicd 二进制。"
 }
 
 install_binary() {
@@ -1430,8 +1552,8 @@ install_binary() {
     download_dir=""
     if [ ! -f "$bin_src" ] && [ -f "$INSTALL_DOWNLOAD_MARKER" ]; then
         download_dir="$(sed -n '1p' "$INSTALL_DOWNLOAD_MARKER" 2>/dev/null || true)"
-        if [ -n "$download_dir" ] && [ -f "$download_dir/clicd-linux-amd64/clicd" ]; then
-            bin_src="$download_dir/clicd-linux-amd64/clicd"
+        if [ -n "$download_dir" ] && [ -f "$download_dir/$ASSET_DIR/clicd" ]; then
+            bin_src="$download_dir/$ASSET_DIR/clicd"
         fi
     fi
     [ -f "$bin_src" ] || die "未找到 clicd 二进制，安装无法继续。"

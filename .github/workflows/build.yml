@@ -14,9 +14,15 @@ permissions:
   contents: write
 
 jobs:
-  linux-amd64:
-    name: Linux amd64
+  linux:
+    name: Linux ${{ matrix.goarch }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goarch:
+          - amd64
+          - arm64
 
     steps:
       - name: Checkout
@@ -55,16 +61,21 @@ jobs:
           fi
 
       - name: Build CLICD
+        env:
+          CLICD_GOARCH: ${{ matrix.goarch }}
         run: bash build.sh
 
       - name: Package CLICD
+        env:
+          CLICD_GOARCH: ${{ matrix.goarch }}
         run: |
-          mkdir -p dist package/clicd-linux-amd64
-          cp build/clicd package/clicd-linux-amd64/clicd
-          cp build/install.sh package/clicd-linux-amd64/install.sh
-          chmod +x package/clicd-linux-amd64/clicd package/clicd-linux-amd64/install.sh
-          tar -C package -czf dist/clicd-linux-amd64.tar.gz clicd-linux-amd64
-          cp build/clicd dist/clicd-linux-amd64
+          asset_dir="clicd-linux-${CLICD_GOARCH}"
+          mkdir -p "dist" "package/${asset_dir}"
+          cp build/clicd "package/${asset_dir}/clicd"
+          cp build/install.sh "package/${asset_dir}/install.sh"
+          chmod +x "package/${asset_dir}/clicd" "package/${asset_dir}/install.sh"
+          tar -C package -czf "dist/${asset_dir}.tar.gz" "${asset_dir}"
+          cp build/clicd "dist/${asset_dir}"
 
       - name: Package Mofang module
         run: |
@@ -87,11 +98,28 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: clicd-linux-amd64
+          name: clicd-linux-${{ matrix.goarch }}
           path: dist/*
 
+  release:
+    name: Publish GitHub Release
+    needs: linux
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist-artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p dist
+          find dist-artifacts -maxdepth 2 -type f ! -name SHA256SUMS -print -exec cp -f {} dist/ \;
+          sha256sum dist/* > dist/SHA256SUMS
+
       - name: Publish GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

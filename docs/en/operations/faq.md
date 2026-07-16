@@ -2,7 +2,7 @@
 
 ## Which version does the installer install by default?
 
-It installs the latest version from GitHub Releases. The script default is `CLICD_VERSION=latest`, which downloads the Linux AMD64 artifact from `releases/latest`.
+It installs the latest version from GitHub Releases. The script default is `CLICD_VERSION=latest`, which downloads the Linux AMD64 or ARM64 artifact from `releases/latest` according to the host architecture.
 
 ## Can I pin a specific version?
 

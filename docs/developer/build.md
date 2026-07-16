@@ -30,6 +30,25 @@ bash build.sh
 
 该脚本用于串联前端构建、静态资源同步和 Go 二进制构建。
 
+默认目标为 Linux amd64。需要构建 ARM64 包时可以指定：
+
+```bash
+CLICD_GOARCH=arm64 bash build.sh
+```
+
+需要同时构建 amd64 和 arm64 发布包时：
+
+```bash
+CLICD_GOARCH=all bash build.sh
+```
+
+构建完成后会生成：
+
+- `dist/clicd-linux-amd64`
+- `dist/clicd-linux-amd64.tar.gz`
+- `dist/clicd-linux-arm64`
+- `dist/clicd-linux-arm64.tar.gz`
+
 ## 文档站构建
 
 ```bash

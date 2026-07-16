@@ -2,7 +2,7 @@
 
 ## 安装脚本默认安装哪个版本？
 
-默认安装 GitHub Releases 的最新版本。脚本中默认值是 `CLICD_VERSION=latest`，会下载 `releases/latest` 下的 Linux AMD64 产物。
+默认安装 GitHub Releases 的最新版本。脚本中默认值是 `CLICD_VERSION=latest`，会按宿主架构下载 `releases/latest` 下的 Linux AMD64 或 ARM64 产物。
 
 ## 可以固定安装某个版本吗？
 

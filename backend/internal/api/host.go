@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -219,6 +220,9 @@ var hostCPUMu sync.Mutex
 var lastHostCPU cpuTimes
 var hostIOMu sync.Mutex
 var lastHostIO hostIOSample
+var egressIPv4Mu sync.Mutex
+var cachedEgressIPv4 lxc.PublicIPInfo
+var cachedEgressIPv4At time.Time
 
 type cpuTimes struct {
 	Total uint64
@@ -397,7 +401,7 @@ func getHostRates() (NetworkInfo, DiskIOInfo) {
 	now := unixNano()
 
 	network := NetworkInfo{RXBytes: rx, TXBytes: tx}
-	publicIPv4 := lxc.DetectPublicIPv4()
+	publicIPv4 := detectDisplayPublicIPv4()
 	network.PublicIPv4 = publicIPv4.Address
 	network.PublicIPv4Interface = publicIPv4.Interface
 	network.PublicIPv4Addresses = lxc.DetectFreePublicIPv4Candidates(0)
@@ -437,21 +441,77 @@ func getHostRates() (NetworkInfo, DiskIOInfo) {
 }
 
 func readHostNetworkBytes() (uint64, uint64) {
-	entries, err := os.ReadDir("/sys/class/net")
-	if err != nil {
-		return 0, 0
+	ifaces := detectHostTrafficInterfaces()
+	if len(ifaces) == 0 {
+		ifaces = fallbackHostTrafficInterfaces()
 	}
 
 	var rx, tx uint64
-	for _, entry := range entries {
-		name := entry.Name()
-		if name == "lo" {
-			continue
-		}
+	for _, name := range ifaces {
 		rx += readUintFile("/sys/class/net/" + name + "/statistics/rx_bytes")
 		tx += readUintFile("/sys/class/net/" + name + "/statistics/tx_bytes")
 	}
 	return rx, tx
+}
+
+func detectHostTrafficInterfaces() []string {
+	seen := map[string]bool{}
+	result := make([]string, 0, 2)
+	add := func(name string) {
+		name = strings.TrimSpace(name)
+		if !isHostTrafficInterface(name) || seen[name] {
+			return
+		}
+		seen[name] = true
+		result = append(result, name)
+	}
+
+	if iface, _ := detectDefaultIPv4Route(); iface != "" {
+		add(iface)
+	}
+	if iface, _ := detectDefaultIPv6Route(); iface != "" {
+		add(iface)
+	}
+	if pub := lxc.DetectPublicIPv4(); pub.Interface != "" {
+		add(pub.Interface)
+	}
+	for _, prefix := range lxc.DetectHostPublicIPv6Prefixes() {
+		add(prefix.Interface)
+	}
+	return result
+}
+
+func fallbackHostTrafficInterfaces() []string {
+	entries, err := os.ReadDir("/sys/class/net")
+	if err != nil {
+		return nil
+	}
+
+	result := make([]string, 0)
+	for _, entry := range entries {
+		name := entry.Name()
+		if !isHostTrafficInterface(name) {
+			continue
+		}
+		state := strings.TrimSpace(readFirstExistingFile(filepath.Join("/sys/class/net", name, "operstate")))
+		if state == "down" {
+			continue
+		}
+		result = append(result, name)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func isHostTrafficInterface(name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" || name == "lo" {
+		return false
+	}
+	if isContainerLikeInterfaceName(name) {
+		return false
+	}
+	return true
 }
 
 func readHostDiskBytes() (uint64, uint64) {
@@ -574,6 +634,8 @@ func trimOSReleaseValue(value string) string {
 
 func detectHostCPUProbe() HostCPUProbe {
 	probe := HostCPUProbe{Cores: runtime.NumCPU(), Threads: runtime.NumCPU(), Architecture: runtime.GOARCH}
+	armImplementer := ""
+	armPart := ""
 	if data, err := os.ReadFile("/proc/cpuinfo"); err == nil {
 		seenFlags := map[string]bool{}
 		for _, line := range strings.Split(string(data), "\n") {
@@ -582,19 +644,28 @@ func detectHostCPUProbe() HostCPUProbe {
 				continue
 			}
 			key := strings.TrimSpace(fields[0])
+			keyLower := strings.ToLower(key)
 			value := strings.TrimSpace(fields[1])
-			switch key {
-			case "model name", "Hardware", "Processor":
-				if probe.Model == "" {
+			switch keyLower {
+			case "model name", "hardware", "processor":
+				if probe.Model == "" && meaningfulCPUModel(value) {
 					probe.Model = value
 				}
 			case "cpu cores":
 				if cores, err := strconv.Atoi(value); err == nil && cores > probe.Cores {
 					probe.Cores = cores
 				}
-			case "flags", "Features":
+			case "cpu implementer":
+				if armImplementer == "" {
+					armImplementer = strings.ToLower(value)
+				}
+			case "cpu part":
+				if armPart == "" {
+					armPart = strings.ToLower(value)
+				}
+			case "flags", "features":
 				for _, flag := range strings.Fields(value) {
-					if flag == "vmx" || flag == "svm" {
+					if flag == "vmx" || flag == "svm" || flag == "virt" {
 						probe.Virtualization = true
 						probe.VirtualizationKey = flag
 					}
@@ -607,10 +678,130 @@ func detectHostCPUProbe() HostCPUProbe {
 		}
 		sort.Strings(probe.Flags)
 	}
+	enrichCPUProbeFromLscpu(&probe, &armImplementer, &armPart)
+	if probe.Model == "" {
+		probe.Model = armCPUModelName(armImplementer, armPart)
+	}
+	if probe.Model == "" && runtime.GOARCH == "arm64" {
+		probe.Model = "ARM64 CPU"
+	}
 	if probe.Model == "" {
 		probe.Model = "Unknown"
 	}
 	return probe
+}
+
+func meaningfulCPUModel(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	if _, err := strconv.Atoi(value); err == nil {
+		return false
+	}
+	lower := strings.ToLower(value)
+	return lower != "unknown" && lower != "not specified"
+}
+
+func enrichCPUProbeFromLscpu(probe *HostCPUProbe, armImplementer *string, armPart *string) {
+	out := runCommandOutput(2*time.Second, "lscpu")
+	if out == "" {
+		return
+	}
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.SplitN(line, ":", 2)
+		if len(fields) != 2 {
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(fields[0]))
+		value := strings.TrimSpace(fields[1])
+		switch key {
+		case "model name":
+			if probe.Model == "" && meaningfulCPUModel(value) {
+				probe.Model = value
+			}
+		case "cpu(s)":
+			if threads, err := strconv.Atoi(value); err == nil && threads > probe.Threads {
+				probe.Threads = threads
+			}
+		case "core(s) per socket":
+			if cores, err := strconv.Atoi(value); err == nil && cores > 0 {
+				probe.Cores = cores
+			}
+		case "socket(s)":
+			if sockets, err := strconv.Atoi(value); err == nil && sockets > 1 && probe.Cores > 0 {
+				probe.Cores *= sockets
+			}
+		case "virtualization":
+			lower := strings.ToLower(value)
+			if value != "" && lower != "none" && lower != "n/a" {
+				probe.Virtualization = true
+				probe.VirtualizationKey = value
+			}
+		case "flags":
+			seen := map[string]bool{}
+			for _, flag := range probe.Flags {
+				seen[flag] = true
+			}
+			for _, flag := range strings.Fields(value) {
+				if flag == "vmx" || flag == "svm" || flag == "virt" {
+					probe.Virtualization = true
+					probe.VirtualizationKey = flag
+				}
+				if !seen[flag] {
+					probe.Flags = append(probe.Flags, flag)
+					seen[flag] = true
+				}
+			}
+			sort.Strings(probe.Flags)
+		case "cpu implementer":
+			if *armImplementer == "" {
+				*armImplementer = strings.ToLower(value)
+			}
+		case "cpu part":
+			if *armPart == "" {
+				*armPart = strings.ToLower(value)
+			}
+		}
+	}
+}
+
+func armCPUModelName(implementer, part string) string {
+	implementer = normalizeHexID(implementer)
+	part = normalizeHexID(part)
+	if implementer == "" || part == "" {
+		return ""
+	}
+	armParts := map[string]string{
+		"0x41:0xd03": "ARM Cortex-A53",
+		"0x41:0xd05": "ARM Cortex-A55",
+		"0x41:0xd07": "ARM Cortex-A57",
+		"0x41:0xd08": "ARM Cortex-A72",
+		"0x41:0xd09": "ARM Cortex-A73",
+		"0x41:0xd0a": "ARM Cortex-A75",
+		"0x41:0xd0b": "ARM Cortex-A76",
+		"0x41:0xd0c": "ARM Neoverse N1",
+		"0x41:0xd0d": "ARM Cortex-A77",
+		"0x41:0xd40": "ARM Neoverse V1",
+		"0x41:0xd41": "ARM Cortex-A78",
+		"0x41:0xd49": "ARM Neoverse N2",
+		"0x41:0xd4f": "ARM Neoverse V2",
+	}
+	if model := armParts[implementer+":"+part]; model != "" {
+		return model
+	}
+	return strings.ToUpper(strings.TrimPrefix(implementer, "0x")) + " ARM CPU part " + part
+}
+
+func normalizeHexID(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return ""
+	}
+	if strings.HasPrefix(value, "0x") {
+		return value
+	}
+	return "0x" + value
 }
 
 func detectMemoryModules() []HostMemoryModule {
@@ -724,7 +915,7 @@ func isVirtualBlockDevice(name, model, vendor string) bool {
 	}
 	for _, token := range []string{
 		"qemu", "virtio", "virtual", "vmware", "vbox", "xen",
-		"amazon elastic block store", "google persistentdisk", "microsoft",
+		"amazon elastic block store", "google persistentdisk", "microsoft", "blockvolume",
 	} {
 		if strings.Contains(lower, token) {
 			return true
@@ -1153,7 +1344,124 @@ func detectAllPublicIPv4() []string {
 			result = append(result, value)
 		}
 	}
+	if egress := detectEgressPublicIPv4(); egress.Address != "" {
+		if !seen[egress.Address] {
+			seen[egress.Address] = true
+			result = append(result, egress.Address)
+		}
+	}
 	return result
+}
+
+func detectDisplayPublicIPv4() lxc.PublicIPInfo {
+	if pub := lxc.DetectPublicIPv4(); pub.Address != "" {
+		return pub
+	}
+	return detectEgressPublicIPv4()
+}
+
+func detectEgressPublicIPv4() lxc.PublicIPInfo {
+	egressIPv4Mu.Lock()
+	defer egressIPv4Mu.Unlock()
+
+	if cachedEgressIPv4.Address != "" && time.Since(cachedEgressIPv4At) < 5*time.Minute {
+		return cachedEgressIPv4
+	}
+
+	client := &http.Client{Timeout: 1200 * time.Millisecond}
+	for _, endpoint := range []string{
+		"https://api.ipify.org",
+		"https://ifconfig.me/ip",
+		"https://icanhazip.com",
+	} {
+		ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		if err != nil {
+			cancel()
+			continue
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			cancel()
+			continue
+		}
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 128))
+		_ = resp.Body.Close()
+		cancel()
+		if readErr != nil || resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			continue
+		}
+		address := strings.TrimSpace(string(body))
+		ip := net.ParseIP(address)
+		if !isPublicIPv4(ip) {
+			continue
+		}
+		iface, gateway := detectDefaultIPv4Route()
+		cachedEgressIPv4 = lxc.PublicIPInfo{
+			Address:    ip.String(),
+			Interface:  iface,
+			Prefix:     ip.String() + "/32",
+			PrefixLen:  32,
+			SubnetMask: "255.255.255.255",
+			Gateway:    gateway,
+			IsTunnel:   isTunnelLikeInterfaceName(iface),
+			Source:     "egress",
+		}
+		cachedEgressIPv4At = time.Now()
+		return cachedEgressIPv4
+	}
+
+	cachedEgressIPv4 = lxc.PublicIPInfo{}
+	cachedEgressIPv4At = time.Now()
+	return cachedEgressIPv4
+}
+
+func detectDefaultIPv4Route() (string, string) {
+	out := runCommandOutput(2*time.Second, "ip", "-4", "route", "show", "default")
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		iface := ""
+		gateway := ""
+		for i, field := range fields {
+			if field == "dev" && i+1 < len(fields) {
+				iface = fields[i+1]
+			}
+			if field == "via" && i+1 < len(fields) {
+				gateway = fields[i+1]
+			}
+		}
+		if iface != "" || gateway != "" {
+			return iface, gateway
+		}
+	}
+	return "", ""
+}
+
+func detectDefaultIPv6Route() (string, string) {
+	out := runCommandOutput(2*time.Second, "ip", "-6", "route", "show", "default")
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		iface := ""
+		gateway := ""
+		for i, field := range fields {
+			if field == "dev" && i+1 < len(fields) {
+				iface = fields[i+1]
+			}
+			if field == "via" && i+1 < len(fields) {
+				gateway = fields[i+1]
+			}
+		}
+		if iface != "" || gateway != "" {
+			return iface, gateway
+		}
+	}
+	return "", ""
 }
 
 func collectIPv4Addresses(nics []HostNICProbe) []HostIPProbe {
@@ -1301,6 +1609,16 @@ func isContainerLikeInterfaceName(iface string) bool {
 	return false
 }
 
+func isTunnelLikeInterfaceName(iface string) bool {
+	lower := strings.ToLower(strings.TrimSpace(iface))
+	for _, prefix := range []string{"tun", "tap", "wg", "gre", "gretap", "sit", "ip6tnl", "he-", "zt", "tailscale"} {
+		if lower == prefix || strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func collectIPv6Addresses(nics []HostNICProbe) []HostIPProbe {
 	result := make([]HostIPProbe, 0)
 	for _, nic := range nics {
@@ -1368,6 +1686,8 @@ func detectGPUVendor(value string) string {
 		return "NVIDIA"
 	case strings.Contains(lower, "amd") || strings.Contains(lower, "ati"):
 		return "AMD"
+	case strings.Contains(lower, "virtio") || strings.Contains(lower, "red hat") || strings.Contains(lower, "qemu"):
+		return "Virtio"
 	default:
 		return "Unknown"
 	}
@@ -1375,6 +1695,9 @@ func detectGPUVendor(value string) string {
 
 func detectGPUType(value string) string {
 	lower := strings.ToLower(value)
+	if strings.Contains(lower, "virtio") || strings.Contains(lower, "red hat") || strings.Contains(lower, "qemu") {
+		return "virtual"
+	}
 	if strings.Contains(lower, "intel") {
 		return "integrated"
 	}
@@ -1394,9 +1717,10 @@ func detectRuntimeProbe(env []HostEnvCheck) HostRuntimeProbe {
 	devKVM := fileExists("/dev/kvm")
 	nested, detail := detectNestedVirtualization()
 	lxcOK := envCheckOK(env, "lxc-create")
+	kvmSupportedArch := runtime.GOARCH == "amd64" || runtime.GOARCH == "arm64"
 	probe := HostRuntimeProbe{
 		LXCAvailable:         lxcOK,
-		KVMAvailable:         devKVM && envCheckOK(env, "virsh"),
+		KVMAvailable:         kvmSupportedArch && devKVM && envCheckOK(env, "virsh") && envCheckOK(env, kvmQEMUCheckKey()),
 		DevKVM:               devKVM,
 		NestedVirtualization: nested,
 		NestedDetail:         detail,
@@ -1446,6 +1770,7 @@ func detectSystemProbe() HostSystemProbe {
 }
 
 func detectHostEnvironment() []HostEnvCheck {
+	qemuCheck := commandCheck(kvmQEMUCheckKey(), "QEMU/KVM 虚拟机", false, kvmQEMUCommand(), "")
 	checks := []HostEnvCheck{
 		commandCheck("service-manager", "服务管理器 systemd/OpenRC", true, "systemctl", "systemd"),
 		commandCheck("lxc-create", "LXC 创建工具", true, "lxc-create", ""),
@@ -1454,7 +1779,7 @@ func detectHostEnvironment() []HostEnvCheck {
 		commandCheck("ip", "iproute2 网络工具", true, "ip", ""),
 		commandCheck("conntrack", "conntrack 安全扫描", false, "conntrack", ""),
 		commandCheck("virsh", "libvirt virsh", false, "virsh", ""),
-		commandCheck("qemu-system-x86_64", "QEMU/KVM 虚拟机", false, "qemu-system-x86_64", ""),
+		qemuCheck,
 		commandCheck("genisoimage", "KVM cloud-init ISO 工具", false, "genisoimage", "xorriso/mkisofs 可替代"),
 		commandCheck("xorriso", "ISO 备用工具", false, "xorriso", ""),
 		commandCheck("smartctl", "硬盘健康检测", false, "smartctl", ""),
@@ -1465,6 +1790,19 @@ func detectHostEnvironment() []HostEnvCheck {
 	checks = append(checks, HostEnvCheck{Key: "lxcfs", Label: "lxcfs 服务", OK: serviceActive("lxcfs"), Required: false, Detail: serviceDetail("lxcfs")})
 	checks = append(checks, HostEnvCheck{Key: "libvirt", Label: "libvirt 服务", OK: serviceActive("libvirtd") || serviceActive("virtqemud"), Required: false, Detail: firstNonEmpty(serviceDetail("libvirtd"), serviceDetail("virtqemud"))})
 	return checks
+}
+
+func kvmQEMUCheckKey() string {
+	switch runtime.GOARCH {
+	case "arm64":
+		return "qemu-system-aarch64"
+	default:
+		return "qemu-system-x86_64"
+	}
+}
+
+func kvmQEMUCommand() string {
+	return kvmQEMUCheckKey()
 }
 
 func commandCheck(key, label string, required bool, cmd string, fallback string) HostEnvCheck {

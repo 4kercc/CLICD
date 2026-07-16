@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
 
@@ -227,9 +228,14 @@ func HandleImages(w http.ResponseWriter, r *http.Request) {
 
 	enabledSet := getEnabledImageSet()
 	cleanupOldImageDownloadErrors()
+	kvmAvailable := hostKVMAvailable()
 
 	templates := lxc.GetTemplates()
-	images := make([]ImageInfo, 0, len(templates)+len(kvm.GetImages()))
+	kvmImages := []kvm.Image{}
+	if kvmAvailable {
+		kvmImages = kvm.GetImages()
+	}
+	images := make([]ImageInfo, 0, len(templates)+len(kvmImages))
 	for _, t := range templates {
 		dl := imageDownloadInfo(t.ID)
 		downloaded, size := imageDownloadedInfo(t.Distro, t.Release, t.Arch)
@@ -252,7 +258,7 @@ func HandleImages(w http.ResponseWriter, r *http.Request) {
 			SizeBytes:       size,
 		})
 	}
-	for _, t := range kvm.GetImages() {
+	for _, t := range kvmImages {
 		dl := imageDownloadInfo(t.ID)
 		downloaded, size := kvm.ImageDownloadedInfo(t.ID)
 		manualPath := ""
@@ -307,6 +313,10 @@ func HandleImageDownload(w http.ResponseWriter, r *http.Request) {
 		image := kvm.FindImage(req.TemplateID)
 		if image == nil {
 			jsonResponse(w, http.StatusNotFound, APIResponse{Success: false, Message: "Template not found"})
+			return
+		}
+		if !hostKVMAvailable() {
+			jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "KVM is not available on this host"})
 			return
 		}
 		if ok, _ := kvm.ImageDownloadedInfo(image.ID); ok {
@@ -534,6 +544,10 @@ func HandleEnabledImages(w http.ResponseWriter, r *http.Request) {
 
 	result := make([]map[string]string, 0)
 	if runtime == config.VirtualizationKVM {
+		if !hostKVMAvailable() {
+			jsonResponse(w, http.StatusOK, APIResponse{Success: true, Data: result})
+			return
+		}
 		for _, t := range kvm.GetImages() {
 			if downloaded, _ := kvm.ImageDownloadedInfo(t.ID); enabledSet[t.ID] && downloaded {
 				result = append(result, map[string]string{
@@ -563,6 +577,9 @@ func isTemplateEnabledAndDownloaded(templateID string) bool {
 func isImageEnabledAndDownloaded(templateID string, runtime string) bool {
 	runtime = runtimeFromRequest(runtime)
 	if runtime == config.VirtualizationKVM {
+		if !hostKVMAvailable() {
+			return false
+		}
 		image := kvm.FindImage(templateID)
 		if image == nil {
 			return false
@@ -577,6 +594,13 @@ func isImageEnabledAndDownloaded(templateID string, runtime string) bool {
 	}
 	enabledSet := getEnabledImageSet()
 	return enabledSet[tmpl.ID] && isImageDownloaded(tmpl.Distro, tmpl.Release, tmpl.Arch)
+}
+
+func hostKVMAvailable() bool {
+	if runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64" {
+		return false
+	}
+	return fileExists("/dev/kvm") && commandExists("virsh") && commandExists(kvmQEMUCheckKey())
 }
 
 func ensureImageEnabled(id string) {

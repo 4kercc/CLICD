@@ -148,17 +148,19 @@ export default function ImageManagement() {
         onToggle={handleToggle}
       />
 
-      <ImageTable
-        title="KVM 虚拟机镜像"
-        images={kvmImages}
-        actionLoading={actionLoading}
-        downloadedCount={kvmImages.filter((img) => img.downloaded).length}
-        totalCount={kvmImages.length}
-        onDownload={handleDownload}
-        onCancelDownload={handleCancelDownload}
-        onDelete={handleDelete}
-        onToggle={handleToggle}
-      />
+      {kvmImages.length > 0 && (
+        <ImageTable
+          title="KVM 虚拟机镜像"
+          images={kvmImages}
+          actionLoading={actionLoading}
+          downloadedCount={kvmImages.filter((img) => img.downloaded).length}
+          totalCount={kvmImages.length}
+          onDownload={handleDownload}
+          onCancelDownload={handleCancelDownload}
+          onDelete={handleDelete}
+          onToggle={handleToggle}
+        />
+      )}
     </div>
   )
 }

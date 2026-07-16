@@ -26,4 +26,4 @@ CLICD is a lightweight virtualization management panel for LXC and KVM. It bring
 
 - Backend: Go, `net/http`, SQLite, systemd, LXC, KVM/libvirt, cgroup v2, iptables, conntrack.
 - Frontend: React, TypeScript, Vite, Tailwind CSS, lucide-react, xterm.js, noVNC.
-- Release: GitHub Actions builds Linux AMD64 release artifacts. The installer fetches the latest release by default.
+- Release: GitHub Actions builds Linux AMD64/ARM64 release artifacts. The installer fetches the latest release by default.

@@ -205,7 +205,7 @@ const hostReportText = {
     ipv4Address: 'IPv4 地址',
     ipv4Prefix: 'IPv4 段',
     ipv6Address: 'IPv6 地址',
-    ipv6Prefix: 'IPv6 段',
+    ipv6Prefix: '可分配 IPv6 前缀',
     gateway: '网关',
     memoryModules: '内存条',
     noMemoryModules: '未检测到内存条明细，可能缺少 dmidecode 或权限受限',
@@ -277,7 +277,7 @@ const hostReportText = {
     ipv4Address: 'IPv4 Addresses',
     ipv4Prefix: 'IPv4 Prefixes',
     ipv6Address: 'IPv6 Addresses',
-    ipv6Prefix: 'IPv6 Prefixes',
+    ipv6Prefix: 'Allocatable IPv6 Prefixes',
     gateway: 'Gateway',
     memoryModules: 'Memory Modules',
     noMemoryModules: 'No memory module details detected. dmidecode may be missing or permissions may be limited.',
@@ -511,6 +511,7 @@ function diskTypeLabel(d: { type?: string; rotational?: boolean; virtual?: boole
 }
 
 function gpuTypeLabel(value: string, language: Language) {
+  if (value === 'virtual') return language === 'en' ? 'Virtual' : '虚拟'
   if (value === 'integrated') return language === 'en' ? 'Integrated' : '核显'
   if (value === 'discrete') return language === 'en' ? 'Discrete' : '独显'
   return value || '-'

@@ -2,6 +2,7 @@ package kvm
 
 import (
 	"path/filepath"
+	"runtime"
 )
 
 type Image struct {
@@ -16,6 +17,15 @@ type Image struct {
 }
 
 func GetImages() []Image {
+	switch runtime.GOARCH {
+	case "arm64":
+		return arm64Images()
+	default:
+		return amd64Images()
+	}
+}
+
+func amd64Images() []Image {
 	return []Image{
 		{
 			ID: "kvm-ubuntu-noble", Name: "Ubuntu 24.04 KVM",
@@ -90,6 +100,53 @@ func GetImages() []Image {
 			Distro: "windows", Release: "10", Arch: "amd64",
 			Description: "Windows 10 Enterprise LTSC Evaluation",
 			URL:         "https://go.microsoft.com/fwlink/?LinkID=2195404",
+		},
+	}
+}
+
+func arm64Images() []Image {
+	return []Image{
+		{
+			ID: "kvm-ubuntu-noble", Name: "Ubuntu 24.04 KVM",
+			Distro: "ubuntu", Release: "noble", Arch: "arm64",
+			Description: "Ubuntu 24.04 LTS cloud image for ARM64 KVM",
+			URL:         "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-arm64.img",
+		},
+		{
+			ID: "kvm-ubuntu-jammy", Name: "Ubuntu 22.04 KVM",
+			Distro: "ubuntu", Release: "jammy", Arch: "arm64",
+			Description: "Ubuntu 22.04 LTS cloud image for ARM64 KVM",
+			URL:         "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-arm64.img",
+		},
+		{
+			ID: "kvm-debian-bookworm", Name: "Debian 12 KVM",
+			Distro: "debian", Release: "bookworm", Arch: "arm64",
+			Description: "Debian 12 generic cloud image for ARM64 KVM",
+			URL:         "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-arm64.qcow2",
+		},
+		{
+			ID: "kvm-debian-bullseye", Name: "Debian 11 KVM",
+			Distro: "debian", Release: "bullseye", Arch: "arm64",
+			Description: "Debian 11 generic cloud image for ARM64 KVM",
+			URL:         "https://cloud.debian.org/images/cloud/bullseye/latest/debian-11-genericcloud-arm64.qcow2",
+		},
+		{
+			ID: "kvm-centos-9-stream", Name: "CentOS Stream 9 KVM",
+			Distro: "centos", Release: "9-stream", Arch: "arm64",
+			Description: "CentOS Stream 9 GenericCloud image for ARM64 KVM",
+			URL:         "https://cloud.centos.org/centos/9-stream/aarch64/images/CentOS-Stream-GenericCloud-9-latest.aarch64.qcow2",
+		},
+		{
+			ID: "kvm-fedora-44", Name: "Fedora 44 KVM",
+			Distro: "fedora", Release: "44", Arch: "arm64",
+			Description: "Fedora 44 GenericCloud image for ARM64 KVM",
+			URL:         "https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/aarch64/images/Fedora-Cloud-Base-Generic-44-1.7.aarch64.qcow2",
+		},
+		{
+			ID: "kvm-rockylinux-9", Name: "Rocky Linux 9 KVM",
+			Distro: "rockylinux", Release: "9", Arch: "arm64",
+			Description: "Rocky Linux 9 GenericCloud image for ARM64 KVM",
+			URL:         "https://dl.rockylinux.org/pub/rocky/9/images/aarch64/Rocky-9-GenericCloud-Base.latest.aarch64.qcow2",
 		},
 	}
 }

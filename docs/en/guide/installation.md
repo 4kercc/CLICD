@@ -4,7 +4,7 @@ CLICD provides a one-line installer. By default, it installs the latest version 
 
 ## Requirements
 
-- Linux x86_64 host.
+- Linux x86_64/amd64 or ARM64/aarch64 host.
 - Root privileges.
 - systemd.
 - Network access to GitHub Release downloads.
@@ -17,7 +17,7 @@ CLICD provides a one-line installer. By default, it installs the latest version 
 curl -fsSL https://raw.githubusercontent.com/MengMengCode/CLICD/main/install.sh | sudo sh
 ```
 
-The script defaults to `CLICD_VERSION=latest`, which downloads `clicd-linux-amd64.tar.gz` from `releases/latest`.
+The script defaults to `CLICD_VERSION=latest` and downloads `clicd-linux-amd64.tar.gz` or `clicd-linux-arm64.tar.gz` from `releases/latest` according to the host architecture.
 
 ## Install a Specific Version
 

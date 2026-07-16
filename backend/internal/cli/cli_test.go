@@ -19,6 +19,26 @@ func TestSafeReleaseBackupComponent(t *testing.T) {
 	}
 }
 
+func TestReleaseArchiveAssetName(t *testing.T) {
+	tests := map[string]string{
+		"amd64": "clicd-linux-amd64.tar.gz",
+		"arm64": "clicd-linux-arm64.tar.gz",
+	}
+	for goarch, want := range tests {
+		got, err := releaseArchiveAssetName(goarch)
+		if err != nil {
+			t.Fatalf("releaseArchiveAssetName(%q) error = %v", goarch, err)
+		}
+		if got != want {
+			t.Fatalf("releaseArchiveAssetName(%q) = %q, want %q", goarch, got, want)
+		}
+	}
+
+	if _, err := releaseArchiveAssetName("386"); err == nil {
+		t.Fatal("releaseArchiveAssetName(386) error = nil, want unsupported architecture")
+	}
+}
+
 func TestCopyFileToBackupRejectsUnsafeFileName(t *testing.T) {
 	unsafeNames := []string{
 		"../clicd",

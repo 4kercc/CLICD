@@ -30,6 +30,25 @@ bash build.sh
 
 The script chains frontend build, static asset sync, and Go binary build.
 
+The default target is Linux amd64. To build an ARM64 package, set:
+
+```bash
+CLICD_GOARCH=arm64 bash build.sh
+```
+
+To build both amd64 and arm64 release assets at once:
+
+```bash
+CLICD_GOARCH=all bash build.sh
+```
+
+The build writes:
+
+- `dist/clicd-linux-amd64`
+- `dist/clicd-linux-amd64.tar.gz`
+- `dist/clicd-linux-arm64`
+- `dist/clicd-linux-arm64.tar.gz`
+
 ## Docs Build
 
 ```bash

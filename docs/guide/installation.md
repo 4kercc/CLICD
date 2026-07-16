@@ -4,7 +4,7 @@ CLICD 提供一键安装脚本。脚本默认安装 GitHub Releases 的最新版
 
 ## 环境要求
 
-- Linux x86_64 宿主机。
+- Linux x86_64/amd64 或 ARM64/aarch64 宿主机。
 - root 权限。
 - systemd。
 - 网络可访问 GitHub Release 下载地址。
@@ -17,7 +17,7 @@ CLICD 提供一键安装脚本。脚本默认安装 GitHub Releases 的最新版
 curl -fsSL https://raw.githubusercontent.com/MengMengCode/CLICD/main/install.sh | sudo sh
 ```
 
-脚本当前默认使用 `CLICD_VERSION=latest`，也就是下载 `releases/latest` 对应的 `clicd-linux-amd64.tar.gz`。
+脚本当前默认使用 `CLICD_VERSION=latest`，会按宿主架构下载 `releases/latest` 对应的 `clicd-linux-amd64.tar.gz` 或 `clicd-linux-arm64.tar.gz`。
 
 ## 安装指定版本
 

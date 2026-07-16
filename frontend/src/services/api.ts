@@ -235,6 +235,14 @@ export interface HostInfo {
   }
   disk_io: { read_bytes: number; write_bytes: number; read_bps: number; write_bps: number }
   load: { load1: number; load5: number; load15: number }
+  runtime?: {
+    lxc_available: boolean
+    kvm_available: boolean
+    dev_kvm: boolean
+    nested_virtualization: boolean
+    nested_detail: string
+    support_mode: string
+  }
 }
 
 export interface HostProbeReport {

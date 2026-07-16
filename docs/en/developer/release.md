@@ -12,16 +12,18 @@ Check the version in:
 
 ## Release Artifacts
 
-The installer first tries to download the Linux AMD64 archive:
+The installer first tries to download the Linux AMD64 or ARM64 archive for the host architecture:
 
 ```text
 clicd-linux-amd64.tar.gz
+clicd-linux-arm64.tar.gz
 ```
 
 In some cases, it may also try the standalone binary:
 
 ```text
 clicd-linux-amd64
+clicd-linux-arm64
 ```
 
 ## Installer Behavior

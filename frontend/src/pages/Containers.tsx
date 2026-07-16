@@ -395,10 +395,8 @@ export default function Containers() {
                   const isPlaceholder = !!container.isPlaceholder
                   const isPolicyBlocked = !!container.policy_blocked
                   const usage = usageByName[container.name]
-                  const isKVM = (container.virtualization || 'lxc') === 'kvm'
-
                   const cpuPct = isRunning
-                    ? clamp((usage?.cpu_usage_pct || 0) / (isKVM ? (container.vcpu || 1) : 1))
+                    ? clamp((usage?.cpu_usage_pct || 0) / (container.vcpu || 1))
                     : 0
                   const ramTotalBytes = usage?.memory_total_bytes && usage.memory_total_bytes > 0
                     ? usage.memory_total_bytes

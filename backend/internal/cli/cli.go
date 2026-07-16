@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -125,32 +126,34 @@ var cliTranslations = map[string]string{
 	"检查仓库":             "Checking repository",
 	"检查 GitHub 最新版本失败": "Failed to check the latest GitHub version",
 	"GitHub Release 没有 tag_name，无法判断最新版本。": "GitHub Release has no tag_name, so the latest version cannot be determined.",
-	"最新版本": "Latest version",
-	"发布页面": "Release page",
-	"最新 Release 没有找到 clicd-linux-amd64.tar.gz，无法自动升级。": "The latest release does not contain clicd-linux-amd64.tar.gz, so automatic upgrade is unavailable.",
-	"当前已经是最新版本。":                                       "The current version is already the latest.",
-	"是否仍然重新安装最新版本？输入 reinstall 继续":                     "Reinstall the latest version anyway? Type reinstall to continue",
-	"输入 upgrade 开始升级":                                  "Type upgrade to start upgrade",
-	"已取消。":                                             "Cancelled.",
-	"升级失败":                                             "Upgrade failed",
-	"升级完成":                                             "Upgrade completed",
-	"原有数据已保留，Web 服务已重启。":                               "Existing data has been kept and the web service has been restarted.",
-	"GitHub API 返回":                                    "GitHub API returned",
-	"GitHub API 被限流，已切换到备用检查方式。":                       "GitHub API rate limit reached; switched to fallback check.",
-	"GitHub API 不可用，已切换到备用检查方式。":                       "GitHub API is unavailable; switched to fallback check.",
-	"GitHub releases/latest 返回":                        "GitHub releases/latest returned",
-	"无法从 GitHub releases/latest 跳转结果解析最新版本":            "Unable to parse the latest version from the GitHub releases/latest redirect",
-	"正在下载升级包...":                                       "Downloading upgrade package...",
-	"正在解压升级包...":                                       "Extracting upgrade package...",
-	"解压失败":                                             "Extraction failed",
-	"备份旧二进制失败":                                         "Failed to back up old binary",
-	"旧版本已备份":                                           "Old version backed up",
-	"正在替换二进制...":                                       "Replacing binary...",
-	"停止 Web 服务失败，继续尝试替换":                               "Failed to stop web service; continuing replacement attempt",
-	"二进制已替换，但重启 Web 服务失败":                              "Binary was replaced, but restarting the web service failed",
-	"下载失败，HTTP":                                        "Download failed, HTTP",
-	"升级包内未找到 clicd 二进制":                                "No clicd binary found in the upgrade package",
-	"将 /var/lib/lxc 里的容器导入 CLICD 配置。":                  "Import containers under /var/lib/lxc into CLICD configuration.",
+	"最新版本":            "Latest version",
+	"发布页面":            "Release page",
+	"当前架构不支持自动升级":     "Automatic upgrade is not supported on the current architecture",
+	"最新 Release 没有找到": "The latest release does not contain",
+	"无法自动升级。":         "automatic upgrade is unavailable.",
+	"当前已经是最新版本。":      "The current version is already the latest.",
+	"是否仍然重新安装最新版本？输入 reinstall 继续":          "Reinstall the latest version anyway? Type reinstall to continue",
+	"输入 upgrade 开始升级":                       "Type upgrade to start upgrade",
+	"已取消。":                                  "Cancelled.",
+	"升级失败":                                  "Upgrade failed",
+	"升级完成":                                  "Upgrade completed",
+	"原有数据已保留，Web 服务已重启。":                    "Existing data has been kept and the web service has been restarted.",
+	"GitHub API 返回":                         "GitHub API returned",
+	"GitHub API 被限流，已切换到备用检查方式。":            "GitHub API rate limit reached; switched to fallback check.",
+	"GitHub API 不可用，已切换到备用检查方式。":            "GitHub API is unavailable; switched to fallback check.",
+	"GitHub releases/latest 返回":             "GitHub releases/latest returned",
+	"无法从 GitHub releases/latest 跳转结果解析最新版本": "Unable to parse the latest version from the GitHub releases/latest redirect",
+	"正在下载升级包...":                            "Downloading upgrade package...",
+	"正在解压升级包...":                            "Extracting upgrade package...",
+	"解压失败":                                  "Extraction failed",
+	"备份旧二进制失败":                              "Failed to back up old binary",
+	"旧版本已备份":                                "Old version backed up",
+	"正在替换二进制...":                            "Replacing binary...",
+	"停止 Web 服务失败，继续尝试替换":                    "Failed to stop web service; continuing replacement attempt",
+	"二进制已替换，但重启 Web 服务失败":                   "Binary was replaced, but restarting the web service failed",
+	"下载失败，HTTP":                             "Download failed, HTTP",
+	"升级包内未找到 clicd 二进制":                     "No clicd binary found in the upgrade package",
+	"将 /var/lib/lxc 里的容器导入 CLICD 配置。":       "Import containers under /var/lib/lxc into CLICD configuration.",
 	"导入后会保留真实 LXC 名称，Web 和 CLI 都能管理同一个容器。": "After import, real LXC names are kept and both Web and CLI can manage the same containers.",
 	"导入失败":            "Import failed",
 	"没有发现新的 ct-* 容器。": "No new ct-* containers found.",
@@ -557,11 +560,16 @@ func cliUpgradeSystem(reader *bufio.Reader) {
 	if repo == "" {
 		repo = version.Repo
 	}
+	assetName, err := releaseArchiveAssetName(runtime.GOARCH)
+	if err != nil {
+		cliPrintf("当前架构不支持自动升级: %s\n", runtime.GOARCH)
+		return
+	}
 	current := version.Current()
 	cliPrintf("当前版本: %s\n", current)
 	cliPrintf("检查仓库: https://github.com/%s\n", repo)
 
-	release, err := fetchLatestRelease(repo)
+	release, err := fetchLatestRelease(repo, assetName)
 	if err != nil {
 		cliPrintf("检查 GitHub 最新版本失败: %v\n", err)
 		return
@@ -576,9 +584,9 @@ func cliUpgradeSystem(reader *bufio.Reader) {
 		cliPrintf("发布页面: %s\n", release.HTMLURL)
 	}
 
-	assetURL := findReleaseAsset(release, "clicd-linux-amd64.tar.gz")
+	assetURL := findReleaseAsset(release, assetName)
 	if assetURL == "" {
-		cliPrintln("最新 Release 没有找到 clicd-linux-amd64.tar.gz，无法自动升级。")
+		cliPrintf("最新 Release 没有找到 %s，无法自动升级。\n", assetName)
 		return
 	}
 
@@ -597,7 +605,7 @@ func cliUpgradeSystem(reader *bufio.Reader) {
 		}
 	}
 
-	if err := upgradeFromReleaseAsset(assetURL, latest); err != nil {
+	if err := upgradeFromReleaseAsset(assetURL, latest, assetName); err != nil {
 		cliPrintf("升级失败: %v\n", err)
 		return
 	}
@@ -605,7 +613,7 @@ func cliUpgradeSystem(reader *bufio.Reader) {
 	cliPrintln("原有数据已保留，Web 服务已重启。")
 }
 
-func fetchLatestRelease(repo string) (*githubRelease, error) {
+func fetchLatestRelease(repo, assetName string) (*githubRelease, error) {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", repo)
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
@@ -617,7 +625,7 @@ func fetchLatestRelease(repo string) (*githubRelease, error) {
 	client := &http.Client{Timeout: 20 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		if fallback, fallbackErr := fetchLatestReleaseFallback(repo); fallbackErr == nil {
+		if fallback, fallbackErr := fetchLatestReleaseFallback(repo, assetName); fallbackErr == nil {
 			return fallback, nil
 		}
 		return nil, err
@@ -627,7 +635,7 @@ func fetchLatestRelease(repo string) (*githubRelease, error) {
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		apiErr := fmt.Errorf("GitHub API 返回 %s: %s", resp.Status, strings.TrimSpace(string(body)))
-		if fallback, fallbackErr := fetchLatestReleaseFallback(repo); fallbackErr == nil {
+		if fallback, fallbackErr := fetchLatestReleaseFallback(repo, assetName); fallbackErr == nil {
 			if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
 				cliPrintln("GitHub API 被限流，已切换到备用检查方式。")
 			} else {
@@ -645,7 +653,7 @@ func fetchLatestRelease(repo string) (*githubRelease, error) {
 	return &release, nil
 }
 
-func fetchLatestReleaseFallback(repo string) (*githubRelease, error) {
+func fetchLatestReleaseFallback(repo, assetName string) (*githubRelease, error) {
 	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("https://github.com/%s/releases/latest", repo), nil)
 	if err != nil {
 		return nil, err
@@ -667,7 +675,6 @@ func fetchLatestReleaseFallback(repo string) (*githubRelease, error) {
 		return nil, fmt.Errorf("无法从 GitHub releases/latest 跳转结果解析最新版本")
 	}
 
-	const assetName = "clicd-linux-amd64.tar.gz"
 	return &githubRelease{
 		TagName: tag,
 		Name:    tag,
@@ -708,6 +715,15 @@ func setGitHubRequestHeaders(req *http.Request) {
 	}
 }
 
+func releaseArchiveAssetName(goarch string) (string, error) {
+	switch goarch {
+	case "amd64", "arm64":
+		return fmt.Sprintf("clicd-linux-%s.tar.gz", goarch), nil
+	default:
+		return "", fmt.Errorf("unsupported architecture: %s", goarch)
+	}
+}
+
 func findReleaseAsset(release *githubRelease, name string) string {
 	for _, asset := range release.Assets {
 		if asset.Name == name && asset.BrowserDownloadURL != "" {
@@ -717,14 +733,14 @@ func findReleaseAsset(release *githubRelease, name string) string {
 	return ""
 }
 
-func upgradeFromReleaseAsset(assetURL, latest string) error {
+func upgradeFromReleaseAsset(assetURL, latest, assetName string) error {
 	tmpDir, err := os.MkdirTemp("", "clicd-upgrade-*")
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(tmpDir)
 
-	archivePath := filepath.Join(tmpDir, "clicd-linux-amd64.tar.gz")
+	archivePath := filepath.Join(tmpDir, assetName)
 	cliPrintln("正在下载升级包...")
 	if err := downloadFile(assetURL, archivePath); err != nil {
 		return err
