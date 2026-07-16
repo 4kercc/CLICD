@@ -88,3 +88,48 @@ func TestSafeRootfsPathRejectsSiblingPrefix(t *testing.T) {
 		t.Fatalf("safeRootfsPath returned %v, want unsafe rootfs path error", err)
 	}
 }
+
+func TestIsLXCVDenylistSeccompProfile(t *testing.T) {
+	tests := []string{`
+# base profile
+2
+denylist
+[all]
+open_by_handle_at errno 1
+`, `
+2
+blacklist allow
+[all]
+open_by_handle_at errno 1
+`}
+
+	for _, profile := range tests {
+		if !isLXCVDenylistSeccompProfile(profile) {
+			t.Fatalf("expected v2 denylist profile for\n%s", profile)
+		}
+	}
+	if isLXCVDenylistSeccompProfile("1\nallowlist\n1\n") {
+		t.Fatal("did not expect v1 allowlist profile")
+	}
+}
+
+func TestAppendMissingSeccompRulesAddsFutexMitigationOnce(t *testing.T) {
+	base := "2\ndenylist\n[all]\nopen_by_handle_at errno 1\n"
+
+	once := appendMissingSeccompRules(base, cve202643499FutexSeccompRules)
+	twice := appendMissingSeccompRules(once, cve202643499FutexSeccompRules)
+
+	for _, want := range []string{
+		"futex errno 1 [1,0x6,SCMP_CMP_MASKED_EQ,0x7f]",
+		"futex errno 1 [1,0xb,SCMP_CMP_MASKED_EQ,0x7f]",
+		"futex errno 1 [1,0xc,SCMP_CMP_MASKED_EQ,0x7f]",
+		"futex errno 1 [1,0xd,SCMP_CMP_MASKED_EQ,0x7f]",
+	} {
+		if !strings.Contains(once, want) {
+			t.Fatalf("missing seccomp rule %q in\n%s", want, once)
+		}
+		if strings.Count(twice, want) != 1 {
+			t.Fatalf("rule %q duplicated in\n%s", want, twice)
+		}
+	}
+}

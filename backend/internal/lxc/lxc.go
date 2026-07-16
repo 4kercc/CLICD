@@ -1017,10 +1017,97 @@ func findSeccompProfile() (string, error) {
 		"/etc/lxc/common.seccomp",
 	} {
 		if _, err := os.Stat(path); err == nil {
-			return path, nil
+			return ensureCVE202643499SeccompProfile(path)
 		}
 	}
 	return "", errors.New("required LXC seccomp profile not found")
+}
+
+const clicdSeccompProfileDir = "/var/lib/clicd/security/seccomp"
+const clicdCVE202643499SeccompProfile = clicdSeccompProfileDir + "/lxc-cve-2026-43499.profile"
+
+var cve202643499FutexSeccompRules = []string{
+	"# clicd managed: mitigate CVE-2026-43499 from LXC guests by blocking PI futex operations",
+	"futex errno 1 [1,0x6,SCMP_CMP_MASKED_EQ,0x7f]",
+	"futex errno 1 [1,0x7,SCMP_CMP_MASKED_EQ,0x7f]",
+	"futex errno 1 [1,0x8,SCMP_CMP_MASKED_EQ,0x7f]",
+	"futex errno 1 [1,0xb,SCMP_CMP_MASKED_EQ,0x7f]",
+	"futex errno 1 [1,0xc,SCMP_CMP_MASKED_EQ,0x7f]",
+	"futex errno 1 [1,0xd,SCMP_CMP_MASKED_EQ,0x7f]",
+}
+
+func ensureCVE202643499SeccompProfile(basePath string) (string, error) {
+	data, err := os.ReadFile(basePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read LXC seccomp profile: %v", err)
+	}
+	content := string(data)
+	if !isLXCVDenylistSeccompProfile(content) {
+		return "", fmt.Errorf("LXC seccomp profile %s is not a v2 denylist profile; cannot apply CVE-2026-43499 futex mitigation safely", basePath)
+	}
+	if err := os.MkdirAll(clicdSeccompProfileDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create CLICD seccomp directory: %v", err)
+	}
+	hardened := appendMissingSeccompRules(content, cve202643499FutexSeccompRules)
+	if err := os.WriteFile(clicdCVE202643499SeccompProfile, []byte(hardened), 0644); err != nil {
+		return "", fmt.Errorf("failed to write CLICD seccomp profile: %v", err)
+	}
+	return clicdCVE202643499SeccompProfile, nil
+}
+
+func isLXCVDenylistSeccompProfile(content string) bool {
+	lines := nonCommentSeccompLines(content)
+	return len(lines) >= 2 && lines[0] == "2" && isSeccompDenylistPolicy(lines[1])
+}
+
+func isSeccompDenylistPolicy(line string) bool {
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return false
+	}
+	return fields[0] == "denylist" || fields[0] == "blacklist"
+}
+
+func appendMissingSeccompRules(content string, rules []string) string {
+	trimmed := strings.TrimRight(content, "\r\n")
+	existing := map[string]bool{}
+	for _, line := range strings.Split(trimmed, "\n") {
+		line = strings.TrimSpace(stripSeccompLineComment(line))
+		if line != "" {
+			existing[line] = true
+		}
+	}
+	var builder strings.Builder
+	builder.WriteString(trimmed)
+	for _, rule := range rules {
+		key := strings.TrimSpace(stripSeccompLineComment(rule))
+		if key != "" && existing[key] {
+			continue
+		}
+		builder.WriteString("\n")
+		builder.WriteString(rule)
+	}
+	builder.WriteString("\n")
+	return builder.String()
+}
+
+func nonCommentSeccompLines(content string) []string {
+	lines := make([]string, 0)
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(stripSeccompLineComment(line))
+		if line == "" {
+			continue
+		}
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+func stripSeccompLineComment(line string) string {
+	if idx := strings.Index(line, "#"); idx >= 0 {
+		return line[:idx]
+	}
+	return line
 }
 
 func findAppArmorProfile() (string, error) {
