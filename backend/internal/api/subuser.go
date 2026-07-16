@@ -438,7 +438,7 @@ func subUserAssignedContainers(su *config.SubUser) []*config.Container {
 	if su == nil {
 		return nil
 	}
-	result := make([]*config.Container, 0, len(su.ContainerUUIDs)+len(su.ContainerNames))
+	result := []*config.Container{}
 	seen := map[string]bool{}
 	for _, uuid := range su.ContainerUUIDs {
 		if c := config.FindContainerByUUID(uuid); c != nil {
