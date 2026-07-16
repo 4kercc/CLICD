@@ -115,6 +115,22 @@ func assignIPv6ByRuntime(id int) (*config.Container, error) {
 	return lxcManager.AssignIPv6(id)
 }
 
+func updatePublicIPv4ByRuntime(id int, requested []string, count int, auto bool) (*config.Container, error) {
+	c := config.FindContainer(id)
+	if c != nil && c.IsKVM() {
+		return kvmManager.UpdatePublicIPv4Assignments(id, requested, count, auto)
+	}
+	return lxcManager.UpdatePublicIPv4Assignments(id, requested, count, auto)
+}
+
+func updateIPv6ByRuntime(id int, requested []string, count int, auto bool) (*config.Container, error) {
+	c := config.FindContainer(id)
+	if c != nil && c.IsKVM() {
+		return kvmManager.UpdateIPv6Assignments(id, requested, count, auto)
+	}
+	return lxcManager.UpdateIPv6Assignments(id, requested, count, auto)
+}
+
 func usageByRuntime(id int) (map[string]interface{}, error) {
 	c := config.FindContainer(id)
 	if c != nil && c.IsKVM() {

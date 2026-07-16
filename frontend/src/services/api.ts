@@ -578,6 +578,18 @@ export const getIPv6Status = () =>
 export const assignIPv6 = (id: ContainerIdentifier) =>
   api.post<APIResponse<Container>>(`/containers/${id}/ipv6`)
 
+export interface IPAssignmentUpdateRequest {
+  mode: 'clear' | 'random' | 'custom'
+  count?: number
+  addresses?: string[]
+}
+
+export const updatePublicIPv4Assignments = (id: ContainerIdentifier, data: IPAssignmentUpdateRequest) =>
+  api.put<APIResponse<Container>>(`/containers/${id}/public-ipv4`, data)
+
+export const updateIPv6Assignments = (id: ContainerIdentifier, data: IPAssignmentUpdateRequest) =>
+  api.put<APIResponse<Container>>(`/containers/${id}/ipv6-addresses`, data)
+
 export interface RouteCapacity {
   used: number
   remaining: string

@@ -50,7 +50,10 @@ import {
   getEnabledImages,
   getFirewall,
   PortMapping,
+  PublicIPv4Info,
   FirewallRule,
+  updatePublicIPv4Assignments,
+  updateIPv6Assignments,
   reinstallContainer,
   resetSSHPassword,
   restartContainer,
@@ -107,6 +110,8 @@ type MappingDraft = {
   protocol: string
 }
 
+type IPAssignMode = 'clear' | 'random' | 'custom'
+
 const emptyDraft: MappingDraft = {
   index: null,
   description: '',
@@ -135,6 +140,14 @@ export default function ContainerDetail() {
   const vncFullscreenRef = useRef<HTMLDivElement>(null)
   const [vncFullscreen, setVncFullscreen] = useState(false)
   const [showNat, setShowNat] = useState(false)
+  const [showIPAssign, setShowIPAssign] = useState(false)
+  const [savingIPAssign, setSavingIPAssign] = useState(false)
+  const [ipv4AssignMode, setIPv4AssignMode] = useState<IPAssignMode>('clear')
+  const [ipv4AssignCount, setIPv4AssignCount] = useState(1)
+  const [ipv4Selected, setIPv4Selected] = useState<string[]>([])
+  const [ipv6AssignMode, setIPv6AssignMode] = useState<IPAssignMode>('clear')
+  const [ipv6AssignCount, setIPv6AssignCount] = useState(1)
+  const [ipv6DraftText, setIPv6DraftText] = useState('')
   const [showMappingEditor, setShowMappingEditor] = useState(false)
   const [showExpiryEdit, setShowExpiryEdit] = useState(false)
   const [editExpiry, setEditExpiry] = useState('')
@@ -630,6 +643,42 @@ export default function ContainerDetail() {
     }
   }
 
+  const openIPAssign = () => {
+    const currentIPv4 = (container?.public_ipv4s || []).map((item) => item.address).filter(Boolean)
+    const currentIPv6 = (container?.ipv6_addresses || []).map((item) => item.address).filter(Boolean)
+    setIPv4Selected(currentIPv4)
+    setIPv4AssignMode(currentIPv4.length > 0 ? 'custom' : 'clear')
+    setIPv4AssignCount(Math.max(1, currentIPv4.length || 1))
+    setIPv6DraftText(currentIPv6.join('\n'))
+    setIPv6AssignMode(currentIPv6.length > 0 ? 'custom' : 'clear')
+    setIPv6AssignCount(Math.max(1, currentIPv6.length || 1))
+    setShowIPAssign(true)
+  }
+
+  const submitIPAssign = async () => {
+    if (!containerIdentifier) return
+    setSavingIPAssign(true)
+    try {
+      await updatePublicIPv4Assignments(containerIdentifier, {
+        mode: ipv4AssignMode,
+        count: Math.max(1, Math.round(ipv4AssignCount || 1)),
+        addresses: ipv4AssignMode === 'custom' ? ipv4Selected : [],
+      })
+      await updateIPv6Assignments(containerIdentifier, {
+        mode: ipv6AssignMode,
+        count: Math.max(1, Math.round(ipv6AssignCount || 1)),
+        addresses: ipv6AssignMode === 'custom' ? splitAddressLines(ipv6DraftText) : [],
+      })
+      await fetchContainer()
+      setShowIPAssign(false)
+    } catch (err: unknown) {
+      const error = err as { response?: { data?: { message?: string } } }
+      dialog.alert('公网 IP 分配失败', error.response?.data?.message || '请检查地址是否可用或已被占用')
+    } finally {
+      setSavingIPAssign(false)
+    }
+  }
+
   const openAddMapping = () => {
     if (isSubUser && container?.policy_blocked) return
     setDraft(emptyDraft)
@@ -864,6 +913,7 @@ export default function ContainerDetail() {
   const policyBlockedText = container.policy_blocked_reason || '虚拟机被策略临时封禁'
   const publicIPv4s = container.public_ipv4s || []
   const assignedIPv4List = publicIPv4s.map((item) => item.address).filter(Boolean)
+  const allocatableIPv4s = mergeIPv4Choices(hostInfo?.network.public_ipv4_addresses || [], publicIPv4s)
   const publicHost = assignedIPv4List[0] || hostInfo?.network.public_ipv4 || PUBLIC_HOST
   const ipv6List = (container.ipv6_addresses || [])
     .map((item) => item.address)
@@ -1189,12 +1239,25 @@ export default function ContainerDetail() {
           <PlainRow label="识别码" value={container.uuid || '-'} mono copyValue={container.uuid} onCopy={copyText} />
           <PlainRow label="状态" value={isRunning ? '运行中' : '已停止'} />
           <PlainRow label="内网 IP" value={container.ip || '-'} mono />
-          <PlainRow label="Public IPv4" value={assignedIPv4List.length ? assignedIPv4List.join(', ') : '-'} mono copyValue={assignedIPv4List[0]} onCopy={copyText} />
-          <PlainRow label="IPv6" value={ipv6List.length ? ipv6List.join(', ') : '-'} mono copyValue={ipv6List[0]} onCopy={copyText}>
-            {!isSubUser && ipv6List.length === 0 && (
-              <button onClick={handleAssignIPv6} disabled={actionLoading === 'ipv6'} className="ml-1 px-1.5 py-0.5 text-[10px] text-gray-600 border border-gray-200 rounded hover:bg-gray-50 disabled:opacity-50">
-                Assign
+          <PlainRow label="Public IPv4" value={assignedIPv4List.length ? assignedIPv4List.join(', ') : '-'} mono copyValue={assignedIPv4List[0]} onCopy={copyText}>
+            {!isSubUser && (
+              <button onClick={openIPAssign} className="ml-1 p-0.5 text-gray-400 hover:text-black rounded" title="修改公网 IP 分配">
+                <Pencil className="w-3 h-3" />
               </button>
+            )}
+          </PlainRow>
+          <PlainRow label="IPv6" value={ipv6List.length ? ipv6List.join(', ') : '-'} mono copyValue={ipv6List[0]} onCopy={copyText}>
+            {!isSubUser && (
+              <>
+                {ipv6List.length === 0 && (
+                  <button onClick={handleAssignIPv6} disabled={actionLoading === 'ipv6'} className="ml-1 px-1.5 py-0.5 text-[10px] text-gray-600 border border-gray-200 rounded hover:bg-gray-50 disabled:opacity-50">
+                    Assign
+                  </button>
+                )}
+                <button onClick={openIPAssign} className="ml-1 p-0.5 text-gray-400 hover:text-black rounded" title="修改公网 IP 分配">
+                  <Pencil className="w-3 h-3" />
+                </button>
+              </>
             )}
           </PlainRow>
           <PlainRow label="CPU 累计时间" value={formatCPU(usage?.cpu_usage_usec || 0)} />
@@ -1813,6 +1876,88 @@ export default function ContainerDetail() {
               <button onClick={() => { setShowFirewallEditor(false); setEditingFirewallRule(null) }} className="px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded-md">取消</button>
               <button onClick={() => saveFirewallRule(editingFirewallRule)} className="px-4 py-2 text-sm bg-black text-white rounded-md hover:bg-gray-800">确定</button>
             </div>
+          </div>
+        </Modal>
+      )}
+
+      {showIPAssign && (
+        <Modal title="公网 IP 分配" onClose={() => setShowIPAssign(false)} wide>
+          <div className="grid gap-5 md:grid-cols-2">
+            <div className="space-y-3">
+              <div>
+                <h3 className="text-sm font-medium text-gray-900">独立 IPv4</h3>
+                <p className="mt-1 text-xs text-gray-500">修改后会重放端口映射、SNAT 和防火墙规则。</p>
+              </div>
+              <Segmented value={ipv4AssignMode} onChange={setIPv4AssignMode} />
+              {ipv4AssignMode === 'random' && (
+                <Field label="随机数量">
+                  <input type="number" min={1} max={64} value={ipv4AssignCount} onChange={(e) => setIPv4AssignCount(parseInt(e.target.value || '1', 10))} className={inputClass} />
+                </Field>
+              )}
+              {ipv4AssignMode === 'custom' && (
+                <div className="space-y-2">
+                  {allocatableIPv4s.length === 0 ? (
+                    <div className="rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-500">没有可选择的公网 IPv4，请先到路由管理配置 IPv4 池。</div>
+                  ) : (
+                    <div className="grid gap-2">
+                      {allocatableIPv4s.map((ip) => (
+                        <label key={`${ip.interface}-${ip.address}`} className="flex min-w-0 items-center gap-2 rounded-md border border-gray-200 px-3 py-2 text-xs text-gray-700">
+                          <input
+                            type="checkbox"
+                            checked={ipv4Selected.includes(ip.address)}
+                            onChange={(event) => {
+                              const next = event.target.checked
+                                ? Array.from(new Set([...ipv4Selected, ip.address]))
+                                : ipv4Selected.filter((value) => value !== ip.address)
+                              setIPv4Selected(next)
+                              setIPv4AssignCount(Math.max(1, next.length || 1))
+                            }}
+                          />
+                          <span className="truncate font-mono">{ip.address}</span>
+                          <span className="shrink-0 text-gray-400">{ip.interface}</span>
+                          {ip.gateway && <span className="shrink-0 text-gray-400">gw {ip.gateway}</span>}
+                        </label>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <h3 className="text-sm font-medium text-gray-900">独立 IPv6</h3>
+                <p className="mt-1 text-xs text-gray-500">自定义地址必须落在路由管理配置的 IPv6 前缀内。</p>
+              </div>
+              <Segmented value={ipv6AssignMode} onChange={setIPv6AssignMode} />
+              {ipv6AssignMode === 'random' && (
+                <Field label="随机数量">
+                  <input type="number" min={1} max={64} value={ipv6AssignCount} onChange={(e) => setIPv6AssignCount(parseInt(e.target.value || '1', 10))} className={inputClass} />
+                </Field>
+              )}
+              {ipv6AssignMode === 'custom' && (
+                <Field label="IPv6 地址">
+                  <textarea
+                    value={ipv6DraftText}
+                    onChange={(e) => {
+                      setIPv6DraftText(e.target.value)
+                      setIPv6AssignCount(Math.max(1, splitAddressLines(e.target.value).length || 1))
+                    }}
+                    className={`${inputClass} min-h-32 font-mono text-xs`}
+                    placeholder="2001:db8:100::100&#10;2001:db8:100::101"
+                  />
+                </Field>
+              )}
+            </div>
+          </div>
+          <div className="mt-5 flex justify-end gap-2 border-t border-gray-200 pt-4">
+            <button onClick={() => setShowIPAssign(false)} disabled={savingIPAssign} className="rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50">
+              取消
+            </button>
+            <button onClick={submitIPAssign} disabled={savingIPAssign} className="inline-flex items-center gap-1.5 rounded-md bg-black px-3 py-2 text-sm text-white hover:bg-gray-800 disabled:opacity-50">
+              <Save className="h-4 w-4" />
+              {savingIPAssign ? '保存中...' : '保存'}
+            </button>
           </div>
         </Modal>
       )}
@@ -2442,6 +2587,28 @@ function Field({ label, children, hint }: { label: string; children: ReactNode; 
   )
 }
 
+function Segmented({ value, onChange }: { value: IPAssignMode; onChange: (value: IPAssignMode) => void }) {
+  const items: Array<{ value: IPAssignMode; label: string }> = [
+    { value: 'clear', label: '不分配' },
+    { value: 'random', label: '随机分配' },
+    { value: 'custom', label: '自定义' },
+  ]
+  return (
+    <div className="grid grid-cols-3 gap-1 rounded-md bg-gray-100 p-1">
+      {items.map((item) => (
+        <button
+          key={item.value}
+          type="button"
+          onClick={() => onChange(item.value)}
+          className={`rounded px-2 py-1.5 text-xs font-medium ${value === item.value ? 'bg-white text-black shadow-sm' : 'text-gray-600 hover:text-black'}`}
+        >
+          {item.label}
+        </button>
+      ))}
+    </div>
+  )
+}
+
 function Modal({ title, children, onClose, wide = false, extra, flush = false }: { title: string; children: ReactNode; onClose: () => void; wide?: boolean; extra?: ReactNode; flush?: boolean }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
@@ -2491,6 +2658,31 @@ function normalizeContainerMetricSample(point: ContainerMetricSample): MetricPoi
     diskRead: point.disk_read || 0,
     diskWrite: point.disk_write || 0,
   }
+}
+
+function splitAddressLines(value: string) {
+  return value
+    .split(/[\n,，\s]+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
+
+function mergeIPv4Choices(candidates: PublicIPv4Info[], assigned: { address: string; interface?: string; prefix_len?: number; gateway?: string }[]) {
+  const byAddress = new Map<string, PublicIPv4Info>()
+  for (const item of candidates) {
+    if (item.address) byAddress.set(item.address, item)
+  }
+  for (const item of assigned) {
+    if (!item.address || byAddress.has(item.address)) continue
+    byAddress.set(item.address, {
+      address: item.address,
+      interface: item.interface || '',
+      prefix: item.prefix_len ? `${item.address}/${item.prefix_len}` : item.address,
+      prefix_len: item.prefix_len,
+      gateway: item.gateway,
+    })
+  }
+  return Array.from(byAddress.values()).sort((a, b) => a.address.localeCompare(b.address, undefined, { numeric: true }))
 }
 
 function historyKey(containerName: string) {

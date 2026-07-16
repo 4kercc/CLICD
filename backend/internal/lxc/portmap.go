@@ -399,6 +399,64 @@ func persistAndReloadMappings(m *Manager, c *config.Container) error {
 	return nil
 }
 
+func (m *Manager) UpdatePublicIPv4Assignments(id int, requested []string, count int, auto bool) (*config.Container, error) {
+	c := config.FindContainer(id)
+	if c == nil {
+		return nil, fmt.Errorf("container not found: %d", id)
+	}
+	if c.UsesLANIPv4() {
+		return nil, fmt.Errorf("public IPv4 cannot be assigned while LAN IPv4 mode is enabled")
+	}
+
+	assignments := []config.PublicIPv4Assignment{}
+	if auto || len(requested) > 0 {
+		allocated, err := AllocatePublicIPv4Assignments(id, requested, count, auto)
+		if err != nil {
+			return nil, err
+		}
+		assignments = allocated
+	}
+
+	c.PublicIPv4s = assignments
+	reconcilePortMappingHostIPs(c)
+	c.NormalizeNetworkAssignments()
+	config.SaveConfig()
+
+	_ = m.CleanPortMappings(id)
+	EnsureAssignedPublicIPv4s(c.PublicIPv4s)
+	if c.Status == "running" && c.IP != "" {
+		if err := m.ApplyPortMappings(id); err != nil {
+			return nil, err
+		}
+	}
+	return c, nil
+}
+
+func reconcilePortMappingHostIPs(c *config.Container) {
+	if c == nil {
+		return
+	}
+	assigned := map[string]bool{}
+	for _, item := range c.PublicIPv4s {
+		if addr := strings.TrimSpace(item.Address); addr != "" {
+			assigned[addr] = true
+		}
+	}
+	replacement := ""
+	if len(assigned) == 1 {
+		for addr := range assigned {
+			replacement = addr
+		}
+	}
+	for i := range c.PortMappings {
+		hostIP := strings.TrimSpace(c.PortMappings[i].HostIP)
+		if hostIP == "" || assigned[hostIP] {
+			continue
+		}
+		c.PortMappings[i].HostIP = replacement
+	}
+}
+
 func normalizePortMapping(c *config.Container, skipIndex int, pm config.PortMapping) (config.PortMapping, error) {
 	if pm.ContainerPort < 1 || pm.ContainerPort > 65535 {
 		return pm, fmt.Errorf("container port must be 1-65535")

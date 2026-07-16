@@ -131,7 +131,8 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
   const natEnabled = form.assign_nat !== false && !lanIPv4Enabled
   const lanInterfaces = useMemo(() => getLANDHCPInterfaces(hostReport), [hostReport])
   const defaultLANInterface = lanInterfaces[0]?.name || ''
-  const natPortCount = natEnabled ? Math.max(2, form.port_mapping_count || 2) : 0
+  const customNATPorts = form.extra_ports || []
+  const natPortCount = natEnabled ? Math.max(2, form.port_mapping_count || 2, customNATPorts.length + 1) : 0
   const linuxTemplate = !isWindowsTemplate(form.template_id)
   const sshAuthMode = (form.ssh_auth_mode || 'auto_password') as SSHAuthMode
 
@@ -140,6 +141,7 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
     const count = natPortCount
     return Array.from({ length: count - 1 }, (_, index) => 22002 + index)
   }, [natEnabled, natPortCount])
+  const natPreviewPorts = customNATPorts.length > 0 ? customNATPorts : autoPorts
 
   // SSH port preview (will be allocated sequentially, starting around 22000+)
   const sshPortPreview = 22000
@@ -213,11 +215,11 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
         ...boundedForm,
         name,
         assign_nat: wantsNAT,
-        port_mapping_count: wantsNAT ? Math.max(2, boundedForm.port_mapping_count || 2) : 0,
+        port_mapping_count: wantsNAT ? Math.max(2, boundedForm.port_mapping_count || 2, (boundedForm.extra_ports || []).length + 1) : 0,
         snapshot_limit: Math.max(1, boundedForm.snapshot_limit || 3),
         ipv4_count: boundedForm.assign_ipv4 ? Math.max(1, boundedForm.ipv4_count || 1) : 0,
         ipv6_count: boundedForm.assign_ipv6 ? Math.max(1, boundedForm.ipv6_count || 1) : 0,
-        extra_ports: [],
+        extra_ports: wantsNAT ? (boundedForm.extra_ports || []) : [],
       })
     }
 
@@ -240,7 +242,7 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-lg border border-gray-200 shadow-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+      <div className="bg-white rounded-lg border border-gray-200 shadow-xl w-full max-w-3xl max-h-[92vh] overflow-y-auto">
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
           <h2 className="text-lg font-semibold text-black">创建新容器</h2>
           <button onClick={onClose} className="p-1 hover:bg-gray-100 rounded text-gray-500" title="关闭">
@@ -248,8 +250,8 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
           </button>
         </div>
 
-        <div className="px-6 py-4 space-y-4">
-          <div className="grid grid-cols-2 gap-4">
+        <div className="px-5 py-4 space-y-3">
+          <div className="grid grid-cols-2 gap-3">
             <Field label="容器名称">
               <input
                 type="text"
@@ -399,6 +401,7 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
             </div>
           )}
 
+          <div className="grid gap-3 lg:grid-cols-2">
           <div className={`rounded-md border px-3 py-2 text-sm ${ipv4Available ? 'border-gray-200 bg-white' : 'border-gray-200 bg-gray-50 text-gray-400'}`}>
             <label className="flex items-start gap-3">
               <input
@@ -595,6 +598,39 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
                 </span>
               )}
             </div>
+            {form.assign_ipv6 && (
+              <div className="mt-3 space-y-3 pl-6">
+                <div className="grid grid-cols-2 gap-3">
+                  <label className="flex items-center gap-2 text-xs text-gray-600">
+                    <input
+                      type="radio"
+                      checked={(form.ipv6_addresses || []).length === 0}
+                      onChange={() => setForm({ ...form, ipv6_addresses: [] })}
+                    />
+                    Random assign
+                  </label>
+                  <label className="flex items-center gap-2 text-xs text-gray-600">
+                    <input
+                      type="radio"
+                      checked={(form.ipv6_addresses || []).length > 0}
+                      onChange={() => setForm({ ...form, ipv6_addresses: [''], ipv6_count: 1 })}
+                    />
+                    Custom assign
+                  </label>
+                </div>
+                {(form.ipv6_addresses || []).length > 0 && (
+                  <textarea
+                    value={(form.ipv6_addresses || []).join('\n')}
+                    onChange={(event) => {
+                      const next = splitAddressLines(event.target.value)
+                      setForm({ ...form, ipv6_addresses: next.length ? next : [''], ipv6_count: Math.max(1, next.length || 1) })
+                    }}
+                    className={`${inputClass} min-h-20 font-mono text-xs`}
+                    placeholder="2001:db8:100::100"
+                  />
+                )}
+              </div>
+            )}
           </div>
 
           <div className="rounded-md border border-gray-200 bg-white px-3 py-2 text-sm">
@@ -622,25 +658,57 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
                   </span>
                 </span>
               </label>
-              {natEnabled && (
+              {natEnabled && customNATPorts.length === 0 && (
                 <span className="block w-24 shrink-0">
                   <NumberInput
                     value={natPortCount}
                     min={2}
                     max={64}
-                    onChange={(value) => setForm({ ...form, port_mapping_count: Math.max(2, value || 2), assign_nat: true })}
+                    onChange={(value) => setForm({ ...form, port_mapping_count: Math.max(2, value || 2), assign_nat: true, extra_ports: [] })}
                   />
                 </span>
               )}
             </div>
             {natEnabled && (
-              <div className="mt-2 pl-6">
+              <div className="mt-2 space-y-2 pl-6">
+                <div className="grid grid-cols-2 gap-2">
+                  <label className="flex items-center gap-2 text-xs text-gray-600">
+                    <input
+                      type="radio"
+                      checked={customNATPorts.length === 0}
+                      onChange={() => setForm({ ...form, extra_ports: [], port_mapping_count: Math.max(2, form.port_mapping_count || 2) })}
+                    />
+                    Auto ports
+                  </label>
+                  <label className="flex items-center gap-2 text-xs text-gray-600">
+                    <input
+                      type="radio"
+                      checked={customNATPorts.length > 0}
+                      onChange={() => {
+                        const next = customNATPorts.length > 0 ? customNATPorts : [22002]
+                        setForm({ ...form, extra_ports: next, port_mapping_count: Math.max(2, next.length + 1), assign_nat: true })
+                      }}
+                    />
+                    Custom ports
+                  </label>
+                </div>
+                {customNATPorts.length > 0 && (
+                  <textarea
+                    value={customNATPorts.join('\n')}
+                    onChange={(event) => {
+                      const next = parsePortList(event.target.value)
+                      setForm({ ...form, extra_ports: next, port_mapping_count: Math.max(2, next.length + 1), assign_nat: true })
+                    }}
+                    className={`${inputClass} min-h-16 font-mono text-xs`}
+                    placeholder={'22002\n8080\n8443'}
+                  />
+                )}
                 <div className="flex flex-wrap gap-1.5">
                   <span className="inline-flex px-2 py-1 bg-emerald-50 text-emerald-700 rounded text-xs font-mono">
                     {isWindowsTemplate(form.template_id) ? 'RDP' : 'SSH'}: {sshPortPreview} -&gt; {isWindowsTemplate(form.template_id) ? 3389 : 22}
                   </span>
-                  {autoPorts.map((port) => (
-                    <span key={port} className="inline-flex px-2 py-1 bg-gray-100 text-gray-700 rounded text-xs font-mono">
+                  {natPreviewPorts.map((port, index) => (
+                    <span key={`${port}-${index}`} className="inline-flex px-2 py-1 bg-gray-100 text-gray-700 rounded text-xs font-mono">
                       {port} -&gt; {port}
                     </span>
                   ))}
@@ -648,8 +716,9 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
               </div>
             )}
           </div>
+          </div>
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
             <Field label="vCPU">
               <NumberInput
                 value={form.vcpu}
@@ -672,9 +741,6 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
               />
               {resourceErrors.ram_mb && <p className="mt-1 text-xs text-red-500">{resourceErrors.ram_mb}</p>}
             </Field>
-          </div>
-
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
             <Field label="磁盘 (GB)">
               <NumberInput
                 value={form.disk_gb}
@@ -685,26 +751,20 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
               />
               {resourceErrors.disk_gb && <p className="mt-1 text-xs text-red-500">{resourceErrors.disk_gb}</p>}
             </Field>
-            <div className="grid grid-cols-2 gap-3 md:col-span-2">
-              <Field label="下行带宽 (Mbps)">
-                <NumberInput value={form.network_down_mbps} min={0} onChange={(value) => setForm({ ...form, network_down_mbps: value, network_bw_mbps: symmetricLimit(value, form.network_up_mbps) })} />
-              </Field>
-              <Field label="上行带宽 (Mbps)">
-                <NumberInput value={form.network_up_mbps} min={0} onChange={(value) => setForm({ ...form, network_up_mbps: value, network_bw_mbps: symmetricLimit(form.network_down_mbps, value) })} />
-              </Field>
-              <Field label="读取 IO (MB/s)">
-                <NumberInput value={form.io_read_mbps} min={0} onChange={(value) => setForm({ ...form, io_read_mbps: value, io_speed_mbps: symmetricLimit(value, form.io_write_mbps) })} />
-              </Field>
-              <Field label="写入 IO (MB/s)">
-                <NumberInput value={form.io_write_mbps} min={0} onChange={(value) => setForm({ ...form, io_write_mbps: value, io_speed_mbps: symmetricLimit(form.io_read_mbps, value) })} />
-              </Field>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-            {/* Traffic control */}
+            <Field label="下行带宽 (Mbps)">
+              <NumberInput value={form.network_down_mbps} min={0} onChange={(value) => setForm({ ...form, network_down_mbps: value, network_bw_mbps: symmetricLimit(value, form.network_up_mbps) })} />
+            </Field>
+            <Field label="上行带宽 (Mbps)">
+              <NumberInput value={form.network_up_mbps} min={0} onChange={(value) => setForm({ ...form, network_up_mbps: value, network_bw_mbps: symmetricLimit(form.network_down_mbps, value) })} />
+            </Field>
+            <Field label="读取 IO (MB/s)">
+              <NumberInput value={form.io_read_mbps} min={0} onChange={(value) => setForm({ ...form, io_read_mbps: value, io_speed_mbps: symmetricLimit(value, form.io_write_mbps) })} />
+            </Field>
+            <Field label="写入 IO (MB/s)">
+              <NumberInput value={form.io_write_mbps} min={0} onChange={(value) => setForm({ ...form, io_write_mbps: value, io_speed_mbps: symmetricLimit(form.io_read_mbps, value) })} />
+            </Field>
             <div>
-              <div className="flex items-center gap-3 mb-2">
+              <div className="mb-1.5 flex items-center justify-between gap-2">
                 <label className="text-sm font-medium text-gray-700">月流量</label>
                 <select
                   value={form.traffic_mode}
@@ -718,10 +778,10 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
               {form.traffic_mode === 'total' ? (
                 <div className="flex items-center gap-2">
                   <NumberInput value={form.monthly_traffic_gb} min={0} onChange={(value) => setForm({ ...form, monthly_traffic_gb: value })} />
-                  <span className="text-xs text-gray-400">GB (0=不限制)</span>
+                  <span className="shrink-0 text-xs text-gray-400">GB</span>
                 </div>
               ) : (
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-2 gap-2">
                   <Field label="入站 (GB)">
                     <NumberInput value={form.traffic_in_gb} min={0} onChange={(value) => setForm({ ...form, traffic_in_gb: value || 0 })} />
                   </Field>
@@ -731,7 +791,6 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
                 </div>
               )}
             </div>
-
             <Field label="子用户快照上限">
               <NumberInput
                 value={form.snapshot_limit}
@@ -740,21 +799,20 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
                 onChange={(value) => setForm({ ...form, snapshot_limit: Math.max(1, Math.round(value || 1)) })}
               />
             </Field>
+            <Field label="到期时间">
+              <div className="relative">
+                <CalendarClock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                <input
+                  type="date"
+                  value={form.expires_at}
+                  onChange={(event) => setForm({ ...form, expires_at: event.target.value })}
+                  min={new Date().toISOString().slice(0, 10)}
+                  className={`${inputClass} pl-10`}
+                />
+              </div>
+              <p className="mt-1 text-[11px] leading-4 text-gray-400">不选则长期有效</p>
+            </Field>
           </div>
-
-          <Field label="到期时间">
-            <div className="relative">
-              <CalendarClock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-              <input
-                type="date"
-                value={form.expires_at}
-                onChange={(event) => setForm({ ...form, expires_at: event.target.value })}
-                min={new Date().toISOString().slice(0, 10)}
-                className={`${inputClass} pl-10`}
-              />
-            </div>
-            <p className="text-xs text-gray-400 mt-1.5">不选择则长期有效；选择日期后，到期会自动关机。</p>
-          </Field>
         </div>
 
         <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-gray-200">
@@ -877,6 +935,8 @@ function normalizeCreateForm(form: CreateContainerRequest): CreateContainerReque
   const wantsIPv6 = !!normalized.assign_ipv6
   // IPv4 and NAT are mutually exclusive
   const wantsNAT = wantsLANIPv4 || wantsIPv4 ? false : normalized.assign_nat !== false
+  const extraPorts = wantsNAT ? normalizePortList(normalized.extra_ports || []) : []
+  const portMappingCount = wantsNAT ? clampInt(Math.max(normalized.port_mapping_count || 2, extraPorts.length + 1), 2, 64, 2) : 0
   const linuxTemplate = !isWindowsTemplate(normalized.template_id)
   const sshAuthMode = linuxTemplate ? (normalized.ssh_auth_mode || 'auto_password') : 'auto_password'
   return {
@@ -885,7 +945,8 @@ function normalizeCreateForm(form: CreateContainerRequest): CreateContainerReque
     ram_mb: Math.round(normalized.ram_mb),
     disk_gb: Math.round(normalized.disk_gb),
     assign_nat: wantsNAT,
-    port_mapping_count: wantsNAT ? clampInt(normalized.port_mapping_count, 2, 64, 2) : 0,
+    port_mapping_count: portMappingCount,
+    extra_ports: extraPorts,
     lan_ipv4_mode: wantsLANDHCP ? 'dhcp' : (wantsLANStatic ? 'static' : ''),
     lan_interface: wantsLANIPv4 ? (normalized.lan_interface || '').trim() : '',
     lan_ipv4_address: wantsLANStatic ? (normalized.lan_ipv4_address || '').trim() : '',
@@ -896,7 +957,7 @@ function normalizeCreateForm(form: CreateContainerRequest): CreateContainerReque
     public_ipv4s: wantsIPv4 ? (normalized.public_ipv4s || []) : [],
     assign_ipv6: wantsIPv6,
     ipv6_count: wantsIPv6 ? clampInt(normalized.ipv6_count || 1, 1, 64, 1) : 0,
-    ipv6_addresses: wantsIPv6 ? (normalized.ipv6_addresses || []) : [],
+    ipv6_addresses: wantsIPv6 ? (normalized.ipv6_addresses || []).map((item) => item.trim()).filter(Boolean) : [],
     ssh_auth_mode: sshAuthMode,
     ssh_password: linuxTemplate && sshAuthMode === 'password' ? (normalized.ssh_password || '').trim() : '',
     ssh_public_key: linuxTemplate && sshAuthMode === 'key' ? (normalized.ssh_public_key || '').trim() : '',
@@ -948,6 +1009,28 @@ function clampInt(value: number, min: number, max?: number, fallback = min) {
   return Math.min(Math.max(next, min), max ?? next)
 }
 
+function parsePortList(value: string) {
+  return normalizePortList(
+    value
+      .split(/[\s,，;；]+/)
+      .map((item) => Number(item.trim()))
+  )
+}
+
+function normalizePortList(ports: number[]) {
+  const seen = new Set<number>()
+  const result: number[] = []
+  for (const port of ports) {
+    if (!Number.isFinite(port)) continue
+    const next = Math.round(port)
+    if (next < 1 || next > 65535 || seen.has(next)) continue
+    seen.add(next)
+    result.push(next)
+    if (result.length >= 63) break
+  }
+  return result
+}
+
 function isIPv4Address(value: string) {
   const parts = value.trim().split('.')
   return parts.length === 4 && parts.every((part) => {
@@ -955,6 +1038,13 @@ function isIPv4Address(value: string) {
     const n = Number(part)
     return n >= 0 && n <= 255
   })
+}
+
+function splitAddressLines(value: string) {
+  return value
+    .split(/[\n,，\s]+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
 }
 
 function subnetMaskFromPrefixLen(prefixLen: number) {

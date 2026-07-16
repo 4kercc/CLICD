@@ -172,6 +172,16 @@ func HandleSingleContainer(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		assignIPv6(w, r, id)
+	case action == "public-ipv4" && r.Method == http.MethodPut:
+		if !requireScope(w, r, "container:network") {
+			return
+		}
+		updatePublicIPv4(w, r, id)
+	case action == "ipv6-addresses" && r.Method == http.MethodPut:
+		if !requireScope(w, r, "ipv6:assign") {
+			return
+		}
+		updateIPv6Addresses(w, r, id)
 	case action == "snapshots" || strings.HasPrefix(action, "snapshots/"):
 		handleContainerSnapshots(w, r, id, action)
 	case action == "port-mappings" && r.Method == http.MethodPost:

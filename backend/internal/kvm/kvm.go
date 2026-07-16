@@ -3363,6 +3363,109 @@ func (m *Manager) AssignIPv6(id int) (*config.Container, error) {
 	return c, nil
 }
 
+func (m *Manager) UpdatePublicIPv4Assignments(id int, requested []string, count int, auto bool) (*config.Container, error) {
+	c := config.FindContainer(id)
+	if c == nil {
+		return nil, fmt.Errorf("container not found: %d", id)
+	}
+	if !c.IsKVM() {
+		return nil, fmt.Errorf("container is not a KVM VM: %d", id)
+	}
+
+	assignments := []config.PublicIPv4Assignment{}
+	if auto || len(requested) > 0 {
+		allocated, err := lxc.AllocatePublicIPv4Assignments(id, requested, count, auto)
+		if err != nil {
+			return nil, err
+		}
+		assignments = allocated
+	}
+
+	c.PublicIPv4s = assignments
+	reconcileKVMPortMappingHostIPs(c)
+	c.NormalizeNetworkAssignments()
+	config.SaveConfig()
+
+	lxcManager := lxc.NewManager()
+	_ = lxcManager.CleanPortMappings(id)
+	lxc.EnsureAssignedPublicIPv4s(c.PublicIPv4s)
+	if c.Status == "running" && c.IP != "" {
+		if err := lxcManager.ApplyPortMappings(id); err != nil {
+			return nil, err
+		}
+	}
+	return c, nil
+}
+
+func reconcileKVMPortMappingHostIPs(c *config.Container) {
+	if c == nil {
+		return
+	}
+	assigned := map[string]bool{}
+	for _, item := range c.PublicIPv4s {
+		if addr := strings.TrimSpace(item.Address); addr != "" {
+			assigned[addr] = true
+		}
+	}
+	replacement := ""
+	if len(assigned) == 1 {
+		for addr := range assigned {
+			replacement = addr
+		}
+	}
+	for i := range c.PortMappings {
+		hostIP := strings.TrimSpace(c.PortMappings[i].HostIP)
+		if hostIP == "" || assigned[hostIP] {
+			continue
+		}
+		c.PortMappings[i].HostIP = replacement
+	}
+}
+
+func (m *Manager) UpdateIPv6Assignments(id int, requested []string, count int, auto bool) (*config.Container, error) {
+	c := config.FindContainer(id)
+	if c == nil {
+		return nil, fmt.Errorf("container not found: %d", id)
+	}
+	if !c.IsKVM() {
+		return nil, fmt.Errorf("container is not a KVM VM: %d", id)
+	}
+
+	old := *c
+	old.IPv6Addresses = append([]config.IPv6Assignment(nil), c.IPv6Addresses...)
+	removeKVMIPv6Runtime(&old)
+
+	assignments := []config.IPv6Assignment{}
+	if auto || len(requested) > 0 {
+		allocated, err := m.allocateIPv6AssignmentsForContainer(id, requested, count, auto)
+		if err != nil {
+			if old.IPv6 != "" || len(old.IPv6Addresses) > 0 {
+				_ = m.applyIPv6Runtime(&old)
+			}
+			return nil, err
+		}
+		assignments = allocated
+	}
+
+	c.IPv6 = ""
+	c.IPv6PrefixLen = 0
+	c.IPv6Interface = ""
+	c.IPv6Addresses = assignments
+	c.NormalizeNetworkAssignments()
+	config.SaveConfig()
+
+	if len(c.IPv6Addresses) > 0 {
+		if err := m.applyIPv6Runtime(c); err != nil {
+			return nil, err
+		}
+	} else if c.Status == "running" {
+		if err := lxc.ApplyFirewallRules(c.ID); err != nil {
+			fmt.Printf("Warning: failed to re-apply firewall rules after KVM IPv6 removal for %s: %v\n", c.Name, err)
+		}
+	}
+	return c, nil
+}
+
 func (m *Manager) applyIPv6Runtime(c *config.Container) error {
 	if c == nil || (c.IPv6 == "" && len(c.IPv6Addresses) == 0) {
 		return nil

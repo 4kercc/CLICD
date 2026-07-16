@@ -1515,6 +1515,75 @@ func (m *Manager) AssignIPv6(id int) (*config.Container, error) {
 	return c, nil
 }
 
+func (m *Manager) UpdateIPv6Assignments(id int, requested []string, count int, auto bool) (*config.Container, error) {
+	c := config.FindContainer(id)
+	if c == nil {
+		return nil, fmt.Errorf("container not found: %d", id)
+	}
+
+	oldAssignments := append([]config.IPv6Assignment(nil), c.IPv6Addresses...)
+	oldPrimary := c.IPv6
+	oldPrimaryPrefixLen := c.IPv6PrefixLen
+	oldPrimaryInterface := c.IPv6Interface
+
+	assignments := []config.IPv6Assignment{}
+	if auto || len(requested) > 0 {
+		allocated, err := m.allocateIPv6AssignmentsForContainer(id, requested, count, auto)
+		if err != nil {
+			return nil, err
+		}
+		assignments = allocated
+	}
+
+	for _, assignment := range oldAssignments {
+		uplink := assignment.Interface
+		if uplink == "" {
+			uplink = oldPrimaryInterface
+		}
+		removeHostIPv6Routing(assignment.Address, uplink)
+	}
+	if len(oldAssignments) == 0 && oldPrimary != "" {
+		removeHostIPv6Routing(oldPrimary, oldPrimaryInterface)
+		oldAssignments = append(oldAssignments, config.IPv6Assignment{Address: oldPrimary, PrefixLen: oldPrimaryPrefixLen, Interface: oldPrimaryInterface})
+	}
+
+	c.IPv6 = ""
+	c.IPv6PrefixLen = 0
+	c.IPv6Interface = ""
+	c.IPv6Addresses = assignments
+	c.NormalizeNetworkAssignments()
+	config.SaveConfig()
+
+	if err := m.applyIPv6Config(c.LxcName(), c.IPv6AddressStrings()...); err != nil {
+		return nil, err
+	}
+	rootfsPath := filepath.Join(m.LxcPath, c.LxcName(), "rootfs")
+	if _, err := os.Stat(rootfsPath); err == nil {
+		if len(c.IPv6Addresses) == 0 {
+			if err := removeContainerIPv6Init(rootfsPath); err != nil {
+				fmt.Printf("Warning: failed to remove IPv6 init in %s: %v\n", c.LxcName(), err)
+			}
+		} else if err := installContainerIPv6Init(rootfsPath, c.IPv6AddressStrings()...); err != nil {
+			fmt.Printf("Warning: failed to install IPv6 init in %s: %v\n", c.LxcName(), err)
+		}
+	}
+	status, _ := m.GetContainerStatus(c.LxcName())
+	if status == "running" {
+		m.removeGuestIPv6Addresses(c.LxcName(), oldAssignments)
+	}
+	if len(c.IPv6Addresses) > 0 {
+		if err := m.ApplyIPv6(id); err != nil {
+			return nil, err
+		}
+	} else if status == "running" {
+		m.removeGuestIPv6DefaultRoute(c.LxcName())
+		if err := ApplyFirewallRules(c.ID); err != nil {
+			fmt.Printf("Warning: failed to re-apply firewall rules after IPv6 removal for %s: %v\n", c.Name, err)
+		}
+	}
+	return c, nil
+}
+
 func (m *Manager) applyIPv6Config(lxcName string, ipv6s ...string) error {
 	configFile := filepath.Join(m.LxcPath, lxcName, "config")
 	data, err := os.ReadFile(configFile)
@@ -1705,6 +1774,25 @@ exit 0
 	return nil
 }
 
+func removeContainerIPv6Init(rootfsPath string) error {
+	paths := []string{
+		filepath.Join(rootfsPath, "usr", "local", "sbin", "clicd-ipv6-init"),
+		filepath.Join(rootfsPath, "etc", "systemd", "system", "clicd-ipv6.service"),
+		filepath.Join(rootfsPath, "etc", "systemd", "system", "multi-user.target.wants", "clicd-ipv6.service"),
+		filepath.Join(rootfsPath, "etc", "init.d", "clicd-ipv6"),
+		filepath.Join(rootfsPath, "etc", "runlevels", "default", "clicd-ipv6"),
+	}
+	for _, level := range []string{"2", "3", "4", "5"} {
+		paths = append(paths, filepath.Join(rootfsPath, "etc", "rc"+level+".d", "S99clicd-ipv6"))
+	}
+	for _, path := range paths {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
+}
+
 func installContainerIPv6Systemd(rootfsPath string) error {
 	servicePath := filepath.Join(rootfsPath, "etc", "systemd", "system", "clicd-ipv6.service")
 	if err := os.MkdirAll(filepath.Dir(servicePath), 0755); err != nil {
@@ -1871,6 +1959,21 @@ func containerIPv6ConnectivityOK(lxcName string) bool {
 		}
 	}
 	return false
+}
+
+func (m *Manager) removeGuestIPv6Addresses(lxcName string, assignments []config.IPv6Assignment) {
+	addrs := ipv6AssignmentAddresses(assignments)
+	if len(addrs) == 0 {
+		return
+	}
+	quoted := shellQuotedIPv6List(addrs)
+	_ = exec.Command("lxc-attach", "-n", lxcName, "--", "sh", "-c",
+		fmt.Sprintf("for ip in %s; do ip -6 addr del \"$ip/128\" dev eth0 2>/dev/null || true; done", quoted)).Run()
+}
+
+func (m *Manager) removeGuestIPv6DefaultRoute(lxcName string) {
+	_ = exec.Command("lxc-attach", "-n", lxcName, "--", "sh", "-c",
+		fmt.Sprintf("ip -6 route del default via %s dev eth0 2>/dev/null || true", shellQuote(ipv6GatewayLinkLocal))).Run()
 }
 
 func ensureIPv6NAT66(ipv6, uplink string) {

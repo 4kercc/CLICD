@@ -506,13 +506,17 @@ func ensureSchemaMigrations() error {
 		}
 	}
 	if _, err := db.Exec(`UPDATE containers
-		SET lan_ipv4_address = COALESCE(lan_ipv4_address, ''),
+		SET lan_ipv4_mode = COALESCE(lan_ipv4_mode, ''),
+		    lan_interface = COALESCE(lan_interface, ''),
+		    lan_ipv4_address = COALESCE(lan_ipv4_address, ''),
 		    lan_ipv4_prefix_len = COALESCE(lan_ipv4_prefix_len, 0),
 		    lan_ipv4_gateway = COALESCE(lan_ipv4_gateway, '')`); err != nil {
 		return err
 	}
 	if _, err := db.Exec(`UPDATE tasks
-		SET cfg_lan_ipv4_address = COALESCE(cfg_lan_ipv4_address, ''),
+		SET cfg_lan_ipv4_mode = COALESCE(cfg_lan_ipv4_mode, ''),
+		    cfg_lan_interface = COALESCE(cfg_lan_interface, ''),
+		    cfg_lan_ipv4_address = COALESCE(cfg_lan_ipv4_address, ''),
 		    cfg_lan_ipv4_prefix_len = COALESCE(cfg_lan_ipv4_prefix_len, 0),
 		    cfg_lan_ipv4_gateway = COALESCE(cfg_lan_ipv4_gateway, '')`); err != nil {
 		return err
@@ -975,6 +979,7 @@ func loadContainers() ([]Container, error) {
 		var scheduleEnabled, policyBlocked, firewallEnabled, imageLimitConfigured int
 		var firewallDefaultAction string
 		var firewallRulesJSON, allowedImageIDs sql.NullString
+		var lanIPv4Mode, lanInterface sql.NullString
 		var lanIPv4Address, lanIPv4Gateway sql.NullString
 		var lanIPv4PrefixLen sql.NullInt64
 		if err := rows.Scan(
@@ -983,7 +988,7 @@ func loadContainers() ([]Container, error) {
 			&c.MonthlyTrafficGB, &c.TrafficMode, &c.TrafficInGB,
 			&c.TrafficOutGB, &c.TrafficUsedRX, &c.TrafficUsedTX, &c.TrafficResetDate,
 			&c.IOSpeedMBps, &c.IOReadMBps, &c.IOWriteMBps,
-			&c.Status, &c.IP, &c.LANIPv4Mode, &c.LANInterface, &lanIPv4Address, &lanIPv4PrefixLen, &lanIPv4Gateway,
+			&c.Status, &c.IP, &lanIPv4Mode, &lanInterface, &lanIPv4Address, &lanIPv4PrefixLen, &lanIPv4Gateway,
 			&c.IPv6, &c.IPv6PrefixLen, &c.IPv6Interface, &c.VNCPort, &c.SSHPort, &c.SSHPassword,
 			&c.SSHHostKey, &c.PortMappingLimit, &c.SnapshotLimit, &c.CreatedAt, &c.ExpiresAt,
 			&scheduleEnabled, &c.SnapshotScheduleIntervalHours, &c.SnapshotScheduleTime,
@@ -993,6 +998,8 @@ func loadContainers() ([]Container, error) {
 		); err != nil {
 			return nil, err
 		}
+		c.LANIPv4Mode = lanIPv4Mode.String
+		c.LANInterface = lanInterface.String
 		c.LANIPv4Address = lanIPv4Address.String
 		if lanIPv4PrefixLen.Valid {
 			c.LANIPv4PrefixLen = int(lanIPv4PrefixLen.Int64)
