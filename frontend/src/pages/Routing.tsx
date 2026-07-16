@@ -9,6 +9,7 @@ import {
   updateRoutingPools,
   type IPv4Route,
   type IPv6Route,
+  type LANDHCPRoute,
   type IPv6PrefixInfo,
   type NAT4PortRange,
   type NAT4Route,
@@ -56,6 +57,7 @@ export default function Routing() {
 
   const publicIPv4s = routing?.public_ipv4_addresses || []
   const ipv4Assignments = routing?.ipv4_assignments || []
+  const lanDHCPAssignments = routing?.lan_dhcp_assignments || []
   const nat4Mappings = routing?.nat4_mappings || []
   const ipv6Prefixes = routing?.ipv6_prefixes || []
   const ipv6Assignments = routing?.ipv6_assignments || []
@@ -276,7 +278,7 @@ export default function Routing() {
         </button>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-3">
+      <div className="grid gap-4 md:grid-cols-4">
         <CapacityCard
           title={text.nat4Ports}
           watermark="NAT4"
@@ -293,6 +295,7 @@ export default function Routing() {
           }
         />
         <CapacityCard title={text.publicIPv4} watermark="IPv4" remaining={routing?.ipv4.remaining || '0'} total={routing?.ipv4.total || '0'} used={routing?.ipv4.used || 0} label={formatPoolCount(publicIPv4s.length, language)} usedLabel={text.used} />
+        <CapacityCard title={text.lanDHCP} watermark="LAN" remaining={String(routing?.lan_dhcp.used || 0)} total={routing?.lan_dhcp.total || 'DHCP'} used={routing?.lan_dhcp.used || 0} label={text.dhcpManagedByLAN} usedLabel={text.used} />
         <CapacityCard title="IPv6" watermark="IPv6" remaining={formatCapacity(routing?.ipv6.remaining || '0', language)} total={formatCapacity(routing?.ipv6.total || '0', language)} used={routing?.ipv6.used || 0} label={formatDetectedPrefixCount(ipv6Prefixes.length, language)} usedLabel={text.used} />
       </div>
 
@@ -540,6 +543,48 @@ export default function Routing() {
           </div>
         </RouteModal>
       )}
+
+      <Panel title={text.lanDHCPAssignments} subtitle={formatAddressSubtitle(lanDHCPAssignments.length, lanDHCPAssignments.length, language)}>
+        {lanDHCPAssignments.length === 0 ? (
+          <EmptyState text={text.noLANDHCPAssignments} icon={<Network className="h-7 w-7" />} />
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[980px] text-sm">
+              <thead className="border-b border-gray-200 bg-gray-50 text-xs text-gray-500">
+                <tr>
+                  <th className="px-4 py-3 text-left font-medium">{text.container}</th>
+                  <th className="px-4 py-3 text-left font-medium">{text.runtimeName}</th>
+                  <th className="px-4 py-3 text-left font-medium">{text.guestIPv4}</th>
+                  <th className="px-4 py-3 text-left font-medium">模式</th>
+                  <th className="px-4 py-3 text-left font-medium">{text.gateway}</th>
+                  <th className="px-4 py-3 text-left font-medium">MAC</th>
+                  <th className="px-4 py-3 text-left font-medium">{text.interface}</th>
+                  <th className="px-4 py-3 text-left font-medium">{text.status}</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {lanDHCPAssignments.map((item: LANDHCPRoute) => (
+                  <tr key={`${item.container_id}-${item.interface}-${item.mac_address || item.address}`} className="hover:bg-gray-50">
+                    <td className="px-4 py-3">
+                      <button onClick={() => navigate(`/container/${item.container_id}`)} className="inline-flex items-center gap-2 text-left font-medium text-black hover:underline">
+                        <Server className="h-4 w-4 text-gray-400" />
+                        {item.container_name}
+                      </button>
+                    </td>
+                    <td className="px-4 py-3 font-mono text-xs text-gray-600">{item.lxc_name}</td>
+                    <td className="px-4 py-3 font-mono text-xs text-gray-700">{item.address ? `${item.address}${item.prefix_len ? `/${item.prefix_len}` : ''}` : '-'}</td>
+                    <td className="px-4 py-3 text-xs text-gray-600">{item.mode === 'static' ? '手动' : 'DHCP'}</td>
+                    <td className="px-4 py-3 font-mono text-xs text-gray-600">{item.gateway || '-'}</td>
+                    <td className="px-4 py-3 font-mono text-xs text-gray-600">{item.mac_address || '-'}</td>
+                    <td className="px-4 py-3 font-mono text-xs text-gray-600">{item.interface || '-'}</td>
+                    <td className="px-4 py-3"><StatusBadge status={item.status} language={language} /></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Panel>
 
       <Panel title={text.ipv4NAT} subtitle={formatMappingSubtitle(filteredNat4.length, nat4Mappings.length, language)} action={<SearchBox value={nat4Search} onChange={setNat4Search} placeholder={text.searchNAT} />}>
         {nat4Mappings.length === 0 ? (
@@ -851,6 +896,10 @@ const routingText = {
     saveNAT4RangeFailed: '保存 NAT4 范围失败',
     remainingTotal: '剩余 / 总数',
     publicIPv4: '公网 IPv4',
+    lanDHCP: '局域网 DHCP',
+    dhcpManagedByLAN: '由局域网 DHCP 分配',
+    lanDHCPAssignments: '局域网 DHCP 分配',
+    noLANDHCPAssignments: '暂无局域网 DHCP 分配',
     publicIPv4Pool: '公网 IPv4 池',
     editPool: '编辑 IP 池',
     noPublicIPv4Pool: '暂未配置公网 IPv4 池',
@@ -922,6 +971,10 @@ const routingText = {
     saveNAT4RangeFailed: 'Save NAT4 range failed',
     remainingTotal: 'remaining / total',
     publicIPv4: 'Public IPv4',
+    lanDHCP: 'LAN DHCP',
+    dhcpManagedByLAN: 'Managed by LAN DHCP',
+    lanDHCPAssignments: 'LAN DHCP assignments',
+    noLANDHCPAssignments: 'No LAN DHCP assignments',
     publicIPv4Pool: 'Public IPv4 pool',
     editPool: 'Edit pool',
     noPublicIPv4Pool: 'No public IPv4 pool configured',

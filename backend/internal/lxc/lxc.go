@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -81,6 +83,13 @@ func (m *Manager) WarmRunningContainersSSH() {
 			continue
 		}
 		config.UpdateContainerStatus(c.ID, "running")
+		if current := config.FindContainer(c.ID); current != nil {
+			m.refreshContainerIPv4Details(current)
+			c = *current
+		}
+		if err := m.ensureLANHostAccess(&c); err != nil {
+			fmt.Printf("Warning: failed to prepare LAN IPv4 host access for %s: %v\n", c.LxcName(), err)
+		}
 		if c.IP != "" && m.containerPortListening(c.LxcName(), 22) {
 			continue
 		}
@@ -238,6 +247,11 @@ type ContainerConfig struct {
 	ExtraPorts           []int    `json:"extra_ports"`
 	PortMappingCount     int      `json:"port_mapping_count"`
 	AssignNAT            *bool    `json:"assign_nat,omitempty"`
+	LANIPv4Mode          string   `json:"lan_ipv4_mode,omitempty"`
+	LANInterface         string   `json:"lan_interface,omitempty"`
+	LANIPv4Address       string   `json:"lan_ipv4_address,omitempty"`
+	LANIPv4PrefixLen     int      `json:"lan_ipv4_prefix_len,omitempty"`
+	LANIPv4Gateway       string   `json:"lan_ipv4_gateway,omitempty"`
 	SnapshotLimit        int      `json:"snapshot_limit"`
 	AllowedImageIDs      []string `json:"allowed_image_ids,omitempty"`
 	ImageLimitConfigured bool     `json:"image_limit_configured,omitempty"`
@@ -289,7 +303,22 @@ func (cfg *ContainerConfig) NormalizeResourceAliases() {
 }
 
 func (cfg ContainerConfig) WantsNAT() bool {
+	if cfg.WantsLANIPv4() {
+		return false
+	}
 	return cfg.AssignNAT == nil || *cfg.AssignNAT
+}
+
+func (cfg ContainerConfig) WantsLANDHCP() bool {
+	return strings.EqualFold(strings.TrimSpace(cfg.LANIPv4Mode), config.LANIPv4ModeDHCP)
+}
+
+func (cfg ContainerConfig) WantsLANStaticIPv4() bool {
+	return strings.EqualFold(strings.TrimSpace(cfg.LANIPv4Mode), config.LANIPv4ModeStatic)
+}
+
+func (cfg ContainerConfig) WantsLANIPv4() bool {
+	return cfg.WantsLANDHCP() || cfg.WantsLANStaticIPv4()
 }
 
 // CreateContainer creates a new LXC container. Uses ct-{id} as LXC name internally.
@@ -354,6 +383,14 @@ func (m *Manager) CreateContainer(cfg ContainerConfig) error {
 	if err := m.applyDiskLimit(lxcName, cfg.DiskGB); err != nil {
 		_ = m.cleanupContainerStorage(lxcName)
 		return err
+	}
+	if cfg.WantsLANIPv4() {
+		iface, err := m.applyLANIPv4Config(lxcName, cfg)
+		if err != nil {
+			_ = m.cleanupContainerStorage(lxcName)
+			return err
+		}
+		cfg.LANInterface = iface
 	}
 
 	// Apply resource limits and mandatory security hardening.
@@ -434,6 +471,7 @@ func (m *Manager) CreateContainer(cfg ContainerConfig) error {
 		UUID:                 config.NewContainerUUID(),
 		Name:                 cfg.Name,
 		Virtualization:       config.VirtualizationLXC,
+		LXCName:              lxcName,
 		Template:             cfg.TemplateID,
 		VCPU:                 cfg.VCPU,
 		RAMMB:                cfg.RAMMB,
@@ -451,6 +489,12 @@ func (m *Manager) CreateContainer(cfg ContainerConfig) error {
 		IOWriteMBps:          cfg.IOWriteMBps,
 		Status:               "stopped",
 		IP:                   "",
+		LANIPv4Mode:          normalizedLANIPv4Mode(cfg.LANIPv4Mode),
+		LANInterface:         strings.TrimSpace(cfg.LANInterface),
+		LANIPv4Address:       strings.TrimSpace(cfg.LANIPv4Address),
+		LANIPv4PrefixLen:     cfg.LANIPv4PrefixLen,
+		LANIPv4Gateway:       strings.TrimSpace(cfg.LANIPv4Gateway),
+		MACAddress:           readLXCConfigValue(lxcName, "lxc.net.0.hwaddr"),
 		PublicIPv4s:          publicIPv4s,
 		IPv6Addresses:        ipv6Assignments,
 		VNCPort:              0,
@@ -469,7 +513,7 @@ func (m *Manager) CreateContainer(cfg ContainerConfig) error {
 
 	// Pre-configure network and SSH in the rootfs before first boot.
 	rootfsPath := filepath.Join(m.LxcPath, lxcName, "rootfs")
-	m.preconfigureNetwork(rootfsPath, cfg.TemplateID)
+	m.preconfigureNetwork(rootfsPath, cfg)
 	if len(ipv6Assignments) > 0 {
 		if err := installContainerIPv6Init(rootfsPath, ipv6AssignmentAddresses(ipv6Assignments)...); err != nil {
 			fmt.Printf("Warning: failed to install IPv6 init in %s: %v\n", lxcName, err)
@@ -502,7 +546,8 @@ func (m *Manager) CreateContainer(cfg ContainerConfig) error {
 	return nil
 }
 
-func (m *Manager) preconfigureNetwork(rootfsPath, templateID string) {
+func (m *Manager) preconfigureNetwork(rootfsPath string, cfg ContainerConfig) {
+	templateID := cfg.TemplateID
 	osRelease := ""
 	if data, err := os.ReadFile(filepath.Join(rootfsPath, "etc", "os-release")); err == nil {
 		osRelease = strings.ToLower(string(data))
@@ -518,7 +563,13 @@ func (m *Manager) preconfigureNetwork(rootfsPath, templateID string) {
 
 	if isAlpine {
 		interfaces := filepath.Join(rootfsPath, "etc", "network", "interfaces")
-		content := "auto lo\niface lo inet loopback\n\nauto eth0\niface eth0 inet dhcp\n"
+		content := "auto lo\niface lo inet loopback\n\nauto eth0\n"
+		if cfg.WantsLANStaticIPv4() {
+			content += fmt.Sprintf("iface eth0 inet static\n    address %s\n    netmask %s\n    gateway %s\n",
+				cfg.LANIPv4Address, subnetMaskFromPrefixLen(cfg.LANIPv4PrefixLen), cfg.LANIPv4Gateway)
+		} else {
+			content += "iface eth0 inet dhcp\n"
+		}
 		_ = os.MkdirAll(filepath.Dir(interfaces), 0755)
 		_ = os.WriteFile(interfaces, []byte(content), 0644)
 		_ = m.runRootfsCommand(rootfsPath, "rc-update", "add", "networking", "boot")
@@ -535,8 +586,16 @@ interface-name=eth0
 autoconnect=true
 
 [ipv4]
-method=auto
-
+`
+			if cfg.WantsLANStaticIPv4() {
+				keyfile += fmt.Sprintf(`method=manual
+address1=%s/%d,%s
+`, cfg.LANIPv4Address, cfg.LANIPv4PrefixLen, cfg.LANIPv4Gateway)
+			} else {
+				keyfile += `method=auto
+`
+			}
+			keyfile += `
 [ipv6]
 method=ignore
 `
@@ -552,14 +611,239 @@ method=ignore
 Name=eth0
 
 [Network]
-DHCP=ipv4
+`
+		if cfg.WantsLANStaticIPv4() {
+			network += fmt.Sprintf("Address=%s/%d\nGateway=%s\nIPv6AcceptRA=no\n", cfg.LANIPv4Address, cfg.LANIPv4PrefixLen, cfg.LANIPv4Gateway)
+		} else {
+			network += `DHCP=ipv4
 IPv6AcceptRA=no
 `
+		}
 		_ = os.WriteFile(filepath.Join(networkdDir, "10-eth0.network"), []byte(network), 0644)
 	}
 	if !isRHELFamily {
 		_ = m.runRootfsCommand(rootfsPath, "systemctl", "enable", "systemd-networkd")
 	}
+}
+
+func normalizedLANIPv4Mode(mode string) string {
+	if strings.EqualFold(strings.TrimSpace(mode), config.LANIPv4ModeDHCP) {
+		return config.LANIPv4ModeDHCP
+	}
+	if strings.EqualFold(strings.TrimSpace(mode), config.LANIPv4ModeStatic) {
+		return config.LANIPv4ModeStatic
+	}
+	return ""
+}
+
+func (m *Manager) applyLANIPv4Config(lxcName string, cfg ContainerConfig) (string, error) {
+	if !cfg.WantsLANIPv4() {
+		return "", nil
+	}
+	if cfg.WantsLANStaticIPv4() {
+		if err := validateLANStaticIPv4(cfg); err != nil {
+			return "", err
+		}
+	}
+	iface := cfg.LANInterface
+	iface = strings.TrimSpace(iface)
+	if iface == "" || isInvalidLANUplinkInterface(iface) {
+		iface = defaultLANInterface()
+	}
+	if iface == "" {
+		return "", fmt.Errorf("LAN IPv4 requires an uplink interface")
+	}
+	if isInvalidLANUplinkInterface(iface) {
+		return "", fmt.Errorf("invalid LAN IPv4 uplink interface: %s", iface)
+	}
+	if out, err := exec.Command("ip", "link", "show", "dev", iface).CombinedOutput(); err != nil {
+		return "", fmt.Errorf("LAN IPv4 uplink interface %s not found: %v, output: %s", iface, err, string(out))
+	}
+
+	configPath := filepath.Join(m.LxcPath, lxcName, "config")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read LXC config for LAN DHCP: %v", err)
+	}
+	lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
+	values := map[string]string{
+		"lxc.net.0.type":         "macvlan",
+		"lxc.net.0.link":         iface,
+		"lxc.net.0.flags":        "up",
+		"lxc.net.0.macvlan.mode": "bridge",
+	}
+	if cfg.WantsLANStaticIPv4() {
+		values["lxc.net.0.ipv4.address"] = fmt.Sprintf("%s/%d", strings.TrimSpace(cfg.LANIPv4Address), cfg.LANIPv4PrefixLen)
+		values["lxc.net.0.ipv4.gateway"] = strings.TrimSpace(cfg.LANIPv4Gateway)
+	}
+	seen := map[string]bool{}
+	next := make([]string, 0, len(lines)+len(values))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !cfg.WantsLANStaticIPv4() && (strings.HasPrefix(trimmed, "lxc.net.0.ipv4.address") || strings.HasPrefix(trimmed, "lxc.net.0.ipv4.gateway")) {
+			continue
+		}
+		replaced := false
+		for key, value := range values {
+			if strings.HasPrefix(trimmed, key+" ") || strings.HasPrefix(trimmed, key+"=") {
+				next = append(next, fmt.Sprintf("%s = %s", key, value))
+				seen[key] = true
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			next = append(next, line)
+		}
+	}
+	for _, key := range []string{"lxc.net.0.type", "lxc.net.0.link", "lxc.net.0.flags", "lxc.net.0.macvlan.mode", "lxc.net.0.ipv4.address", "lxc.net.0.ipv4.gateway"} {
+		if !seen[key] {
+			if value, ok := values[key]; ok {
+				next = append(next, fmt.Sprintf("%s = %s", key, value))
+			}
+		}
+	}
+	if err := os.WriteFile(configPath, []byte(strings.Join(next, "\n")), 0644); err != nil {
+		return "", fmt.Errorf("failed to write LXC LAN IPv4 config: %v", err)
+	}
+	return iface, nil
+}
+
+func validateLANStaticIPv4(cfg ContainerConfig) error {
+	addr, err := netip.ParseAddr(strings.TrimSpace(cfg.LANIPv4Address))
+	if err != nil || !addr.Is4() {
+		return fmt.Errorf("LAN static IPv4 address is invalid")
+	}
+	gateway, err := netip.ParseAddr(strings.TrimSpace(cfg.LANIPv4Gateway))
+	if err != nil || !gateway.Is4() {
+		return fmt.Errorf("LAN static IPv4 gateway is invalid")
+	}
+	if cfg.LANIPv4PrefixLen < 1 || cfg.LANIPv4PrefixLen > 32 {
+		return fmt.Errorf("LAN static IPv4 prefix length must be 1-32")
+	}
+	prefix := netip.PrefixFrom(addr, cfg.LANIPv4PrefixLen).Masked()
+	if !prefix.Contains(gateway) && cfg.LANIPv4PrefixLen < 32 {
+		return fmt.Errorf("LAN static IPv4 gateway must be in the same subnet")
+	}
+	return nil
+}
+
+func subnetMaskFromPrefixLen(prefixLen int) string {
+	if prefixLen < 0 || prefixLen > 32 {
+		return "255.255.255.0"
+	}
+	mask := uint32(0)
+	if prefixLen > 0 {
+		mask = ^uint32(0) << (32 - prefixLen)
+	}
+	return fmt.Sprintf("%d.%d.%d.%d", byte(mask>>24), byte(mask>>16), byte(mask>>8), byte(mask))
+}
+
+func defaultLANInterface() string {
+	out, err := exec.Command("ip", "-4", "route", "show", "default").Output()
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		for i := 0; i+1 < len(fields); i++ {
+			if fields[i] == "dev" && !isInvalidLANUplinkInterface(fields[i+1]) {
+				return fields[i+1]
+			}
+		}
+	}
+	return ""
+}
+
+func isInvalidLANUplinkInterface(name string) bool {
+	name = strings.TrimSpace(name)
+	return name == "" ||
+		name == "lo" ||
+		strings.HasPrefix(name, "lxc") ||
+		strings.HasPrefix(name, "docker") ||
+		strings.HasPrefix(name, "br-") ||
+		strings.HasPrefix(name, "veth") ||
+		strings.HasPrefix(name, "virbr") ||
+		strings.HasPrefix(name, "clmv-")
+}
+
+func readLXCConfigValue(lxcName string, key string) string {
+	data, err := os.ReadFile(filepath.Join("/var/lib/lxc", lxcName, "config"))
+	if err != nil {
+		return ""
+	}
+	prefix := key + " "
+	for _, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, prefix) || strings.HasPrefix(trimmed, key+"=") {
+			parts := strings.SplitN(trimmed, "=", 2)
+			if len(parts) == 2 {
+				return strings.TrimSpace(parts[1])
+			}
+		}
+	}
+	return ""
+}
+
+func (m *Manager) ensureLANHostAccess(c *config.Container) error {
+	if c == nil || !c.UsesLANIPv4() || strings.TrimSpace(c.IP) == "" {
+		return nil
+	}
+	uplink := strings.TrimSpace(c.LANInterface)
+	if uplink == "" {
+		uplink = defaultLANInterface()
+	}
+	if uplink == "" {
+		return fmt.Errorf("missing LAN IPv4 uplink interface")
+	}
+	shim := lanHostShimName(uplink)
+	if _, err := exec.Command("ip", "link", "show", "dev", shim).Output(); err != nil {
+		if out, addErr := exec.Command("ip", "link", "add", shim, "link", uplink, "type", "macvlan", "mode", "bridge").CombinedOutput(); addErr != nil {
+			return fmt.Errorf("failed to create host macvlan shim %s on %s: %v, output: %s", shim, uplink, addErr, string(out))
+		}
+	}
+	runQuiet("ip", "link", "set", shim, "up")
+	if out, err := exec.Command("ip", "route", "replace", c.IP+"/32", "dev", shim).CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to route %s through %s: %v, output: %s", c.IP, shim, err, string(out))
+	}
+	return nil
+}
+
+func (m *Manager) removeLANHostRoute(c *config.Container) {
+	if c == nil || !c.UsesLANIPv4() || strings.TrimSpace(c.IP) == "" {
+		return
+	}
+	uplink := strings.TrimSpace(c.LANInterface)
+	if uplink == "" {
+		uplink = defaultLANInterface()
+	}
+	if uplink == "" {
+		return
+	}
+	runQuiet("ip", "route", "del", c.IP+"/32", "dev", lanHostShimName(uplink))
+}
+
+func lanHostShimName(uplink string) string {
+	cleaned := make([]rune, 0, len(uplink))
+	for _, r := range uplink {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			cleaned = append(cleaned, r)
+		}
+	}
+	base := strings.ToLower(string(cleaned))
+	if base == "" {
+		base = "if"
+	}
+	if len(base) <= 10 {
+		return "clmv-" + base
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(uplink))
+	suffix := fmt.Sprintf("%04x", h.Sum32()&0xffff)
+	if len(base) > 6 {
+		base = base[:6]
+	}
+	return "clmv-" + base + suffix
 }
 
 // preconfigureSSH installs and configures SSH directly in the rootfs before first boot.
@@ -1460,6 +1744,7 @@ func (m *Manager) StartContainer(id int) error {
 		c = config.FindContainer(id)
 		if c != nil {
 			c.IP = ip
+			m.refreshContainerIPv4Details(c)
 			config.SaveConfig()
 		}
 	}
@@ -1473,6 +1758,9 @@ func (m *Manager) StartContainer(id int) error {
 	}
 
 	if ip != "" {
+		if err := m.ensureLANHostAccess(c); err != nil {
+			fmt.Printf("Warning: failed to prepare LAN IPv4 host access for %s: %v\n", lxcName, err)
+		}
 		if err := m.EnsureSSH(id); err != nil {
 			return err
 		}
@@ -1496,7 +1784,6 @@ func (m *Manager) StartContainer(id int) error {
 			fmt.Printf("Warning: failed to apply IPv6 routing for %s: %v\n", lxcName, err)
 		}
 	}
-
 	fmt.Printf("Container %d (%s) started, IP: %s\n", id, c.Name, ip)
 	return nil
 }
@@ -1773,6 +2060,7 @@ ip -4 addr show eth0 2>/dev/null | awk '/inet / {sub(/\/.*/, "", $2); print $2; 
 		return "", fmt.Errorf("no IPv4 address after DHCP repair in %s", lxcName)
 	}
 	c.IP = ip
+	m.refreshContainerIPv4Details(c)
 	config.SaveConfig()
 	return ip, nil
 }
@@ -1794,6 +2082,10 @@ func (m *Manager) WarmSSH(id int) error {
 		if ip, err := m.GetContainerIP(lxcName); err == nil && ip != "" {
 			if current := config.FindContainer(id); current != nil {
 				current.IP = ip
+				m.refreshContainerIPv4Details(current)
+				if err := m.ensureLANHostAccess(current); err != nil {
+					fmt.Printf("Warning: failed to prepare LAN IPv4 host access for %s: %v\n", lxcName, err)
+				}
 				config.SaveConfig()
 			}
 			break
@@ -1803,6 +2095,10 @@ func (m *Manager) WarmSSH(id int) error {
 	if current := config.FindContainer(id); current != nil && current.IP == "" {
 		if ip, err := m.EnsureContainerIPv4(id); err == nil && ip != "" {
 			current.IP = ip
+			m.refreshContainerIPv4Details(current)
+			if err := m.ensureLANHostAccess(current); err != nil {
+				fmt.Printf("Warning: failed to prepare LAN IPv4 host access for %s: %v\n", lxcName, err)
+			}
 			config.SaveConfig()
 		}
 	}
@@ -2550,6 +2846,71 @@ func (m *Manager) GetContainerIP(lxcName string) (string, error) {
 	return "", fmt.Errorf("no IPv4 address found for %s (IPv6 is disabled for containers)", lxcName)
 }
 
+func (m *Manager) GetContainerIPv4Details(lxcName string) (string, int, string, error) {
+	script := `
+addr="$(ip -4 -o addr show dev eth0 scope global 2>/dev/null | awk '{print $4; exit}')"
+gateway="$(ip route show default 0.0.0.0/0 dev eth0 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i=="via") {print $(i+1); exit}}')"
+printf '%s\n%s\n' "$addr" "$gateway"
+`
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "lxc-attach", "-n", lxcName, "--", "sh", "-c", script)
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return "", 0, "", fmt.Errorf("timed out reading IPv4 details for %s", lxcName)
+	}
+	if err != nil {
+		return "", 0, "", fmt.Errorf("failed to read IPv4 details for %s: %v, output: %s", lxcName, err, string(output))
+	}
+	lines := strings.Split(strings.TrimRight(string(output), "\n"), "\n")
+	if len(lines) == 0 || strings.TrimSpace(lines[0]) == "" {
+		return "", 0, "", fmt.Errorf("no IPv4 address details found for %s", lxcName)
+	}
+	prefix, err := netip.ParsePrefix(strings.TrimSpace(lines[0]))
+	if err != nil || !prefix.Addr().Is4() {
+		return "", 0, "", fmt.Errorf("invalid IPv4 address details for %s: %s", lxcName, strings.TrimSpace(lines[0]))
+	}
+	gateway := ""
+	if len(lines) > 1 {
+		candidate := strings.TrimSpace(lines[1])
+		if addr, err := netip.ParseAddr(candidate); err == nil && addr.Is4() {
+			gateway = candidate
+		}
+	}
+	return prefix.Addr().String(), prefix.Bits(), gateway, nil
+}
+
+func (m *Manager) refreshContainerIPv4Details(c *config.Container) {
+	if c == nil || c.IsKVM() {
+		return
+	}
+	ip, prefixLen, gateway, err := m.GetContainerIPv4Details(c.LxcName())
+	if err != nil {
+		return
+	}
+	changed := false
+	if ip != "" && c.IP != ip {
+		c.IP = ip
+		changed = true
+	}
+	if c.UsesLANDHCP() {
+		if prefixLen > 0 && c.LANIPv4PrefixLen != prefixLen {
+			c.LANIPv4PrefixLen = prefixLen
+			changed = true
+		}
+		if gateway != "" && c.LANIPv4Gateway != gateway {
+			c.LANIPv4Gateway = gateway
+			changed = true
+		}
+	}
+	if c.NormalizeNetworkAssignments() {
+		changed = true
+	}
+	if changed {
+		config.SaveConfig()
+	}
+}
+
 // ListContainers lists all LXC containers and updates statuses
 func (m *Manager) ListContainers() ([]config.Container, error) {
 	containers := config.AppConfig.Containers
@@ -2565,6 +2926,7 @@ func (m *Manager) ListContainers() ([]config.Container, error) {
 			ip, err := m.GetContainerIP(containers[i].LxcName())
 			if err == nil {
 				containers[i].IP = ip
+				m.refreshContainerIPv4Details(&containers[i])
 			}
 		}
 	}
@@ -2824,7 +3186,7 @@ func (m *Manager) ReinstallContainer(id int, templateID string, authConfig ...Co
 
 	// Set root password and pre-configure network/SSH via chroot.
 	rootfsPath := filepath.Join(m.LxcPath, lxcName, "rootfs")
-	m.preconfigureNetwork(rootfsPath, templateID)
+	m.preconfigureNetwork(rootfsPath, ContainerConfig{TemplateID: templateID})
 	if c.IPv6 != "" || len(c.IPv6Addresses) > 0 {
 		if err := installContainerIPv6Init(rootfsPath, c.IPv6AddressStrings()...); err != nil {
 			fmt.Printf("Warning: failed to install IPv6 init in %s after reinstall: %v\n", lxcName, err)

@@ -40,6 +40,11 @@ type savedTaskConfig struct {
 	ExtraPorts           []int    `json:"extra_ports"`
 	PortMappingCount     int      `json:"port_mapping_count"`
 	AssignNAT            *bool    `json:"assign_nat,omitempty"`
+	LANIPv4Mode          string   `json:"lan_ipv4_mode,omitempty"`
+	LANInterface         string   `json:"lan_interface,omitempty"`
+	LANIPv4Address       string   `json:"lan_ipv4_address,omitempty"`
+	LANIPv4PrefixLen     int      `json:"lan_ipv4_prefix_len,omitempty"`
+	LANIPv4Gateway       string   `json:"lan_ipv4_gateway,omitempty"`
 	SnapshotLimit        int      `json:"snapshot_limit"`
 	AllowedImageIDs      []string `json:"allowed_image_ids,omitempty"`
 	ImageLimitConfigured bool     `json:"image_limit_configured,omitempty"`
@@ -205,6 +210,11 @@ func ensureSchema() error {
 			io_write_mbps INTEGER NOT NULL DEFAULT 0,
 			status TEXT,
 			ip TEXT,
+			lan_ipv4_mode TEXT,
+			lan_interface TEXT,
+			lan_ipv4_address TEXT,
+			lan_ipv4_prefix_len INTEGER,
+			lan_ipv4_gateway TEXT,
 			ipv6 TEXT,
 			ipv6_prefix_len INTEGER,
 			ipv6_interface TEXT,
@@ -344,6 +354,11 @@ func ensureSchema() error {
 			cfg_io_write_mbps INTEGER NOT NULL DEFAULT 0,
 			cfg_port_mapping_count INTEGER,
 			cfg_assign_nat INTEGER,
+			cfg_lan_ipv4_mode TEXT,
+			cfg_lan_interface TEXT,
+			cfg_lan_ipv4_address TEXT,
+			cfg_lan_ipv4_prefix_len INTEGER,
+			cfg_lan_ipv4_gateway TEXT,
 			cfg_snapshot_limit INTEGER,
 			cfg_assign_ipv4 INTEGER,
 			cfg_ipv4_count INTEGER,
@@ -418,6 +433,11 @@ func ensureSchemaMigrations() error {
 		{"tasks", "cfg_ipv4_count", "INTEGER"},
 		{"tasks", "cfg_public_ipv4s", "TEXT"},
 		{"tasks", "cfg_assign_nat", "INTEGER"},
+		{"tasks", "cfg_lan_ipv4_mode", "TEXT"},
+		{"tasks", "cfg_lan_interface", "TEXT"},
+		{"tasks", "cfg_lan_ipv4_address", "TEXT NOT NULL DEFAULT ''"},
+		{"tasks", "cfg_lan_ipv4_prefix_len", "INTEGER NOT NULL DEFAULT 0"},
+		{"tasks", "cfg_lan_ipv4_gateway", "TEXT NOT NULL DEFAULT ''"},
 		{"tasks", "cfg_ipv6_count", "INTEGER"},
 		{"tasks", "cfg_ipv6_addresses", "TEXT"},
 		{"tasks", "cfg_ssh_auth_mode", "TEXT"},
@@ -439,6 +459,11 @@ func ensureSchemaMigrations() error {
 		{"containers", "firewall_rules", "TEXT"},
 		{"containers", "allowed_image_ids", "TEXT"},
 		{"containers", "image_limit_configured", "INTEGER NOT NULL DEFAULT 0"},
+		{"containers", "lan_ipv4_mode", "TEXT"},
+		{"containers", "lan_interface", "TEXT"},
+		{"containers", "lan_ipv4_address", "TEXT NOT NULL DEFAULT ''"},
+		{"containers", "lan_ipv4_prefix_len", "INTEGER NOT NULL DEFAULT 0"},
+		{"containers", "lan_ipv4_gateway", "TEXT NOT NULL DEFAULT ''"},
 	} {
 		wasAdded, err := ensureColumn(column.table, column.name, column.def)
 		if err != nil {
@@ -479,6 +504,18 @@ func ensureSchemaMigrations() error {
 			WHERE COALESCE(cfg_io_speed_mbps, 0) > 0`); err != nil {
 			return err
 		}
+	}
+	if _, err := db.Exec(`UPDATE containers
+		SET lan_ipv4_address = COALESCE(lan_ipv4_address, ''),
+		    lan_ipv4_prefix_len = COALESCE(lan_ipv4_prefix_len, 0),
+		    lan_ipv4_gateway = COALESCE(lan_ipv4_gateway, '')`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`UPDATE tasks
+		SET cfg_lan_ipv4_address = COALESCE(cfg_lan_ipv4_address, ''),
+		    cfg_lan_ipv4_prefix_len = COALESCE(cfg_lan_ipv4_prefix_len, 0),
+		    cfg_lan_ipv4_gateway = COALESCE(cfg_lan_ipv4_gateway, '')`); err != nil {
+		return err
 	}
 	return nil
 }
@@ -698,19 +735,21 @@ func saveContainers(tx *sql.Tx) error {
 			monthly_traffic_gb, traffic_mode, traffic_in_gb,
 			traffic_out_gb, traffic_used_rx, traffic_used_tx, traffic_reset_date,
 			io_speed_mbps, io_read_mbps, io_write_mbps,
-			status, ip, ipv6, ipv6_prefix_len, ipv6_interface, vnc_port, ssh_port, ssh_password,
+			status, ip, lan_ipv4_mode, lan_interface, lan_ipv4_address, lan_ipv4_prefix_len, lan_ipv4_gateway,
+			ipv6, ipv6_prefix_len, ipv6_interface, vnc_port, ssh_port, ssh_password,
 			ssh_host_key, port_mapping_limit, snapshot_limit, created_at, expires_at,
 			snapshot_schedule_enabled, snapshot_schedule_interval_hours, snapshot_schedule_time,
 			snapshot_schedule_last_run, snapshot_schedule_next_run, snapshot_schedule_created_by,
 			policy_blocked, policy_blocked_reason, policy_blocked_at,
 			firewall_enabled, firewall_default_action, firewall_rules, allowed_image_ids, image_limit_configured
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			c.ID, c.UUID, c.Name, c.Virtualization, c.LXCName, c.KVMName, c.DiskImage, c.MACAddress, c.Template,
 			c.VCPU, c.RAMMB, c.DiskGB, c.NetworkBWMbps, c.NetworkDownMbps, c.NetworkUpMbps,
 			c.MonthlyTrafficGB, c.TrafficMode, c.TrafficInGB,
 			c.TrafficOutGB, c.TrafficUsedRX, c.TrafficUsedTX, c.TrafficResetDate,
 			c.IOSpeedMBps, c.IOReadMBps, c.IOWriteMBps,
-			c.Status, c.IP, c.IPv6, c.IPv6PrefixLen, c.IPv6Interface, c.VNCPort, c.SSHPort, c.SSHPassword,
+			c.Status, c.IP, c.LANIPv4Mode, c.LANInterface, c.LANIPv4Address, c.LANIPv4PrefixLen, c.LANIPv4Gateway,
+			c.IPv6, c.IPv6PrefixLen, c.IPv6Interface, c.VNCPort, c.SSHPort, c.SSHPassword,
 			c.SSHHostKey, c.PortMappingLimit, c.SnapshotLimit, c.CreatedAt, c.ExpiresAt,
 			boolInt(c.SnapshotScheduleEnabled), c.SnapshotScheduleIntervalHours, c.SnapshotScheduleTime,
 			c.SnapshotScheduleLastRun, c.SnapshotScheduleNextRun, c.SnapshotScheduleCreatedBy,
@@ -854,16 +893,18 @@ func saveTasksDB(tx *sql.Tx) error {
 			cfg_network_bw_mbps, cfg_network_down_mbps, cfg_network_up_mbps,
 			cfg_monthly_traffic_gb, cfg_traffic_mode, cfg_traffic_in_gb,
 			cfg_traffic_out_gb, cfg_io_speed_mbps, cfg_io_read_mbps, cfg_io_write_mbps,
-			cfg_port_mapping_count, cfg_assign_nat, cfg_snapshot_limit,
+			cfg_port_mapping_count, cfg_assign_nat, cfg_lan_ipv4_mode, cfg_lan_interface,
+			cfg_lan_ipv4_address, cfg_lan_ipv4_prefix_len, cfg_lan_ipv4_gateway, cfg_snapshot_limit,
 			cfg_assign_ipv4, cfg_ipv4_count, cfg_public_ipv4s, cfg_assign_ipv6, cfg_ipv6_count, cfg_ipv6_addresses,
 			cfg_ssh_auth_mode, cfg_ssh_password, cfg_ssh_public_key, cfg_allowed_image_ids, cfg_image_limit_configured, cfg_expires_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			task.ID, task.Type, task.ContainerID, task.ContainerName, task.Status, task.Error, task.CreatedAt, task.TemplateID, task.User, task.IP, task.UserAgent,
 			cfg.Name, cfg.Virtualization, cfg.TemplateID, cfg.VCPU, cfg.CPUPercent, cfg.RAMMB, cfg.DiskGB,
 			cfg.NetworkBWMbps, cfg.NetworkDownMbps, cfg.NetworkUpMbps,
 			cfg.MonthlyTrafficGB, cfg.TrafficMode, cfg.TrafficInGB,
 			cfg.TrafficOutGB, cfg.IOSpeedMBps, cfg.IOReadMBps, cfg.IOWriteMBps,
-			cfg.PortMappingCount, boolPtrInt(cfg.AssignNAT), cfg.SnapshotLimit,
+			cfg.PortMappingCount, boolPtrInt(cfg.AssignNAT), cfg.LANIPv4Mode, cfg.LANInterface,
+			cfg.LANIPv4Address, cfg.LANIPv4PrefixLen, cfg.LANIPv4Gateway, cfg.SnapshotLimit,
 			boolInt(cfg.AssignIPv4), cfg.IPv4Count, encodeStringSlice(cfg.PublicIPv4s),
 			boolInt(cfg.AssignIPv6), cfg.IPv6Count, encodeStringSlice(cfg.IPv6Addresses),
 			cfg.SSHAuthMode, cfg.SSHPassword, cfg.SSHPublicKey, encodeStringSlice(cfg.AllowedImageIDs), boolInt(cfg.ImageLimitConfigured), cfg.ExpiresAt,
@@ -915,7 +956,8 @@ func loadContainers() ([]Container, error) {
 		monthly_traffic_gb, traffic_mode, traffic_in_gb,
 		traffic_out_gb, traffic_used_rx, traffic_used_tx, traffic_reset_date,
 		io_speed_mbps, io_read_mbps, io_write_mbps,
-		status, ip, ipv6, ipv6_prefix_len, ipv6_interface, vnc_port, ssh_port, ssh_password,
+		status, ip, lan_ipv4_mode, lan_interface, lan_ipv4_address, lan_ipv4_prefix_len, lan_ipv4_gateway,
+		ipv6, ipv6_prefix_len, ipv6_interface, vnc_port, ssh_port, ssh_password,
 		ssh_host_key, port_mapping_limit, snapshot_limit, created_at, expires_at,
 		snapshot_schedule_enabled, snapshot_schedule_interval_hours, snapshot_schedule_time,
 		snapshot_schedule_last_run, snapshot_schedule_next_run, snapshot_schedule_created_by,
@@ -933,13 +975,16 @@ func loadContainers() ([]Container, error) {
 		var scheduleEnabled, policyBlocked, firewallEnabled, imageLimitConfigured int
 		var firewallDefaultAction string
 		var firewallRulesJSON, allowedImageIDs sql.NullString
+		var lanIPv4Address, lanIPv4Gateway sql.NullString
+		var lanIPv4PrefixLen sql.NullInt64
 		if err := rows.Scan(
 			&c.ID, &c.UUID, &c.Name, &c.Virtualization, &c.LXCName, &c.KVMName, &c.DiskImage, &c.MACAddress, &c.Template,
 			&c.VCPU, &c.RAMMB, &c.DiskGB, &c.NetworkBWMbps, &c.NetworkDownMbps, &c.NetworkUpMbps,
 			&c.MonthlyTrafficGB, &c.TrafficMode, &c.TrafficInGB,
 			&c.TrafficOutGB, &c.TrafficUsedRX, &c.TrafficUsedTX, &c.TrafficResetDate,
 			&c.IOSpeedMBps, &c.IOReadMBps, &c.IOWriteMBps,
-			&c.Status, &c.IP, &c.IPv6, &c.IPv6PrefixLen, &c.IPv6Interface, &c.VNCPort, &c.SSHPort, &c.SSHPassword,
+			&c.Status, &c.IP, &c.LANIPv4Mode, &c.LANInterface, &lanIPv4Address, &lanIPv4PrefixLen, &lanIPv4Gateway,
+			&c.IPv6, &c.IPv6PrefixLen, &c.IPv6Interface, &c.VNCPort, &c.SSHPort, &c.SSHPassword,
 			&c.SSHHostKey, &c.PortMappingLimit, &c.SnapshotLimit, &c.CreatedAt, &c.ExpiresAt,
 			&scheduleEnabled, &c.SnapshotScheduleIntervalHours, &c.SnapshotScheduleTime,
 			&c.SnapshotScheduleLastRun, &c.SnapshotScheduleNextRun, &c.SnapshotScheduleCreatedBy,
@@ -948,6 +993,11 @@ func loadContainers() ([]Container, error) {
 		); err != nil {
 			return nil, err
 		}
+		c.LANIPv4Address = lanIPv4Address.String
+		if lanIPv4PrefixLen.Valid {
+			c.LANIPv4PrefixLen = int(lanIPv4PrefixLen.Int64)
+		}
+		c.LANIPv4Gateway = lanIPv4Gateway.String
 		c.SnapshotScheduleEnabled = scheduleEnabled != 0
 		c.PolicyBlocked = policyBlocked != 0
 		c.FirewallEnabled = firewallEnabled != 0
@@ -1158,7 +1208,8 @@ func loadTasks() ([]SavedTask, error) {
 		cfg_network_bw_mbps, cfg_network_down_mbps, cfg_network_up_mbps,
 		cfg_monthly_traffic_gb, cfg_traffic_mode, cfg_traffic_in_gb,
 		cfg_traffic_out_gb, cfg_io_speed_mbps, cfg_io_read_mbps, cfg_io_write_mbps,
-		cfg_port_mapping_count, cfg_assign_nat, cfg_snapshot_limit,
+		cfg_port_mapping_count, cfg_assign_nat, cfg_lan_ipv4_mode, cfg_lan_interface,
+		cfg_lan_ipv4_address, cfg_lan_ipv4_prefix_len, cfg_lan_ipv4_gateway, cfg_snapshot_limit,
 		cfg_assign_ipv4, cfg_ipv4_count, cfg_public_ipv4s, cfg_assign_ipv6, cfg_ipv6_count, cfg_ipv6_addresses,
 		cfg_ssh_auth_mode, cfg_ssh_password, cfg_ssh_public_key, cfg_allowed_image_ids, cfg_image_limit_configured, cfg_expires_at
 		FROM tasks ORDER BY created_at, id`)
@@ -1173,15 +1224,16 @@ func loadTasks() ([]SavedTask, error) {
 		var cfg savedTaskConfig
 		var assignIPv4, assignIPv6, imageLimitConfigured int
 		var ip, userAgent, publicIPv4s, ipv6Addresses sql.NullString
-		var sshAuthMode, sshPassword, sshPublicKey, allowedImageIDs sql.NullString
-		var assignNAT, ipv4Count, ipv6Count sql.NullInt64
+		var lanIPv4Mode, lanInterface, lanIPv4Address, lanIPv4Gateway, sshAuthMode, sshPassword, sshPublicKey, allowedImageIDs sql.NullString
+		var assignNAT, lanIPv4PrefixLen, ipv4Count, ipv6Count sql.NullInt64
 		if err := rows.Scan(
 			&t.ID, &t.Type, &t.ContainerID, &t.ContainerName, &t.Status, &t.Error, &t.CreatedAt, &t.TemplateID, &t.User, &ip, &userAgent,
 			&cfg.Name, &cfg.Virtualization, &cfg.TemplateID, &cfg.VCPU, &cfg.CPUPercent, &cfg.RAMMB, &cfg.DiskGB,
 			&cfg.NetworkBWMbps, &cfg.NetworkDownMbps, &cfg.NetworkUpMbps,
 			&cfg.MonthlyTrafficGB, &cfg.TrafficMode, &cfg.TrafficInGB,
 			&cfg.TrafficOutGB, &cfg.IOSpeedMBps, &cfg.IOReadMBps, &cfg.IOWriteMBps,
-			&cfg.PortMappingCount, &assignNAT, &cfg.SnapshotLimit,
+			&cfg.PortMappingCount, &assignNAT, &lanIPv4Mode, &lanInterface,
+			&lanIPv4Address, &lanIPv4PrefixLen, &lanIPv4Gateway, &cfg.SnapshotLimit,
 			&assignIPv4, &ipv4Count, &publicIPv4s, &assignIPv6, &ipv6Count, &ipv6Addresses,
 			&sshAuthMode, &sshPassword, &sshPublicKey, &allowedImageIDs, &imageLimitConfigured, &cfg.ExpiresAt,
 		); err != nil {
@@ -1193,6 +1245,13 @@ func loadTasks() ([]SavedTask, error) {
 			value := assignNAT.Int64 != 0
 			cfg.AssignNAT = &value
 		}
+		cfg.LANIPv4Mode = lanIPv4Mode.String
+		cfg.LANInterface = lanInterface.String
+		cfg.LANIPv4Address = lanIPv4Address.String
+		if lanIPv4PrefixLen.Valid {
+			cfg.LANIPv4PrefixLen = int(lanIPv4PrefixLen.Int64)
+		}
+		cfg.LANIPv4Gateway = lanIPv4Gateway.String
 		cfg.AssignIPv4 = assignIPv4 != 0
 		if ipv4Count.Valid {
 			cfg.IPv4Count = int(ipv4Count.Int64)

@@ -46,6 +46,19 @@ type ipv4Route struct {
 	Gateway       string `json:"gateway,omitempty"`
 }
 
+type lanDHCPRoute struct {
+	ContainerID   int    `json:"container_id"`
+	ContainerName string `json:"container_name"`
+	LXCName       string `json:"lxc_name"`
+	Status        string `json:"status"`
+	Address       string `json:"address"`
+	Interface     string `json:"interface"`
+	PrefixLen     int    `json:"prefix_len,omitempty"`
+	Gateway       string `json:"gateway,omitempty"`
+	MACAddress    string `json:"mac_address,omitempty"`
+	Mode          string `json:"mode"`
+}
+
 type ipv6Route struct {
 	ContainerID   int    `json:"container_id"`
 	ContainerName string `json:"container_name"`
@@ -60,10 +73,12 @@ type routingResponse struct {
 	NAT4                routeCapacity        `json:"nat4"`
 	NAT4PortRange       nat4PortRange        `json:"nat4_port_range"`
 	IPv4                routeCapacity        `json:"ipv4"`
+	LANDHCP             routeCapacity        `json:"lan_dhcp"`
 	IPv6                routeCapacity        `json:"ipv6"`
 	HostPublicIPv4      lxc.PublicIPInfo     `json:"host_public_ipv4"`
 	PublicIPv4Addresses []lxc.PublicIPInfo   `json:"public_ipv4_addresses"`
 	IPv4Assignments     []ipv4Route          `json:"ipv4_assignments"`
+	LANDHCPAssignments  []lanDHCPRoute       `json:"lan_dhcp_assignments"`
 	NAT4Mappings        []nat4Route          `json:"nat4_mappings"`
 	IPv6Assignments     []ipv6Route          `json:"ipv6_assignments"`
 	IPv6Prefixes        []lxc.IPv6PrefixInfo `json:"ipv6_prefixes"`
@@ -125,6 +140,7 @@ func handleRoutingGet(w http.ResponseWriter, r *http.Request) {
 	nat4Mappings := make([]nat4Route, 0)
 	usedPorts := map[int]bool{}
 	ipv4Assignments := make([]ipv4Route, 0)
+	lanDHCPAssignments := make([]lanDHCPRoute, 0)
 	ipv6Assignments := make([]ipv6Route, 0)
 
 	nat4StartPort, nat4EndPort := config.NATPortRange()
@@ -164,6 +180,20 @@ func handleRoutingGet(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 		c.NormalizeNetworkAssignments()
+		if c.UsesLANIPv4() {
+			lanDHCPAssignments = append(lanDHCPAssignments, lanDHCPRoute{
+				ContainerID:   c.ID,
+				ContainerName: c.Name,
+				LXCName:       c.LxcName(),
+				Status:        c.Status,
+				Address:       c.IP,
+				Interface:     c.LANInterface,
+				PrefixLen:     c.LANIPv4PrefixLen,
+				Gateway:       c.LANIPv4Gateway,
+				MACAddress:    c.MACAddress,
+				Mode:          c.LANIPv4Mode,
+			})
+		}
 		for _, ip := range c.IPv6Addresses {
 			if ip.Address == "" {
 				continue
@@ -190,6 +220,12 @@ func handleRoutingGet(w http.ResponseWriter, r *http.Request) {
 	})
 	sort.SliceStable(ipv4Assignments, func(i, j int) bool {
 		return ipv4Assignments[i].Address < ipv4Assignments[j].Address
+	})
+	sort.SliceStable(lanDHCPAssignments, func(i, j int) bool {
+		if lanDHCPAssignments[i].Interface == lanDHCPAssignments[j].Interface {
+			return lanDHCPAssignments[i].ContainerName < lanDHCPAssignments[j].ContainerName
+		}
+		return lanDHCPAssignments[i].Interface < lanDHCPAssignments[j].Interface
 	})
 	sort.SliceStable(ipv6Assignments, func(i, j int) bool {
 		return ipv6Assignments[i].Address < ipv6Assignments[j].Address
@@ -231,6 +267,11 @@ func handleRoutingGet(w http.ResponseWriter, r *http.Request) {
 				Remaining: strconv.Itoa(ipv4Remaining),
 				Total:     strconv.Itoa(ipv4Total),
 			},
+			LANDHCP: routeCapacity{
+				Used:      len(lanDHCPAssignments),
+				Remaining: "DHCP",
+				Total:     "DHCP",
+			},
 			IPv6: routeCapacity{
 				Used:      len(ipv6Assignments),
 				Remaining: ipv6Remaining,
@@ -239,6 +280,7 @@ func handleRoutingGet(w http.ResponseWriter, r *http.Request) {
 			HostPublicIPv4:      hostPublicIPv4,
 			PublicIPv4Addresses: publicIPv4s,
 			IPv4Assignments:     ipv4Assignments,
+			LANDHCPAssignments:  lanDHCPAssignments,
 			NAT4Mappings:        nat4Mappings,
 			IPv6Assignments:     ipv6Assignments,
 			IPv6Prefixes:        prefixes,

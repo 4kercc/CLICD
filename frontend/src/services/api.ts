@@ -94,6 +94,12 @@ export interface Container {
   io_write_mbps: number
   status: string
   ip: string
+  lan_ipv4_mode?: string
+  lan_interface?: string
+  lan_ipv4_address?: string
+  lan_ipv4_prefix_len?: number
+  lan_ipv4_gateway?: string
+  mac_address?: string
   public_ipv4s?: PublicIPv4Assignment[]
   ipv6: string
   ipv6_prefix_len: number
@@ -154,6 +160,11 @@ export interface CreateContainerRequest {
   extra_ports: number[]
   port_mapping_count: number
   assign_nat?: boolean
+  lan_ipv4_mode?: string
+  lan_interface?: string
+  lan_ipv4_address?: string
+  lan_ipv4_prefix_len?: number
+  lan_ipv4_gateway?: string
   snapshot_limit: number
   assign_ipv4?: boolean
   ipv4_count?: number
@@ -602,6 +613,19 @@ export interface IPv4Route {
   gateway?: string
 }
 
+export interface LANDHCPRoute {
+  container_id: number
+  container_name: string
+  lxc_name: string
+  status: string
+  address: string
+  interface: string
+  prefix_len?: number
+  gateway?: string
+  mac_address?: string
+  mode: string
+}
+
 export interface IPv6Route {
   container_id: number
   container_name: string
@@ -616,10 +640,12 @@ export interface RoutingInfo {
   nat4: RouteCapacity
   nat4_port_range: NAT4PortRange
   ipv4: RouteCapacity
+  lan_dhcp: RouteCapacity
   ipv6: RouteCapacity
   host_public_ipv4?: PublicIPv4Info
   public_ipv4_addresses: PublicIPv4Info[]
   ipv4_assignments: IPv4Route[]
+  lan_dhcp_assignments: LANDHCPRoute[]
   nat4_mappings: NAT4Route[]
   ipv6_assignments: IPv6Route[]
   ipv6_prefixes: IPv6PrefixInfo[]

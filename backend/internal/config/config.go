@@ -129,6 +129,11 @@ type Container struct {
 	IOWriteMBps                   int                    `json:"io_write_mbps"`
 	Status                        string                 `json:"status"`
 	IP                            string                 `json:"ip"`
+	LANIPv4Mode                   string                 `json:"lan_ipv4_mode,omitempty"`
+	LANInterface                  string                 `json:"lan_interface,omitempty"`
+	LANIPv4Address                string                 `json:"lan_ipv4_address,omitempty"`
+	LANIPv4PrefixLen              int                    `json:"lan_ipv4_prefix_len,omitempty"`
+	LANIPv4Gateway                string                 `json:"lan_ipv4_gateway,omitempty"`
 	PublicIPv4s                   []PublicIPv4Assignment `json:"public_ipv4s,omitempty"`
 	IPv6                          string                 `json:"ipv6"`
 	IPv6PrefixLen                 int                    `json:"ipv6_prefix_len"`
@@ -162,6 +167,9 @@ type Container struct {
 const (
 	VirtualizationLXC = "lxc"
 	VirtualizationKVM = "kvm"
+
+	LANIPv4ModeDHCP   = "dhcp"
+	LANIPv4ModeStatic = "static"
 )
 
 func NormalizeVirtualization(value string) string {
@@ -181,8 +189,56 @@ func (c *Container) IsKVM() bool {
 	return c.Runtime() == VirtualizationKVM
 }
 
+func (c *Container) UsesLANDHCP() bool {
+	return strings.EqualFold(strings.TrimSpace(c.LANIPv4Mode), LANIPv4ModeDHCP)
+}
+
+func (c *Container) UsesLANStaticIPv4() bool {
+	return strings.EqualFold(strings.TrimSpace(c.LANIPv4Mode), LANIPv4ModeStatic)
+}
+
+func (c *Container) UsesLANIPv4() bool {
+	return c.UsesLANDHCP() || c.UsesLANStaticIPv4()
+}
+
 func (c *Container) NormalizeNetworkAssignments() bool {
 	changed := false
+	lanMode := strings.ToLower(strings.TrimSpace(c.LANIPv4Mode))
+	if lanMode != "" && lanMode != LANIPv4ModeDHCP && lanMode != LANIPv4ModeStatic {
+		lanMode = ""
+	}
+	if c.LANIPv4Mode != lanMode {
+		c.LANIPv4Mode = lanMode
+		changed = true
+	}
+	lanInterface := strings.TrimSpace(c.LANInterface)
+	if c.LANInterface != lanInterface {
+		c.LANInterface = lanInterface
+		changed = true
+	}
+	lanAddress := strings.TrimSpace(c.LANIPv4Address)
+	if c.LANIPv4Address != lanAddress {
+		c.LANIPv4Address = lanAddress
+		changed = true
+	}
+	lanGateway := strings.TrimSpace(c.LANIPv4Gateway)
+	if c.LANIPv4Gateway != lanGateway {
+		c.LANIPv4Gateway = lanGateway
+		changed = true
+	}
+	if c.LANIPv4Mode == LANIPv4ModeDHCP {
+		if c.LANIPv4Address != "" {
+			c.LANIPv4Address = ""
+			changed = true
+		}
+	} else if c.LANIPv4Mode != LANIPv4ModeStatic {
+		if c.LANIPv4Address != "" || c.LANIPv4PrefixLen != 0 || c.LANIPv4Gateway != "" {
+			c.LANIPv4Address = ""
+			c.LANIPv4PrefixLen = 0
+			c.LANIPv4Gateway = ""
+			changed = true
+		}
+	}
 	seenIPv4 := map[string]bool{}
 	filteredIPv4 := make([]PublicIPv4Assignment, 0, len(c.PublicIPv4s))
 	for _, item := range c.PublicIPv4s {

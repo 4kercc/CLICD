@@ -20,7 +20,7 @@ func runtimeFromRequest(value string) string {
 }
 
 func hasRequestedNetwork(cfg lxc.ContainerConfig) bool {
-	return cfg.WantsNAT() || cfg.AssignIPv4 || len(cfg.PublicIPv4s) > 0 || cfg.AssignIPv6 || len(cfg.IPv6Addresses) > 0
+	return cfg.WantsNAT() || cfg.WantsLANIPv4() || cfg.AssignIPv4 || len(cfg.PublicIPv4s) > 0 || cfg.AssignIPv6 || len(cfg.IPv6Addresses) > 0
 }
 
 func runtimeFromTemplateID(templateID string) string {

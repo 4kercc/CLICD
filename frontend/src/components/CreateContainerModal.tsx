@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { CalendarClock, RefreshCw, X } from 'lucide-react'
-import { batchCreate, getIPv6Status, getEnabledImages, getHostInfo, CreateContainerRequest, HostInfo, IPv6Status, Template } from '../services/api'
+import { batchCreate, getIPv6Status, getEnabledImages, getHostInfo, getHostReport, CreateContainerRequest, HostInfo, HostProbeReport, IPv6Status, Template } from '../services/api'
 import { useDialog } from './Dialog'
 import { useLanguage, type Language } from '../contexts/LanguageContext'
 import { generateSSHPassword, sshPasswordError, sshPublicKeyError, type SSHAuthMode } from '../utils/sshAuth'
@@ -33,6 +33,11 @@ const defaultForm: CreateContainerRequest = {
   extra_ports: [],
   port_mapping_count: 2,
   assign_nat: true,
+  lan_ipv4_mode: '',
+  lan_interface: '',
+  lan_ipv4_address: '',
+  lan_ipv4_prefix_len: 24,
+  lan_ipv4_gateway: '',
   snapshot_limit: 1,
   assign_ipv4: false,
   ipv4_count: 1,
@@ -57,6 +62,7 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
   const [batchCount, setBatchCount] = useState(1)
   const [form, setForm] = useState<CreateContainerRequest>(defaultForm)
   const [hostInfo, setHostInfo] = useState<HostInfo | null>(null)
+  const [hostReport, setHostReport] = useState<HostProbeReport | null>(null)
   const [ipv6Status, setIPv6Status] = useState<IPv6Status | null>(null)
   const [nameError, setNameError] = useState('')
 
@@ -97,6 +103,10 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
     getHostInfo()
       .then((res) => setHostInfo(res.data.data || null))
       .catch(() => setHostInfo(null))
+
+    getHostReport()
+      .then((res) => setHostReport(res.data.data || null))
+      .catch(() => setHostReport(null))
   }, [isOpen, form.virtualization])
 
   const ipv6Available = !!ipv6Status?.available
@@ -116,7 +126,11 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
   }, [hostInfo, kvmAvailable, form.virtualization])
   const maxDiskGB = hostInfo?.disk.total_gb ? Math.max(1, Math.floor(hostInfo.disk.total_gb)) : undefined
   const resourceErrors = validateResourceInputs(form, maxVCPU, maxRAMMB, maxDiskGB)
-  const natEnabled = form.assign_nat !== false
+  const lanIPv4Enabled = form.lan_ipv4_mode === 'dhcp' || form.lan_ipv4_mode === 'static'
+  const lanStaticEnabled = form.lan_ipv4_mode === 'static'
+  const natEnabled = form.assign_nat !== false && !lanIPv4Enabled
+  const lanInterfaces = useMemo(() => getLANDHCPInterfaces(hostReport), [hostReport])
+  const defaultLANInterface = lanInterfaces[0]?.name || ''
   const natPortCount = natEnabled ? Math.max(2, form.port_mapping_count || 2) : 0
   const linuxTemplate = !isWindowsTemplate(form.template_id)
   const sshAuthMode = (form.ssh_auth_mode || 'auto_password') as SSHAuthMode
@@ -169,9 +183,16 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
       return
     }
 
-    if (!form.assign_ipv4 && !form.assign_ipv6 && form.assign_nat === false) {
+    if (!form.assign_ipv4 && !form.assign_ipv6 && form.assign_nat === false && form.lan_ipv4_mode !== 'dhcp' && form.lan_ipv4_mode !== 'static') {
       dialog.alert('提示', '请勾选任意一个可用网络')
       return
+    }
+
+    if (form.lan_ipv4_mode === 'static') {
+      if (!isIPv4Address(form.lan_ipv4_address || '') || !isIPv4Address(form.lan_ipv4_gateway || '') || !form.lan_ipv4_prefix_len) {
+        dialog.alert('局域网 IPv4 配置有误', '请填写有效的 IPv4 地址、子网掩码和网关')
+        return
+      }
     }
 
     const authError = validateSSHAuthInputs(form)
@@ -388,7 +409,7 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
                   ...form,
                   assign_ipv4: event.target.checked,
                   public_ipv4s: event.target.checked ? form.public_ipv4s : [],
-                  ...(event.target.checked ? { assign_nat: false, port_mapping_count: 0, extra_ports: [] } : {}),
+                  ...(event.target.checked ? { assign_nat: false, port_mapping_count: 0, extra_ports: [], lan_ipv4_mode: '', lan_interface: '' } : {}),
                 })}
                 className="mt-1"
               />
@@ -454,6 +475,98 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
             )}
           </div>
 
+          <div className={`rounded-md border px-3 py-2 text-sm ${form.virtualization === 'lxc' && lanInterfaces.length > 0 ? 'border-gray-200 bg-white' : 'border-gray-200 bg-gray-50 text-gray-400'}`}>
+            <div className="flex items-start justify-between gap-3">
+              <label className="flex min-w-0 flex-1 items-start gap-3">
+                <input
+                  type="checkbox"
+                  checked={lanIPv4Enabled}
+                  disabled={form.virtualization !== 'lxc' || lanInterfaces.length === 0}
+                  onChange={(event) => {
+                    const checked = event.target.checked
+                    setForm({
+                      ...form,
+                      lan_ipv4_mode: checked ? 'dhcp' : '',
+                      lan_interface: checked ? (form.lan_interface || defaultLANInterface) : '',
+                      assign_nat: checked ? false : form.assign_nat,
+                      port_mapping_count: checked ? 0 : form.port_mapping_count,
+                      extra_ports: checked ? [] : form.extra_ports,
+                      assign_ipv4: checked ? false : form.assign_ipv4,
+                      public_ipv4s: checked ? [] : form.public_ipv4s,
+                      ipv4_count: checked ? 0 : form.ipv4_count,
+                    })
+                  }}
+                  className="mt-1"
+                />
+                <span className="min-w-0">
+                  <span className="block font-medium text-gray-800">局域网 DHCP</span>
+                  <span className="block text-xs text-gray-500">
+                    {lanInterfaces.length > 0 ? 'macvlan 独立局域网 IP' : '未检测到可用上联网卡'}
+                  </span>
+                </span>
+              </label>
+              {lanIPv4Enabled && (
+                <select
+                  value={form.lan_interface || defaultLANInterface}
+                  onChange={(event) => setForm({ ...form, lan_interface: event.target.value })}
+                  className="h-9 w-32 shrink-0 rounded-md border border-gray-300 bg-white px-2 text-xs text-gray-700 focus:outline-none focus:ring-1 focus:ring-black"
+                >
+                  {lanInterfaces.map((item) => (
+                    <option key={item.name} value={item.name}>{item.name}</option>
+                  ))}
+                </select>
+              )}
+            </div>
+            {lanIPv4Enabled && (
+              <div className="mt-3 space-y-3 pl-6">
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setForm({ ...form, lan_ipv4_mode: 'dhcp' })}
+                    className={`rounded-md border px-3 py-2 text-xs font-medium ${form.lan_ipv4_mode === 'dhcp' ? 'border-black bg-black text-white' : 'border-gray-300 text-gray-700 hover:bg-gray-50'}`}
+                  >
+                    DHCP 自动获取
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setForm({ ...form, lan_ipv4_mode: 'static' })}
+                    className={`rounded-md border px-3 py-2 text-xs font-medium ${lanStaticEnabled ? 'border-black bg-black text-white' : 'border-gray-300 text-gray-700 hover:bg-gray-50'}`}
+                  >
+                    手动配置
+                  </button>
+                </div>
+                {lanStaticEnabled && (
+                  <div className="grid gap-3 sm:grid-cols-3">
+                    <Field label="IPv4 地址">
+                      <input
+                        value={form.lan_ipv4_address || ''}
+                        onChange={(event) => setForm({ ...form, lan_ipv4_address: event.target.value })}
+                        className={inputClass}
+                        placeholder="192.168.2.250"
+                      />
+                    </Field>
+                    <Field label="子网掩码">
+                      <input
+                        value={subnetMaskFromPrefixLen(form.lan_ipv4_prefix_len || 24)}
+                        onChange={(event) => setForm({ ...form, lan_ipv4_prefix_len: prefixLenFromSubnetMask(event.target.value) || 24 })}
+                        className={inputClass}
+                        placeholder="255.255.255.0"
+                      />
+                    </Field>
+                    <Field label="网关">
+                      <input
+                        value={form.lan_ipv4_gateway || ''}
+                        onChange={(event) => setForm({ ...form, lan_ipv4_gateway: event.target.value })}
+                        className={inputClass}
+                        placeholder="192.168.2.202"
+                      />
+                    </Field>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
           <div className={`rounded-md border px-3 py-2 text-sm ${ipv6Available ? 'border-gray-200 bg-white' : 'border-gray-200 bg-gray-50 text-gray-400'}`}>
             <div className="flex items-start justify-between gap-3">
               <label className="flex min-w-0 flex-1 items-start gap-3">
@@ -497,7 +610,7 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
                       assign_nat: checked,
                       port_mapping_count: checked ? Math.max(2, form.port_mapping_count || 2) : 0,
                       extra_ports: [],
-                      ...(checked ? { assign_ipv4: false, public_ipv4s: [], ipv4_count: 0 } : {}),
+                      ...(checked ? { assign_ipv4: false, public_ipv4s: [], ipv4_count: 0, lan_ipv4_mode: '', lan_interface: '' } : {}),
                     })
                   }}
                   className="mt-1"
@@ -757,10 +870,13 @@ function validateResourceInputs(form: CreateContainerRequest, maxVCPU: number, m
 
 function normalizeCreateForm(form: CreateContainerRequest): CreateContainerRequest {
   const normalized = applyTemplateDefaults(form)
+  const wantsLANDHCP = normalized.virtualization === 'lxc' && normalized.lan_ipv4_mode === 'dhcp'
+  const wantsLANStatic = normalized.virtualization === 'lxc' && normalized.lan_ipv4_mode === 'static'
+  const wantsLANIPv4 = wantsLANDHCP || wantsLANStatic
   const wantsIPv4 = !!normalized.assign_ipv4
   const wantsIPv6 = !!normalized.assign_ipv6
   // IPv4 and NAT are mutually exclusive
-  const wantsNAT = wantsIPv4 ? false : normalized.assign_nat !== false
+  const wantsNAT = wantsLANIPv4 || wantsIPv4 ? false : normalized.assign_nat !== false
   const linuxTemplate = !isWindowsTemplate(normalized.template_id)
   const sshAuthMode = linuxTemplate ? (normalized.ssh_auth_mode || 'auto_password') : 'auto_password'
   return {
@@ -770,6 +886,11 @@ function normalizeCreateForm(form: CreateContainerRequest): CreateContainerReque
     disk_gb: Math.round(normalized.disk_gb),
     assign_nat: wantsNAT,
     port_mapping_count: wantsNAT ? clampInt(normalized.port_mapping_count, 2, 64, 2) : 0,
+    lan_ipv4_mode: wantsLANDHCP ? 'dhcp' : (wantsLANStatic ? 'static' : ''),
+    lan_interface: wantsLANIPv4 ? (normalized.lan_interface || '').trim() : '',
+    lan_ipv4_address: wantsLANStatic ? (normalized.lan_ipv4_address || '').trim() : '',
+    lan_ipv4_prefix_len: wantsLANStatic ? clampInt(normalized.lan_ipv4_prefix_len || 24, 1, 32, 24) : 0,
+    lan_ipv4_gateway: wantsLANStatic ? (normalized.lan_ipv4_gateway || '').trim() : '',
     assign_ipv4: wantsIPv4,
     ipv4_count: wantsIPv4 ? clampInt(normalized.ipv4_count || 1, 1, 64, 1) : 0,
     public_ipv4s: wantsIPv4 ? (normalized.public_ipv4s || []) : [],
@@ -790,6 +911,16 @@ function validateSSHAuthInputs(form: CreateContainerRequest) {
   if (mode === 'key') return sshPublicKeyError(form.ssh_public_key || '')
   if (mode !== 'auto_password') return '请选择登录方式'
   return ''
+}
+
+function getLANDHCPInterfaces(report: HostProbeReport | null) {
+  const interfaces = report?.network_interfaces || []
+  return interfaces.filter((item) => {
+    const name = item.name || ''
+    if (!name || name === 'lo') return false
+    if (name.startsWith('lxc') || name.startsWith('docker') || name.startsWith('br-') || name.startsWith('veth') || name.startsWith('virbr') || name.startsWith('clmv-')) return false
+    return (item.state || '').toLowerCase() === 'up'
+  })
 }
 
 function applyTemplateDefaults(form: CreateContainerRequest): CreateContainerRequest {
@@ -815,6 +946,28 @@ function normalizeLXCvCPU(value: number) {
 function clampInt(value: number, min: number, max?: number, fallback = min) {
   const next = Math.round(Number.isFinite(value) ? value : fallback)
   return Math.min(Math.max(next, min), max ?? next)
+}
+
+function isIPv4Address(value: string) {
+  const parts = value.trim().split('.')
+  return parts.length === 4 && parts.every((part) => {
+    if (!/^\d+$/.test(part)) return false
+    const n = Number(part)
+    return n >= 0 && n <= 255
+  })
+}
+
+function subnetMaskFromPrefixLen(prefixLen: number) {
+  if (!Number.isFinite(prefixLen) || prefixLen < 0 || prefixLen > 32) return '255.255.255.0'
+  const mask = prefixLen === 0 ? 0 : (0xffffffff << (32 - prefixLen)) >>> 0
+  return [24, 16, 8, 0].map((shift) => (mask >>> shift) & 255).join('.')
+}
+
+function prefixLenFromSubnetMask(mask: string) {
+  if (!isIPv4Address(mask)) return 0
+  const bits = mask.split('.').map((part) => Number(part).toString(2).padStart(8, '0')).join('')
+  if (!/^1*0*$/.test(bits)) return 0
+  return bits.indexOf('0') === -1 ? 32 : bits.indexOf('0')
 }
 
 const createNetworkText = {
