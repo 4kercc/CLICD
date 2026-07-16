@@ -649,7 +649,7 @@ func (m *Manager) StartContainer(id int) error {
 	if !isWindows && c.IP != "" {
 		m.waitForCloudInitReady(name, c.IP, c.SSHPassword)
 	}
-	config.UpdateContainerStatus(id, "running")
+	config.UpdateContainerStatusAndRestore(id, "running", true)
 	if c.IPv6 != "" || len(c.IPv6Addresses) > 0 {
 		if err := m.applyIPv6Runtime(c); err != nil {
 			return err
@@ -728,13 +728,13 @@ func (m *Manager) StopContainer(id int) error {
 	name := c.VirshName()
 	status, _ := m.GetContainerStatus(name)
 	if status != "running" {
-		config.UpdateContainerStatus(id, "stopped")
+		config.UpdateContainerStatusAndRestore(id, "stopped", false)
 		return nil
 	}
 	exec.Command("virsh", "shutdown", name).Run()
 	for i := 0; i < 20; i++ {
 		if status, _ := m.GetContainerStatus(name); status != "running" {
-			config.UpdateContainerStatus(id, "stopped")
+			config.UpdateContainerStatusAndRestore(id, "stopped", false)
 			return nil
 		}
 		time.Sleep(1 * time.Second)
@@ -743,7 +743,7 @@ func (m *Manager) StopContainer(id int) error {
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("virsh destroy failed: %v, output: %s", err, string(output))
 	}
-	config.UpdateContainerStatus(id, "stopped")
+	config.UpdateContainerStatusAndRestore(id, "stopped", false)
 	return nil
 }
 

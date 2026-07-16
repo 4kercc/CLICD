@@ -4,7 +4,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strings"
+	"sync"
+	"syscall"
 
 	"clicd/internal/api"
 	"clicd/internal/cli"
@@ -15,6 +18,8 @@ import (
 
 	"golang.org/x/term"
 )
+
+var shutdownCaptureOnce sync.Once
 
 func main() {
 	isTerminal := term.IsTerminal(int(os.Stdin.Fd()))
@@ -44,6 +49,8 @@ func main() {
 	_ = cfg
 
 	if isServerMode || (!isTerminal && !isCliMode) {
+		installShutdownStateCapture()
+
 		// Restore persisted state
 		api.RestoreTasks()
 		api.RestoreLoginLogs()
@@ -75,6 +82,7 @@ func main() {
 
 		// Clean up stale container configs (LXC dir was deleted but config remains)
 		config.CleanStaleContainers()
+		api.StartHostBootRestore()
 		lxc.EnsureAllRunningPortMappings()
 
 		// Pre-warm SSH for containers already running after host boot or service restart.
@@ -95,6 +103,17 @@ func main() {
 		// Run CLI interface
 		cli.Run()
 	}
+}
+
+func installShutdownStateCapture() {
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		sig := <-signals
+		fmt.Fprintf(os.Stderr, "Received %s, capturing workload restore state...\n", sig)
+		shutdownCaptureOnce.Do(api.CaptureRuntimeRestoreState)
+		os.Exit(0)
+	}()
 }
 
 func isWebPanelSystemdRunning() bool {

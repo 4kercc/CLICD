@@ -128,6 +128,7 @@ type Container struct {
 	IOReadMBps                    int                    `json:"io_read_mbps"`
 	IOWriteMBps                   int                    `json:"io_write_mbps"`
 	Status                        string                 `json:"status"`
+	RestoreOnHostBoot             bool                   `json:"restore_on_host_boot,omitempty"`
 	IP                            string                 `json:"ip"`
 	LANIPv4Mode                   string                 `json:"lan_ipv4_mode,omitempty"`
 	LANInterface                  string                 `json:"lan_interface,omitempty"`
@@ -1214,6 +1215,23 @@ func UpdateContainerStatus(id int, status string) {
 	c := FindContainer(id)
 	if c != nil {
 		c.Status = status
+		SaveConfig()
+	}
+}
+
+func UpdateContainerStatusAndRestore(id int, status string, restoreOnHostBoot bool) {
+	c := FindContainer(id)
+	if c != nil {
+		c.Status = status
+		c.RestoreOnHostBoot = restoreOnHostBoot
+		SaveConfig()
+	}
+}
+
+func SetContainerRestoreOnHostBoot(id int, restore bool) {
+	c := FindContainer(id)
+	if c != nil {
+		c.RestoreOnHostBoot = restore
 		SaveConfig()
 	}
 }

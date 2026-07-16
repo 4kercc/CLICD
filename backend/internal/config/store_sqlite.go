@@ -209,6 +209,7 @@ func ensureSchema() error {
 			io_read_mbps INTEGER NOT NULL DEFAULT 0,
 			io_write_mbps INTEGER NOT NULL DEFAULT 0,
 			status TEXT,
+			restore_on_host_boot INTEGER NOT NULL DEFAULT 0,
 			ip TEXT,
 			lan_ipv4_mode TEXT,
 			lan_interface TEXT,
@@ -459,6 +460,7 @@ func ensureSchemaMigrations() error {
 		{"containers", "firewall_rules", "TEXT"},
 		{"containers", "allowed_image_ids", "TEXT"},
 		{"containers", "image_limit_configured", "INTEGER NOT NULL DEFAULT 0"},
+		{"containers", "restore_on_host_boot", "INTEGER NOT NULL DEFAULT 0"},
 		{"containers", "lan_ipv4_mode", "TEXT"},
 		{"containers", "lan_interface", "TEXT"},
 		{"containers", "lan_ipv4_address", "TEXT NOT NULL DEFAULT ''"},
@@ -739,20 +741,20 @@ func saveContainers(tx *sql.Tx) error {
 			monthly_traffic_gb, traffic_mode, traffic_in_gb,
 			traffic_out_gb, traffic_used_rx, traffic_used_tx, traffic_reset_date,
 			io_speed_mbps, io_read_mbps, io_write_mbps,
-			status, ip, lan_ipv4_mode, lan_interface, lan_ipv4_address, lan_ipv4_prefix_len, lan_ipv4_gateway,
+			status, restore_on_host_boot, ip, lan_ipv4_mode, lan_interface, lan_ipv4_address, lan_ipv4_prefix_len, lan_ipv4_gateway,
 			ipv6, ipv6_prefix_len, ipv6_interface, vnc_port, ssh_port, ssh_password,
 			ssh_host_key, port_mapping_limit, snapshot_limit, created_at, expires_at,
 			snapshot_schedule_enabled, snapshot_schedule_interval_hours, snapshot_schedule_time,
 			snapshot_schedule_last_run, snapshot_schedule_next_run, snapshot_schedule_created_by,
 			policy_blocked, policy_blocked_reason, policy_blocked_at,
 			firewall_enabled, firewall_default_action, firewall_rules, allowed_image_ids, image_limit_configured
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			c.ID, c.UUID, c.Name, c.Virtualization, c.LXCName, c.KVMName, c.DiskImage, c.MACAddress, c.Template,
 			c.VCPU, c.RAMMB, c.DiskGB, c.NetworkBWMbps, c.NetworkDownMbps, c.NetworkUpMbps,
 			c.MonthlyTrafficGB, c.TrafficMode, c.TrafficInGB,
 			c.TrafficOutGB, c.TrafficUsedRX, c.TrafficUsedTX, c.TrafficResetDate,
 			c.IOSpeedMBps, c.IOReadMBps, c.IOWriteMBps,
-			c.Status, c.IP, c.LANIPv4Mode, c.LANInterface, c.LANIPv4Address, c.LANIPv4PrefixLen, c.LANIPv4Gateway,
+			c.Status, boolInt(c.RestoreOnHostBoot), c.IP, c.LANIPv4Mode, c.LANInterface, c.LANIPv4Address, c.LANIPv4PrefixLen, c.LANIPv4Gateway,
 			c.IPv6, c.IPv6PrefixLen, c.IPv6Interface, c.VNCPort, c.SSHPort, c.SSHPassword,
 			c.SSHHostKey, c.PortMappingLimit, c.SnapshotLimit, c.CreatedAt, c.ExpiresAt,
 			boolInt(c.SnapshotScheduleEnabled), c.SnapshotScheduleIntervalHours, c.SnapshotScheduleTime,
@@ -960,7 +962,7 @@ func loadContainers() ([]Container, error) {
 		monthly_traffic_gb, traffic_mode, traffic_in_gb,
 		traffic_out_gb, traffic_used_rx, traffic_used_tx, traffic_reset_date,
 		io_speed_mbps, io_read_mbps, io_write_mbps,
-		status, ip, lan_ipv4_mode, lan_interface, lan_ipv4_address, lan_ipv4_prefix_len, lan_ipv4_gateway,
+		status, restore_on_host_boot, ip, lan_ipv4_mode, lan_interface, lan_ipv4_address, lan_ipv4_prefix_len, lan_ipv4_gateway,
 		ipv6, ipv6_prefix_len, ipv6_interface, vnc_port, ssh_port, ssh_password,
 		ssh_host_key, port_mapping_limit, snapshot_limit, created_at, expires_at,
 		snapshot_schedule_enabled, snapshot_schedule_interval_hours, snapshot_schedule_time,
@@ -976,7 +978,7 @@ func loadContainers() ([]Container, error) {
 	result := []Container{}
 	for rows.Next() {
 		var c Container
-		var scheduleEnabled, policyBlocked, firewallEnabled, imageLimitConfigured int
+		var scheduleEnabled, policyBlocked, firewallEnabled, imageLimitConfigured, restoreOnHostBoot int
 		var firewallDefaultAction string
 		var firewallRulesJSON, allowedImageIDs sql.NullString
 		var lanIPv4Mode, lanInterface sql.NullString
@@ -988,7 +990,7 @@ func loadContainers() ([]Container, error) {
 			&c.MonthlyTrafficGB, &c.TrafficMode, &c.TrafficInGB,
 			&c.TrafficOutGB, &c.TrafficUsedRX, &c.TrafficUsedTX, &c.TrafficResetDate,
 			&c.IOSpeedMBps, &c.IOReadMBps, &c.IOWriteMBps,
-			&c.Status, &c.IP, &lanIPv4Mode, &lanInterface, &lanIPv4Address, &lanIPv4PrefixLen, &lanIPv4Gateway,
+			&c.Status, &restoreOnHostBoot, &c.IP, &lanIPv4Mode, &lanInterface, &lanIPv4Address, &lanIPv4PrefixLen, &lanIPv4Gateway,
 			&c.IPv6, &c.IPv6PrefixLen, &c.IPv6Interface, &c.VNCPort, &c.SSHPort, &c.SSHPassword,
 			&c.SSHHostKey, &c.PortMappingLimit, &c.SnapshotLimit, &c.CreatedAt, &c.ExpiresAt,
 			&scheduleEnabled, &c.SnapshotScheduleIntervalHours, &c.SnapshotScheduleTime,
@@ -1006,6 +1008,7 @@ func loadContainers() ([]Container, error) {
 		}
 		c.LANIPv4Gateway = lanIPv4Gateway.String
 		c.SnapshotScheduleEnabled = scheduleEnabled != 0
+		c.RestoreOnHostBoot = restoreOnHostBoot != 0
 		c.PolicyBlocked = policyBlocked != 0
 		c.FirewallEnabled = firewallEnabled != 0
 		c.FirewallDefaultAction = normalizeFirewallDefaultAction(firewallDefaultAction)

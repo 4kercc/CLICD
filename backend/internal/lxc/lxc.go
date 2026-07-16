@@ -1730,7 +1730,7 @@ func (m *Manager) StartContainer(id int) error {
 		return err
 	}
 
-	config.UpdateContainerStatus(id, "running")
+	config.UpdateContainerStatusAndRestore(id, "running", true)
 
 	var ip string
 	for retry := 0; retry < 10; retry++ {
@@ -1951,7 +1951,7 @@ func (m *Manager) StopContainer(id int) error {
 
 	status, _ := m.GetContainerStatus(lxcName)
 	if status != "running" {
-		config.UpdateContainerStatus(id, "stopped")
+		config.UpdateContainerStatusAndRestore(id, "stopped", false)
 		m.CleanPortMappings(id)
 		CleanFirewallRules(id)
 		m.cleanupBandwidthLimit(lxcName)
@@ -1966,13 +1966,13 @@ func (m *Manager) StopContainer(id int) error {
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		if strings.Contains(string(output), "not running") {
-			config.UpdateContainerStatus(id, "stopped")
+			config.UpdateContainerStatusAndRestore(id, "stopped", false)
 			return nil
 		}
 		return fmt.Errorf("failed to stop container: %v, output: %s", err, string(output))
 	}
 
-	config.UpdateContainerStatus(id, "stopped")
+	config.UpdateContainerStatusAndRestore(id, "stopped", false)
 	fmt.Printf("Container %d (%s) stopped\n", id, c.Name)
 	return nil
 }
