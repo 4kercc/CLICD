@@ -28,6 +28,11 @@ func GetTemplates() []Template {
 			Description: "Ubuntu 22.04 LTS",
 		},
 		{
+			ID: "debian-trixie", Name: "Debian 13",
+			Distro: "debian", Release: "trixie", Arch: arch,
+			Description: "Debian 13 (Trixie)",
+		},
+		{
 			ID: "debian-bookworm", Name: "Debian 12",
 			Distro: "debian", Release: "bookworm", Arch: arch,
 			Description: "Debian 12 (Bookworm)",

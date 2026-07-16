@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -217,13 +218,34 @@ type DiskIOInfo struct {
 	WriteBps   float64 `json:"write_bps"`
 }
 
+type HostMetricPoint struct {
+	TS           int64   `json:"ts"`
+	CPU          float64 `json:"cpu"`
+	Memory       float64 `json:"memory"`
+	Network      float64 `json:"network"`
+	NetworkRx    float64 `json:"network_rx"`
+	NetworkTx    float64 `json:"network_tx"`
+	DiskIO       float64 `json:"disk_io"`
+	DiskRead     float64 `json:"disk_read"`
+	DiskWrite    float64 `json:"disk_write"`
+	DiskUsagePct float64 `json:"disk_usage_pct"`
+}
+
 var hostCPUMu sync.Mutex
 var lastHostCPU cpuTimes
 var hostIOMu sync.Mutex
 var lastHostIO hostIOSample
+var hostMetricSamplerOnce sync.Once
+var hostMetricMu sync.RWMutex
+var hostMetricHistory []HostMetricPoint
 var egressIPv4Mu sync.Mutex
 var cachedEgressIPv4 lxc.PublicIPInfo
 var cachedEgressIPv4At time.Time
+
+const (
+	hostMetricSampleInterval = 30 * time.Second
+	hostMetricRetention      = 7 * 24 * time.Hour
+)
 
 type cpuTimes struct {
 	Total uint64
@@ -239,6 +261,10 @@ type hostIOSample struct {
 }
 
 func getHostInfo() HostInfo {
+	return getHostInfoWithNetworkDetails(true)
+}
+
+func getHostInfoWithNetworkDetails(includeDetails bool) HostInfo {
 	info := HostInfo{
 		CPU: CpuInfo{Cores: runtime.NumCPU()},
 	}
@@ -246,7 +272,7 @@ func getHostInfo() HostInfo {
 	info.RAM = getMemoryInfo()
 	info.Disk = getDiskInfo()
 	info.CPU.Usage = getCPUUsage()
-	info.Network, info.DiskIO = getHostRates()
+	info.Network, info.DiskIO = getHostRates(includeDetails)
 	info.Load = getLoadInfo()
 	info.Runtime = detectRuntimeProbeQuick()
 	return info
@@ -272,6 +298,79 @@ func detectRuntimeProbeQuick() HostRuntimeProbe {
 		probe.SupportMode = "lxc_only"
 	}
 	return probe
+}
+
+func StartHostMetricSampler() {
+	hostMetricSamplerOnce.Do(func() {
+		appendHostMetricPoint(getHostInfoWithNetworkDetails(false))
+		go func() {
+			ticker := time.NewTicker(hostMetricSampleInterval)
+			defer ticker.Stop()
+			for range ticker.C {
+				appendHostMetricPoint(getHostInfoWithNetworkDetails(false))
+			}
+		}()
+	})
+}
+
+func appendHostMetricPoint(info HostInfo) {
+	memoryPct := 0.0
+	if info.RAM.TotalMB > 0 {
+		memoryPct = clampPercent(float64(info.RAM.UsedMB) / float64(info.RAM.TotalMB) * 100)
+	}
+	diskUsagePct := 0.0
+	if info.Disk.TotalGB > 0 {
+		diskUsagePct = clampPercent(info.Disk.UsedGB / info.Disk.TotalGB * 100)
+	}
+	point := HostMetricPoint{
+		TS:           time.Now().UnixMilli(),
+		CPU:          clampPercent(info.CPU.Usage),
+		Memory:       memoryPct,
+		NetworkRx:    info.Network.RXBps,
+		NetworkTx:    info.Network.TXBps,
+		Network:      info.Network.RXBps + info.Network.TXBps,
+		DiskRead:     info.DiskIO.ReadBps,
+		DiskWrite:    info.DiskIO.WriteBps,
+		DiskIO:       info.DiskIO.ReadBps + info.DiskIO.WriteBps,
+		DiskUsagePct: diskUsagePct,
+	}
+	cutoff := time.Now().Add(-hostMetricRetention).UnixMilli()
+
+	hostMetricMu.Lock()
+	defer hostMetricMu.Unlock()
+
+	keepFrom := 0
+	for keepFrom < len(hostMetricHistory) && hostMetricHistory[keepFrom].TS < cutoff {
+		keepFrom++
+	}
+	if keepFrom > 0 {
+		copy(hostMetricHistory, hostMetricHistory[keepFrom:])
+		hostMetricHistory = hostMetricHistory[:len(hostMetricHistory)-keepFrom]
+	}
+	hostMetricHistory = append(hostMetricHistory, point)
+}
+
+func getHostMetricHistory() []HostMetricPoint {
+	hostMetricMu.RLock()
+	defer hostMetricMu.RUnlock()
+
+	result := make([]HostMetricPoint, len(hostMetricHistory))
+	copy(result, hostMetricHistory)
+	return result
+}
+
+func clampPercent(value float64) float64 {
+	if value < 0 || !isFiniteFloat(value) {
+		return 0
+	}
+	if value > 100 {
+		return 100
+	}
+	return value
+}
+
+func isFiniteFloat(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0)
 }
 
 func getMemoryInfo() MemoryInfo {
@@ -419,20 +518,22 @@ func parseSizeGBf(s string) (float64, error) {
 	return val, err
 }
 
-func getHostRates() (NetworkInfo, DiskIOInfo) {
+func getHostRates(includeDetails bool) (NetworkInfo, DiskIOInfo) {
 	rx, tx := readHostNetworkBytes()
 	readBytes, writeBytes := readHostDiskBytes()
 	now := unixNano()
 
 	network := NetworkInfo{RXBytes: rx, TXBytes: tx}
-	publicIPv4 := detectDisplayPublicIPv4()
-	network.PublicIPv4 = publicIPv4.Address
-	network.PublicIPv4Interface = publicIPv4.Interface
-	network.PublicIPv4Addresses = lxc.DetectFreePublicIPv4Candidates(0)
-	network.IPv6Prefixes = lxc.DetectHostPublicIPv6Prefixes()
-	if len(network.IPv6Prefixes) > 0 {
-		network.PublicIPv6 = network.IPv6Prefixes[0].Address
-		network.PublicIPv6Interface = network.IPv6Prefixes[0].Interface
+	if includeDetails {
+		publicIPv4 := detectDisplayPublicIPv4()
+		network.PublicIPv4 = publicIPv4.Address
+		network.PublicIPv4Interface = publicIPv4.Interface
+		network.PublicIPv4Addresses = lxc.DetectFreePublicIPv4Candidates(0)
+		network.IPv6Prefixes = lxc.DetectHostPublicIPv6Prefixes()
+		if len(network.IPv6Prefixes) > 0 {
+			network.PublicIPv6 = network.IPv6Prefixes[0].Address
+			network.PublicIPv6Interface = network.IPv6Prefixes[0].Interface
+		}
 	}
 	diskIO := DiskIOInfo{ReadBytes: readBytes, WriteBytes: writeBytes}
 

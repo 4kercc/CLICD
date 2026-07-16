@@ -61,6 +61,7 @@ func setupRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/images/enabled", corsMiddleware(api.AuthMiddleware(api.SubUserMiddleware(api.HandleEnabledImages))))
 	mux.HandleFunc("/api/dashboard", corsMiddleware(api.AdminMiddleware(api.HandleDashboard)))
 	mux.HandleFunc("/api/host-info", corsMiddleware(api.AdminMiddleware(api.HandleHostInfo)))
+	mux.HandleFunc("/api/host-history", corsMiddleware(api.AdminMiddleware(api.HandleHostHistory)))
 	mux.HandleFunc("/api/host-report", corsMiddleware(api.AdminMiddleware(api.HandleHostReport)))
 	mux.HandleFunc("/api/snapshots", corsMiddleware(api.AdminMiddleware(api.HandleSnapshots)))
 	mux.HandleFunc("/api/routing/ipv4-scan", corsMiddleware(api.AdminMiddleware(api.HandleRoutingIPv4Scan)))
@@ -104,6 +105,7 @@ func setupRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/images/toggle", corsMiddleware(api.AuthMiddleware(api.HandleImageToggle)))
 	mux.HandleFunc("/api/v1/images/enabled", corsMiddleware(api.AuthMiddleware(api.SubUserMiddleware(api.HandleEnabledImages))))
 	mux.HandleFunc("/api/v1/host-info", corsMiddleware(api.AuthMiddleware(api.HandleHostInfo)))
+	mux.HandleFunc("/api/v1/host-history", corsMiddleware(api.AuthMiddleware(api.HandleHostHistory)))
 	mux.HandleFunc("/api/v1/host-report", corsMiddleware(api.AuthMiddleware(api.HandleHostReport)))
 	mux.HandleFunc("/api/v1/snapshots", corsMiddleware(api.AuthMiddleware(api.ScopeMiddleware("snapshot:read", api.HandleSnapshots))))
 	mux.HandleFunc("/api/v1/routing/ipv4-scan", corsMiddleware(api.AuthMiddleware(api.HandleRoutingIPv4Scan)))
@@ -174,6 +176,8 @@ func setupRoutes(mux *http.ServeMux) {
 func Run() error {
 	// Use embedded frontend files
 	webFS = GetEmbeddedFS()
+	api.StartHostMetricSampler()
+	api.StartContainerMetricSampler()
 
 	mux := http.NewServeMux()
 	setupRoutes(mux)

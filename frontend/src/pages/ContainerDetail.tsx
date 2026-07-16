@@ -32,6 +32,7 @@ import {
   assignIPv6,
   APIResponse,
   Container,
+  ContainerMetricPoint as ContainerMetricSample,
   ContainerUsage,
   createSubUser,
   createContainerSnapshot,
@@ -39,6 +40,7 @@ import {
   deleteContainerSnapshot,
   deletePortMapping,
   getContainer,
+  getContainerHistory,
   getContainerSnapshots,
   getContainerUsage,
   getHostInfo,
@@ -209,39 +211,19 @@ export default function ContainerDetail() {
     }
   }, [containerIdentifier, container?.snapshot_limit])
 
-  const appendUsagePoint = useCallback((nextUsage: ContainerUsage, currentContainer: Container | null) => {
-    if (!containerIdentifier || !currentContainer) return
-
-    const memoryTotalBytes = nextUsage.memory_total_bytes && nextUsage.memory_total_bytes > 0
-      ? nextUsage.memory_total_bytes
-      : currentContainer.ram_mb * 1024 * 1024
-    const memoryPct = memoryTotalBytes > 0
-      ? (nextUsage.memory_usage_bytes / memoryTotalBytes) * 100
-      : 0
-    const networkRx = nextUsage.network_rx_bps || 0
-    const networkTx = nextUsage.network_tx_bps || 0
-    const diskRead = nextUsage.disk_read_bps || 0
-    const diskWrite = nextUsage.disk_write_bps || 0
-
-    const point: MetricPoint = {
-      ts: Date.now(),
-      cpu: clamp((nextUsage.cpu_usage_pct || 0) / (currentContainer.vcpu || 1)),
-      memory: clamp(memoryPct),
-      network: networkRx + networkTx,
-      networkRx,
-      networkTx,
-      diskIO: diskRead + diskWrite,
-      diskRead,
-      diskWrite,
+  const fetchMetricHistory = useCallback(async () => {
+    if (!containerIdentifier) return
+    try {
+      const res = await getContainerHistory(containerIdentifier)
+      const points = (res.data.data || []).map(normalizeContainerMetricSample)
+      if (points.length > 0) {
+        setHistory(points)
+        localStorage.setItem(historyKey(container?.uuid || containerIdentifier), JSON.stringify(points))
+      }
+    } catch (err) {
+      console.error('Failed to fetch metric history:', err)
     }
-
-    setHistory((prev) => {
-      const cutoff = Date.now() - statsRanges['1w']
-      const next = [...prev.filter((item) => item.ts >= cutoff), point]
-      localStorage.setItem(historyKey(currentContainer.uuid || containerIdentifier), JSON.stringify(next))
-      return next
-    })
-  }, [containerIdentifier])
+  }, [containerIdentifier, container?.uuid])
 
   const fetchUsage = useCallback(async () => {
     if (!containerIdentifier) return
@@ -249,12 +231,11 @@ export default function ContainerDetail() {
       const res = await getContainerUsage(containerIdentifier)
       if (res.data.data) {
         setUsage(res.data.data)
-        appendUsagePoint(res.data.data, container)
       }
     } catch (err) {
       console.error('Failed to fetch usage:', err)
     }
-  }, [containerIdentifier, container, appendUsagePoint])
+  }, [containerIdentifier])
 
   useEffect(() => {
     if (!containerIdentifier) return
@@ -295,6 +276,12 @@ export default function ContainerDetail() {
     const timer = window.setInterval(fetchUsage, 5000)
     return () => window.clearInterval(timer)
   }, [fetchUsage])
+
+  useEffect(() => {
+    fetchMetricHistory()
+    const timer = window.setInterval(fetchMetricHistory, 30000)
+    return () => window.clearInterval(timer)
+  }, [fetchMetricHistory])
 
   useEffect(() => {
     if (showSnapshots) fetchSnapshots()
@@ -2489,6 +2476,20 @@ function readHistory(containerName: string): MetricPoint[] {
     return parsed.filter((point) => point.ts >= cutoff)
   } catch {
     return []
+  }
+}
+
+function normalizeContainerMetricSample(point: ContainerMetricSample): MetricPoint {
+  return {
+    ts: point.ts,
+    cpu: clamp(point.cpu),
+    memory: clamp(point.memory),
+    network: point.network || 0,
+    networkRx: point.network_rx || 0,
+    networkTx: point.network_tx || 0,
+    diskIO: point.disk_io || 0,
+    diskRead: point.disk_read || 0,
+    diskWrite: point.disk_write || 0,
   }
 }
 

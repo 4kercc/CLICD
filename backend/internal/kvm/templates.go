@@ -47,10 +47,23 @@ func amd64Images() []Image {
 			URL:         "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img",
 		},
 		{
+			ID: "kvm-debian-trixie", Name: "Debian 13 KVM",
+			Distro: "debian", Release: "trixie", Arch: "amd64",
+			Description: "Debian 13 generic cloud image for KVM",
+			URL:         "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2",
+		},
+		{
 			ID: "kvm-debian-bookworm", Name: "Debian 12 KVM",
 			Distro: "debian", Release: "bookworm", Arch: "amd64",
 			Description: "Debian 12 generic cloud image for KVM",
 			URL:         "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2",
+		},
+		{
+			ID: "kvm-debian-trixie-xfce", Name: "Debian 13 XFCE KVM",
+			Distro: "debian", Release: "trixie", Arch: "amd64",
+			Description: "Debian 13 generic cloud image with XFCE desktop provisioned via cloud-init",
+			URL:         "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2",
+			Desktop:     "xfce",
 		},
 		{
 			ID: "kvm-debian-bookworm-xfce", Name: "Debian 12 XFCE KVM",
@@ -117,6 +130,12 @@ func arm64Images() []Image {
 			Distro: "ubuntu", Release: "jammy", Arch: "arm64",
 			Description: "Ubuntu 22.04 LTS cloud image for ARM64 KVM",
 			URL:         "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-arm64.img",
+		},
+		{
+			ID: "kvm-debian-trixie", Name: "Debian 13 KVM",
+			Distro: "debian", Release: "trixie", Arch: "arm64",
+			Description: "Debian 13 generic cloud image for ARM64 KVM",
+			URL:         "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-arm64.qcow2",
 		},
 		{
 			ID: "kvm-debian-bookworm", Name: "Debian 12 KVM",

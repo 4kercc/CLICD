@@ -247,6 +247,19 @@ export interface HostInfo {
   }
 }
 
+export interface HostMetricPoint {
+  ts: number
+  cpu: number
+  memory: number
+  network: number
+  network_rx: number
+  network_tx: number
+  disk_io: number
+  disk_read: number
+  disk_write: number
+  disk_usage_pct: number
+}
+
 export interface HostProbeReport {
   generated_at: string
   hostname: string
@@ -353,6 +366,18 @@ export interface ContainerUsage {
   load5: number
   load15: number
   guest_metrics?: boolean
+}
+
+export interface ContainerMetricPoint {
+  ts: number
+  cpu: number
+  memory: number
+  network: number
+  network_rx: number
+  network_tx: number
+  disk_io: number
+  disk_read: number
+  disk_write: number
 }
 
 export interface APIResponse<T = unknown> {
@@ -476,6 +501,9 @@ export const resetSSHPassword = (id: ContainerIdentifier, password?: string) =>
 
 export const getContainerUsage = (id: ContainerIdentifier) =>
   api.get<APIResponse<ContainerUsage>>(`/containers/${id}/usage`)
+
+export const getContainerHistory = (id: ContainerIdentifier) =>
+  api.get<APIResponse<ContainerMetricPoint[]>>(`/containers/${id}/history`)
 
 export interface TrafficInfo {
   total_used_bytes: number
@@ -668,6 +696,9 @@ export const getDashboard = () =>
 
 export const getHostInfo = () =>
   api.get<APIResponse<HostInfo>>('/host-info')
+
+export const getHostHistory = () =>
+  api.get<APIResponse<HostMetricPoint[]>>('/host-history')
 
 export const getHostReport = () =>
   api.get<APIResponse<HostProbeReport>>('/host-report')

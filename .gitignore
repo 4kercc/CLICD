@@ -71,3 +71,4 @@ deploy.ps1
 backend/clicd
 api.md
 deploy-arm.ps1
+deploy-dhcp.ps1

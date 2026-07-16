@@ -7,7 +7,7 @@ import ResourceStatsPanel, {
   StatsRangeKey,
   statsRanges,
 } from '../components/ResourceStatsPanel'
-import { DashboardStats, getDashboard, getHostInfo, HostInfo } from '../services/api'
+import { DashboardStats, getDashboard, getHostHistory, getHostInfo, HostInfo, HostMetricPoint as HostMetricSample } from '../services/api'
 
 type HostMetricPoint = {
   ts: number
@@ -30,6 +30,19 @@ export default function Dashboard() {
   const [range, setRange] = useState<StatsRangeKey>('30m')
   const [loading, setLoading] = useState(true)
 
+  const fetchHistory = useCallback(async () => {
+    try {
+      const res = await getHostHistory()
+      const points = (res.data.data || []).map(normalizeHostMetricSample)
+      if (points.length > 0) {
+        setHistory(points)
+        localStorage.setItem(hostHistoryKey, JSON.stringify(points))
+      }
+    } catch (err) {
+      console.error(err)
+    }
+  }, [])
+
   const fetchData = useCallback(async () => {
     try {
       const [dashRes, hostRes] = await Promise.all([getDashboard(), getHostInfo()])
@@ -37,7 +50,6 @@ export default function Dashboard() {
       if (hostRes.data.data) {
         const nextHost = hostRes.data.data
         setHost(nextHost)
-        appendHostPoint(nextHost, setHistory)
       }
     } catch (err) {
       console.error(err)
@@ -47,10 +59,15 @@ export default function Dashboard() {
   }, [])
 
   useEffect(() => {
+    fetchHistory()
     fetchData()
     const interval = window.setInterval(fetchData, 5000)
-    return () => window.clearInterval(interval)
-  }, [fetchData])
+    const historyInterval = window.setInterval(fetchHistory, 30000)
+    return () => {
+      window.clearInterval(interval)
+      window.clearInterval(historyInterval)
+    }
+  }, [fetchData, fetchHistory])
 
   if (loading) {
     return (
@@ -172,31 +189,6 @@ function SummaryCard({
   )
 }
 
-function appendHostPoint(host: HostInfo, setHistory: (updater: (prev: HostMetricPoint[]) => HostMetricPoint[]) => void) {
-  const networkRx = host.network.rx_bps || 0
-  const networkTx = host.network.tx_bps || 0
-  const diskRead = host.disk_io.read_bps || 0
-  const diskWrite = host.disk_io.write_bps || 0
-  const point: HostMetricPoint = {
-    ts: Date.now(),
-    cpu: clamp(host.cpu.usage_pct),
-    memory: host.ram.total_mb > 0 ? clamp((host.ram.used_mb / host.ram.total_mb) * 100) : 0,
-    network: networkRx + networkTx,
-    networkRx,
-    networkTx,
-    diskIO: diskRead + diskWrite,
-    diskRead,
-    diskWrite,
-  }
-
-  setHistory((prev) => {
-    const cutoff = Date.now() - statsRanges['1w']
-    const next = [...prev.filter((item) => item.ts >= cutoff), point]
-    localStorage.setItem(hostHistoryKey, JSON.stringify(next))
-    return next
-  })
-}
-
 function readHostHistory(): HostMetricPoint[] {
   try {
     const raw = localStorage.getItem(hostHistoryKey)
@@ -219,6 +211,20 @@ function toChartPoints(history: HostMetricPoint[], key: keyof Omit<HostMetricPoi
     const value = Number(point[key])
     return Number.isFinite(value) ? [{ ts: point.ts, value }] : []
   })
+}
+
+function normalizeHostMetricSample(point: HostMetricSample): HostMetricPoint {
+  return {
+    ts: point.ts,
+    cpu: clamp(point.cpu),
+    memory: clamp(point.memory),
+    network: point.network || 0,
+    networkRx: point.network_rx || 0,
+    networkTx: point.network_tx || 0,
+    diskIO: point.disk_io || 0,
+    diskRead: point.disk_read || 0,
+    diskWrite: point.disk_write || 0,
+  }
 }
 
 function clamp(value: number) {

@@ -967,6 +967,7 @@ function getTemplateName(id: string) {
   const map: Record<string, string> = {
     'ubuntu-noble': 'Ubuntu 24.04',
     'ubuntu-jammy': 'Ubuntu 22.04',
+    'debian-trixie': 'Debian 13',
     'debian-bookworm': 'Debian 12',
     'debian-bullseye': 'Debian 11',
     'alpine-3.21': 'Alpine 3.21',
@@ -976,6 +977,8 @@ function getTemplateName(id: string) {
     'rockylinux-10': 'Rocky 10',
     'kvm-ubuntu-noble': 'Ubuntu 24.04',
     'kvm-ubuntu-jammy': 'Ubuntu 22.04',
+    'kvm-debian-trixie': 'Debian 13',
+    'kvm-debian-trixie-xfce': 'Debian 13 XFCE',
     'kvm-debian-bookworm': 'Debian 12',
     'kvm-debian-bullseye': 'Debian 11',
     'kvm-rockylinux-9': 'Rocky 9',

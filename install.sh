@@ -537,6 +537,7 @@ remove_clicd_lxc_image_cache() {
     for image in \
         "ubuntu noble amd64" \
         "ubuntu jammy amd64" \
+        "debian trixie amd64" \
         "debian bookworm amd64" \
         "debian bullseye amd64" \
         "alpine 3.21 amd64" \
@@ -546,6 +547,7 @@ remove_clicd_lxc_image_cache() {
         "rockylinux 10 amd64" \
         "ubuntu noble arm64" \
         "ubuntu jammy arm64" \
+        "debian trixie arm64" \
         "debian bookworm arm64" \
         "debian bullseye arm64" \
         "alpine 3.21 arm64" \

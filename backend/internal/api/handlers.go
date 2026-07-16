@@ -132,6 +132,11 @@ func HandleSingleContainer(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		getUsage(w, r, id)
+	case action == "history" && r.Method == http.MethodGet:
+		if !requireScope(w, r, "container:read") {
+			return
+		}
+		jsonResponse(w, http.StatusOK, APIResponse{Success: true, Data: getContainerMetricHistory(c)})
 	case action == "traffic" && r.Method == http.MethodGet:
 		if !requireScope(w, r, "container:read") {
 			return
@@ -659,6 +664,18 @@ func HandleHostInfo(w http.ResponseWriter, r *http.Request) {
 	}
 	info := getHostInfo()
 	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Data: info})
+}
+
+// HandleHostHistory returns host resource samples collected by the server.
+func HandleHostHistory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
+		return
+	}
+	if !requireScope(w, r, "host:read") {
+		return
+	}
+	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Data: getHostMetricHistory()})
 }
 
 func resetSSHPassword(w http.ResponseWriter, r *http.Request, id int) {

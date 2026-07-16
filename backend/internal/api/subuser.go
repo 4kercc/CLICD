@@ -646,7 +646,7 @@ func isSubUserBlockedAction(action string, method string) bool {
 		return method != http.MethodGet
 	}
 	switch action {
-	case "usage", "traffic":
+	case "usage", "traffic", "history":
 		return method != http.MethodGet
 	default:
 		return true
@@ -665,7 +665,7 @@ func isSubUserContainerActionAllowed(action string, method string) bool {
 		return method == http.MethodGet
 	}
 	switch {
-	case action == "usage" || action == "traffic" || action == "random-port":
+	case action == "usage" || action == "traffic" || action == "history" || action == "random-port":
 		return method == http.MethodGet
 	case action == "snapshots":
 		return method == http.MethodGet || method == http.MethodPost
