@@ -795,6 +795,7 @@ const exact: Record<string, string> = {
   '保存容器配置': 'Saving container configuration',
   '写入容器网络配置': 'Writing container network configuration',
   '安装并配置 SSH 服务': 'Installing and configuring SSH',
+  '检测并预配置 SSH 服务': 'Detecting and preconfiguring SSH',
   '转换非特权容器文件权限': 'Converting unprivileged container permissions',
   '设置容器登录凭据': 'Setting container login credentials',
   '启动容器并等待网络就绪': 'Starting container and waiting for network',

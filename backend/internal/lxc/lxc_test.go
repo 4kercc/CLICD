@@ -121,6 +121,23 @@ func TestManagedPrlimitLinesDoNotSetNproc(t *testing.T) {
 	}
 }
 
+func TestRootfsHasSSHD(t *testing.T) {
+	rootfs := t.TempDir()
+	if rootfsHasSSHD(rootfs) {
+		t.Fatal("empty rootfs unexpectedly reports sshd")
+	}
+	sshd := filepath.Join(rootfs, "usr", "sbin", "sshd")
+	if err := os.MkdirAll(filepath.Dir(sshd), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sshd, []byte("#!/bin/sh\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if !rootfsHasSSHD(rootfs) {
+		t.Fatal("executable sshd was not detected")
+	}
+}
+
 func TestSameFilesystemPathResolvesContainerStorageSymlink(t *testing.T) {
 	base := t.TempDir()
 	storageContainer := filepath.Join(base, "storage", "ct-1")

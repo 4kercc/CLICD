@@ -545,9 +545,11 @@ func (m *Manager) CreateContainer(cfg ContainerConfig) error {
 			fmt.Printf("Warning: failed to install IPv6 init in %s: %v\n", lxcName, err)
 		}
 	}
-	cfg.ReportProgress("ssh", "安装并配置 SSH 服务")
-	if err := m.preconfigureSSH(rootfsPath, cfg.TemplateID, sshAccess.Mode); err != nil {
+	cfg.ReportProgress("ssh", "检测并预配置 SSH 服务")
+	if configured, err := m.preconfigureSSHIfInstalled(rootfsPath, cfg.TemplateID, sshAccess.Mode); err != nil {
 		fmt.Printf("Warning: failed to pre-configure SSH in %s: %v\n", lxcName, err)
+	} else if !configured {
+		fmt.Printf("SSH server is not bundled in %s; installation deferred until after first boot\n", lxcName)
 	}
 	if sshAccess.PublicKey != "" {
 		if err := m.installRootAuthorizedKey(rootfsPath, sshAccess.PublicKey); err != nil {
@@ -896,6 +898,25 @@ func (m *Manager) preconfigureSSH(rootfsPath, templateID string, sshAuthMode str
 	}
 	fmt.Printf("SSH pre-configured in rootfs\n")
 	return nil
+}
+
+// preconfigureSSHIfInstalled keeps image creation independent from external
+// package mirrors. Minimal images install SSH asynchronously after first boot.
+func (m *Manager) preconfigureSSHIfInstalled(rootfsPath, templateID, sshAuthMode string) (bool, error) {
+	if !rootfsHasSSHD(rootfsPath) {
+		return false, nil
+	}
+	return true, m.preconfigureSSH(rootfsPath, templateID, sshAuthMode)
+}
+
+func rootfsHasSSHD(rootfsPath string) bool {
+	for _, relativePath := range []string{"usr/sbin/sshd", "sbin/sshd", "usr/bin/sshd"} {
+		info, err := os.Stat(filepath.Join(rootfsPath, relativePath))
+		if err == nil && !info.IsDir() {
+			return true
+		}
+	}
+	return false
 }
 
 // applyResourceLimits applies cgroup v2 limits and mandatory security hardening to container config.
@@ -1877,9 +1898,7 @@ func (m *Manager) StartContainer(id int) error {
 		if err := m.ensureLANHostAccess(c); err != nil {
 			fmt.Printf("Warning: failed to prepare LAN IPv4 host access for %s: %v\n", lxcName, err)
 		}
-		if err := m.EnsureSSH(id); err != nil {
-			return err
-		}
+		m.WarmSSHAsync(id, "container start")
 	}
 
 	if current := config.FindContainer(id); current != nil {
@@ -3336,8 +3355,10 @@ func (m *Manager) ReinstallContainer(id int, templateID string, authConfig ...Co
 		}
 	}
 	c.SSHPassword = sshAccess.Password
-	if err := m.preconfigureSSH(rootfsPath, templateID, sshAccess.Mode); err != nil {
+	if configured, err := m.preconfigureSSHIfInstalled(rootfsPath, templateID, sshAccess.Mode); err != nil {
 		fmt.Printf("Warning: failed to pre-configure SSH in %s after reinstall: %v\n", lxcName, err)
+	} else if !configured {
+		fmt.Printf("SSH server is not bundled in %s; installation deferred until after reinstall boot\n", lxcName)
 	}
 	if sshAccess.PublicKey != "" {
 		if err := m.installRootAuthorizedKey(rootfsPath, sshAccess.PublicKey); err != nil {
