@@ -139,50 +139,35 @@ func buildStorageInfo() storageInfoResponse {
 }
 
 func normalizeStoragePoolsRequest(items []config.StoragePool) ([]config.StoragePool, error) {
+	return normalizeStoragePoolsRequestWithDisks(items, detectStorageDisks())
+}
+
+func normalizeStoragePoolsRequestWithDisks(items []config.StoragePool, disks []storageDiskInfo) ([]config.StoragePool, error) {
 	if len(items) == 0 {
 		return nil, fmt.Errorf("at least one mounted storage disk configuration must be retained")
 	}
 	result := make([]config.StoragePool, 0, len(items))
 	seen := map[string]bool{}
 	defaultSeen := map[string]bool{}
-	disks := detectStorageDisks()
 	for _, item := range items {
-		item.ID = strings.TrimSpace(item.ID)
-		item.Name = strings.TrimSpace(item.Name)
-		item.Path = filepath.Clean(strings.TrimSpace(item.Path))
-		item.MountPoint = filepath.Clean(strings.TrimSpace(item.MountPoint))
-		if item.MountPoint == "." {
-			item.MountPoint = ""
+		disk, managedPath, err := storageDiskForPoolRequest(item, disks)
+		if err != nil {
+			return nil, err
 		}
-		if item.Name == "" {
-			return nil, fmt.Errorf("storage pool name is required")
+		id, name := storagePoolIdentity(disk)
+		if seen[id] {
+			return nil, fmt.Errorf("duplicate storage disk: %s", disk.MountPoint)
 		}
-		if item.ID == "" {
-			item.ID = storageID(item.Name)
-		}
-		if seen[item.ID] {
-			return nil, fmt.Errorf("duplicate storage pool ID: %s", item.ID)
-		}
-		seen[item.ID] = true
-		if !filepath.IsAbs(item.Path) {
-			return nil, fmt.Errorf("%s path must be absolute", item.Name)
-		}
-		detectedMountPoint := bestMountPointForPath(item.Path, disks)
-		if detectedMountPoint == "" {
-			return nil, fmt.Errorf("%s path is not on an available mounted storage disk", item.Name)
-		}
-		if item.MountPoint != "" && filepath.Clean(item.MountPoint) != filepath.Clean(detectedMountPoint) {
-			return nil, fmt.Errorf("%s storage disk mount point has changed; refresh and try again", item.Name)
-		}
-		item.MountPoint = detectedMountPoint
-		item.ContentTypes = normalizeStorageContentTypes(item.ContentTypes)
-		item.DefaultContents = normalizeStorageContentTypes(item.DefaultContents)
+		seen[id] = true
+
+		contentTypes := normalizeStorageContentTypes(item.ContentTypes)
+		defaultContents := normalizeStorageContentTypes(item.DefaultContents)
 		allowed := map[string]bool{}
-		for _, content := range item.ContentTypes {
+		for _, content := range contentTypes {
 			allowed[content] = true
 		}
-		defaults := make([]string, 0, len(item.DefaultContents))
-		for _, content := range item.DefaultContents {
+		defaults := make([]string, 0, len(defaultContents))
+		for _, content := range defaultContents {
 			if !allowed[content] {
 				continue
 			}
@@ -192,25 +177,93 @@ func normalizeStoragePoolsRequest(items []config.StoragePool) ([]config.StorageP
 			defaultSeen[content] = true
 			defaults = append(defaults, content)
 		}
-		item.DefaultContents = defaults
-		result = append(result, item)
+		result = append(result, config.StoragePool{
+			ID:              id,
+			Name:            name,
+			Path:            managedPath,
+			MountPoint:      disk.MountPoint,
+			ContentTypes:    contentTypes,
+			DefaultContents: defaults,
+			Enabled:         item.Enabled,
+		})
 	}
 	return result, nil
 }
 
-func normalizeStorageContentTypes(values []string) []string {
-	valid := map[string]bool{
-		config.StorageContentLXC:       true,
-		config.StorageContentKVM:       true,
-		config.StorageContentImages:    true,
-		config.StorageContentSnapshots: true,
-		config.StorageContentBackups:   true,
+func storageDiskForPoolRequest(item config.StoragePool, disks []storageDiskInfo) (storageDiskInfo, string, error) {
+	requestedMount := filepath.Clean(strings.TrimSpace(item.MountPoint))
+	if requestedMount == "." {
+		requestedMount = ""
 	}
+	requestedPath := filepath.Clean(strings.TrimSpace(item.Path))
+	if requestedPath == "." {
+		requestedPath = ""
+	}
+	for _, disk := range disks {
+		mountPoint := filepath.Clean(disk.MountPoint)
+		managedPath := managedStoragePath(mountPoint)
+		mountMatches := requestedMount != "" && requestedMount == mountPoint
+		pathMatches := requestedPath != "" && requestedPath == managedPath
+		if !mountMatches && !pathMatches {
+			continue
+		}
+		if requestedMount != "" && !mountMatches {
+			return storageDiskInfo{}, "", fmt.Errorf("storage disk mount point has changed; refresh and try again")
+		}
+		if requestedPath != "" && !pathMatches {
+			return storageDiskInfo{}, "", fmt.Errorf("custom storage paths are not allowed; refresh and try again")
+		}
+		return disk, managedPath, nil
+	}
+	return storageDiskInfo{}, "", fmt.Errorf("storage disk is not mounted or is no longer available")
+}
+
+func storagePoolIdentity(disk storageDiskInfo) (string, string) {
+	mountPoint := filepath.Clean(disk.MountPoint)
+	if mountPoint == string(os.PathSeparator) {
+		return "disk-root", "system (/)"
+	}
+	baseName := filepath.Base(mountPoint)
+	if baseName == "" || baseName == "." || baseName == string(os.PathSeparator) {
+		baseName = strings.TrimSpace(disk.Name)
+	}
+	if baseName == "" {
+		baseName = "storage"
+	}
+	devicePath := strings.TrimSpace(disk.Path)
+	if devicePath == "" {
+		devicePath = strings.TrimSpace(disk.Name)
+	}
+	return "disk-" + storageID(baseName), fmt.Sprintf("%s (%s)", baseName, devicePath)
+}
+
+func managedStoragePath(mountPoint string) string {
+	if filepath.Clean(mountPoint) == string(os.PathSeparator) {
+		return filepath.Join(string(os.PathSeparator), "var", "lib", "clicd")
+	}
+	return filepath.Join(filepath.Clean(mountPoint), "clicd")
+}
+
+func normalizeStorageContentTypes(values []string) []string {
 	seen := map[string]bool{}
 	result := []string{}
 	for _, value := range values {
-		next := strings.ToLower(strings.TrimSpace(value))
-		if !valid[next] || seen[next] {
+		var next string
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case config.StorageContentLXC:
+			next = config.StorageContentLXC
+		case config.StorageContentKVM:
+			next = config.StorageContentKVM
+		case config.StorageContentImages:
+			next = config.StorageContentImages
+		case config.StorageContentSnapshots:
+			next = config.StorageContentSnapshots
+		case config.StorageContentBackups:
+			next = config.StorageContentBackups
+		default:
+			continue
+		}
+		if seen[next] {
 			continue
 		}
 		seen[next] = true

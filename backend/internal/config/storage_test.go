@@ -1,6 +1,30 @@
 package config
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+)
+
+func TestNormalizeStoragePoolsReplacesPersistedCustomPath(t *testing.T) {
+	previousConfig := AppConfig
+	t.Cleanup(func() { AppConfig = previousConfig })
+	mountPoint := filepath.Join(t.TempDir(), "data")
+
+	AppConfig = &ClicdConfig{StoragePools: []StoragePool{{
+		ID:         "data",
+		Name:       "data",
+		Path:       filepath.Join(t.TempDir(), "uncontrolled"),
+		MountPoint: mountPoint,
+		Enabled:    true,
+	}}}
+	if !normalizeStoragePools() {
+		t.Fatal("expected custom path normalization to report a change")
+	}
+	want := managedStoragePoolPath(mountPoint)
+	if got := AppConfig.StoragePools[0].Path; got != want {
+		t.Fatalf("normalized path = %q, want %q", got, want)
+	}
+}
 
 func TestSelectStoragePoolForContent(t *testing.T) {
 	previousConfig := AppConfig

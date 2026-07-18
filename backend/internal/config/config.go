@@ -223,6 +223,13 @@ func normalizeStoragePools() bool {
 		if pool.MountPoint == "." {
 			pool.MountPoint = ""
 		}
+		if pool.MountPoint != "" {
+			managedPath := managedStoragePoolPath(pool.MountPoint)
+			if pool.Path != managedPath {
+				pool.Path = managedPath
+				changed = true
+			}
+		}
 		if pool.ID == "" {
 			pool.ID = storagePoolIDFromName(pool.Name, pool.Path)
 			changed = true
@@ -262,6 +269,14 @@ func normalizeStoragePools() bool {
 	}
 	AppConfig.StoragePools = result
 	return changed
+}
+
+func managedStoragePoolPath(mountPoint string) string {
+	mountPoint = filepath.Clean(strings.TrimSpace(mountPoint))
+	if mountPoint == string(os.PathSeparator) {
+		return filepath.Join(string(os.PathSeparator), "var", "lib", "clicd")
+	}
+	return filepath.Join(mountPoint, "clicd")
 }
 
 func storagePoolIDFromName(name, path string) string {

@@ -11,6 +11,17 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+func TestLocalImageIDRejectsPathExpressions(t *testing.T) {
+	for _, id := range []string{"", ".", "..", "../../etc/passwd", `..\\..\\windows`, "/absolute"} {
+		if got := localImageID(id); got != "__invalid_image_id__" {
+			t.Fatalf("localImageID(%q) = %q", id, got)
+		}
+	}
+	if got := localImageID("debian-13-kvm"); got != "debian-13-kvm" {
+		t.Fatalf("localImageID(valid) = %q", got)
+	}
+}
+
 func TestChpasswdStdinPreservesShellMetacharacters(t *testing.T) {
 	password := `pa'";$(touch /tmp/pwned); echo #\\word`
 	got, err := chpasswdStdin("root", password)

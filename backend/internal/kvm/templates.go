@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"clicd/internal/config"
 )
@@ -195,7 +196,7 @@ func ImagePath(id string) string {
 	if img != nil && img.Distro == "windows" {
 		ext = ".iso"
 	}
-	fileName := id + ext
+	fileName := localImageID(id) + ext
 	for _, pool := range config.StoragePoolsForContent(config.StorageContentImages) {
 		candidate := filepath.Join(pool.Path, "images", "kvm", fileName)
 		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
@@ -207,6 +208,15 @@ func ImagePath(id string) string {
 		return legacy
 	}
 	return filepath.Join(CacheDir(), fileName)
+}
+
+func localImageID(id string) string {
+	trimmed := strings.TrimSpace(id)
+	local := filepath.Base(trimmed)
+	if trimmed == "" || local == "." || local == ".." || local != trimmed || strings.ContainsAny(trimmed, `/\\`) {
+		return "__invalid_image_id__"
+	}
+	return local
 }
 
 // IsWindowsImage returns true if the image distro is "windows".

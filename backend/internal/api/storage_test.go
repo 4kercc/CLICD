@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"clicd/internal/config"
 )
 
 func TestIsUsableStorageMount(t *testing.T) {
@@ -52,6 +54,46 @@ func TestBestMountPointForPath(t *testing.T) {
 	for _, tt := range tests {
 		if got := bestMountPointForPath(tt.path, disks); got != tt.want {
 			t.Fatalf("bestMountPointForPath(%q) = %q, want %q", tt.path, got, tt.want)
+		}
+	}
+}
+
+func TestNormalizeStoragePoolsUsesServerManagedPath(t *testing.T) {
+	disks := []storageDiskInfo{
+		{Path: "/dev/sda2", MountPoint: "/"},
+		{Path: "/dev/sdb1", MountPoint: "/mnt/data"},
+	}
+	items := []config.StoragePool{{
+		ID:              "disk-data",
+		Name:            "data",
+		Path:            "/mnt/data/clicd",
+		MountPoint:      "/mnt/data",
+		ContentTypes:    []string{config.StorageContentLXC},
+		DefaultContents: []string{config.StorageContentLXC},
+		Enabled:         true,
+	}}
+	pools, err := normalizeStoragePoolsRequestWithDisks(items, disks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPath := filepath.Join(filepath.Clean("/mnt/data"), "clicd")
+	if len(pools) != 1 || pools[0].ID != "disk-data" || pools[0].Name != "data (/dev/sdb1)" || pools[0].Path != wantPath || pools[0].MountPoint != "/mnt/data" {
+		t.Fatalf("unexpected normalized pools: %#v", pools)
+	}
+}
+
+func TestNormalizeStoragePoolsRejectsUncontrolledPath(t *testing.T) {
+	disks := []storageDiskInfo{{Path: "/dev/sdb1", MountPoint: "/mnt/data"}}
+	for _, path := range []string{"/etc", "/mnt/data/clicd/../../etc", "/mnt/data/other"} {
+		_, err := normalizeStoragePoolsRequestWithDisks([]config.StoragePool{{
+			ID:         "disk-data",
+			Name:       "data",
+			Path:       path,
+			MountPoint: "/mnt/data",
+			Enabled:    true,
+		}}, disks)
+		if err == nil {
+			t.Fatalf("path %q was accepted", path)
 		}
 	}
 }
