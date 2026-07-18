@@ -1,0 +1,90 @@
+package config
+
+import "testing"
+
+func TestSelectStoragePoolForContent(t *testing.T) {
+	previousConfig := AppConfig
+	previousProbe := probeStoragePoolFreeBytes
+	t.Cleanup(func() {
+		AppConfig = previousConfig
+		probeStoragePoolFreeBytes = previousProbe
+	})
+
+	AppConfig = &ClicdConfig{StoragePools: []StoragePool{
+		{
+			ID:              "primary",
+			Path:            "/primary",
+			ContentTypes:    []string{StorageContentLXC},
+			DefaultContents: []string{StorageContentLXC},
+			Enabled:         true,
+		},
+		{
+			ID:           "large",
+			Path:         "/large",
+			ContentTypes: []string{StorageContentLXC},
+			Enabled:      true,
+		},
+		{
+			ID:           "small",
+			Path:         "/small",
+			ContentTypes: []string{StorageContentLXC},
+			Enabled:      true,
+		},
+	}}
+
+	free := map[string]int64{
+		"primary": 20 * 1024 * 1024 * 1024,
+		"large":   50 * 1024 * 1024 * 1024,
+		"small":   10 * 1024 * 1024 * 1024,
+	}
+	probeStoragePoolFreeBytes = func(pool StoragePool) (int64, bool) {
+		value, ok := free[pool.ID]
+		return value, ok
+	}
+
+	pool, err := SelectStoragePoolForContent(StorageContentLXC, "", 5*1024*1024*1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pool.ID != "primary" {
+		t.Fatalf("selected %q, want configured default primary", pool.ID)
+	}
+
+	free["primary"] = 128 * 1024 * 1024
+	pool, err = SelectStoragePoolForContent(StorageContentLXC, "", 5*1024*1024*1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pool.ID != "large" {
+		t.Fatalf("selected %q, want largest fallback pool", pool.ID)
+	}
+
+	pool, err = SelectStoragePoolForContent(StorageContentLXC, "small", 5*1024*1024*1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pool.ID != "small" {
+		t.Fatalf("selected %q, want requested pool", pool.ID)
+	}
+}
+
+func TestSelectStoragePoolRequiresEnabledContent(t *testing.T) {
+	previousConfig := AppConfig
+	previousProbe := probeStoragePoolFreeBytes
+	t.Cleanup(func() {
+		AppConfig = previousConfig
+		probeStoragePoolFreeBytes = previousProbe
+	})
+
+	AppConfig = &ClicdConfig{StoragePools: []StoragePool{{
+		ID:           "primary",
+		Path:         "/primary",
+		ContentTypes: []string{StorageContentLXC},
+		Enabled:      true,
+	}}}
+	probeStoragePoolFreeBytes = func(StoragePool) (int64, bool) { return 100 * 1024 * 1024 * 1024, true }
+
+	if _, err := SelectStoragePoolForContent(StorageContentSnapshots, "", 0); err == nil {
+		t.Fatal("expected snapshots selection to fail when no pool enables snapshots")
+	}
+}

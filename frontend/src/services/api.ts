@@ -75,6 +75,8 @@ export interface Container {
   uuid: string
   name: string
   virtualization?: string
+  storage_pool_id?: string
+  storage_path?: string
   template: string
   vcpu: number
   ram_mb: number
@@ -143,6 +145,7 @@ export interface CreateContainerRequest {
   name: string
   virtualization: string
   template_id: string
+  storage_pool_id?: string
   vcpu: number
   cpu_percent: number
   ram_mb: number
@@ -178,6 +181,51 @@ export interface CreateContainerRequest {
   allowed_image_ids?: string[]
   image_limit_configured?: boolean
   expires_at: string
+}
+
+export interface StoragePool {
+  id: string
+  name: string
+  path: string
+  content_types: string[]
+  default_contents?: string[]
+  enabled: boolean
+  available?: boolean
+  exists?: boolean
+  size_bytes?: number
+  used_bytes?: number
+  free_bytes?: number
+  mount_point?: string
+  clicd_used_bytes?: number
+  content_usage?: StorageContentUsage[]
+  error?: string
+}
+
+export interface StorageContentUsage {
+  content_type: string
+  size_bytes: number
+}
+
+export interface StorageDisk {
+  name: string
+  path: string
+  type: string
+  fstype: string
+  mount_point: string
+  model: string
+  size_bytes: number
+  used_bytes: number
+  free_bytes: number
+  storage_pool_id?: string
+  storage_path?: string
+  clicd_used_bytes?: number
+  content_usage?: StorageContentUsage[]
+}
+
+export interface StorageInfo {
+  pools: StoragePool[]
+  disks: StorageDisk[]
+  content_types: string[]
 }
 
 export interface ReinstallContainerOptions {
@@ -256,6 +304,10 @@ export interface HostInfo {
     nested_detail: string
     support_mode: string
   }
+}
+
+export interface CreateSnapshotOptions {
+  storage_pool_id?: string
 }
 
 export interface HostMetricPoint {
@@ -429,6 +481,18 @@ export interface AuditLog {
 
 export const getLoginLogs = () =>
   api.get<APIResponse<LoginLog[]>>('/login-logs')
+
+export interface TaskQueueSettings {
+  concurrency: number
+  active: number
+  pending: number
+}
+
+export const getTaskQueueSettings = () =>
+  api.get<APIResponse<TaskQueueSettings>>('/task-queue/settings')
+
+export const updateTaskQueueSettings = (concurrency: number) =>
+  api.put<APIResponse<TaskQueueSettings>>('/task-queue/settings', { concurrency })
 
 export interface SSLCertificateInfo {
   subject: string
@@ -741,6 +805,12 @@ export const getHostHistory = () =>
 export const getHostReport = () =>
   api.get<APIResponse<HostProbeReport>>('/host-report')
 
+export const getStorageInfo = () =>
+  api.get<APIResponse<StorageInfo>>('/storage')
+
+export const updateStoragePools = (pools: StoragePool[]) =>
+  api.put<APIResponse<StorageInfo>>('/storage', { pools })
+
 // Snapshots
 export interface Snapshot {
   id: string
@@ -775,8 +845,8 @@ export const getSnapshots = () =>
 export const getContainerSnapshots = (id: ContainerIdentifier) =>
   api.get<APIResponse<ContainerSnapshotsResponse>>(`/containers/${id}/snapshots`)
 
-export const createContainerSnapshot = (id: ContainerIdentifier) =>
-  api.post<APIResponse<Snapshot>>(`/containers/${id}/snapshots`, {}, { timeout: 600000 })
+export const createContainerSnapshot = (id: ContainerIdentifier, options?: CreateSnapshotOptions) =>
+  api.post<APIResponse<Snapshot>>(`/containers/${id}/snapshots`, options || {}, { timeout: 600000 })
 
 export const deleteContainerSnapshot = (id: ContainerIdentifier, snapshotId: string) =>
   api.delete<APIResponse>(`/containers/${id}/snapshots/${snapshotId}`, { timeout: 600000 })
@@ -818,6 +888,8 @@ export interface Task {
   container_name: string
   status: string
   error?: string
+  stage?: string
+  stage_detail?: string
   created_at: string
   template_id?: string
   config?: CreateContainerRequest

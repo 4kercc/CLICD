@@ -147,12 +147,12 @@ func trafficByRuntime(id int) map[string]interface{} {
 	return lxcManager.GetTrafficInfo(id)
 }
 
-func createSnapshotByRuntime(id int, createdBy string, scheduled bool, rotateLimit int) (config.Snapshot, error) {
+func createSnapshotByRuntime(id int, createdBy string, scheduled bool, rotateLimit int, storagePoolID ...string) (config.Snapshot, error) {
 	c := config.FindContainer(id)
 	if c != nil && c.IsKVM() {
-		return kvmManager.CreateSnapshot(id, createdBy, scheduled, rotateLimit)
+		return kvmManager.CreateSnapshot(id, createdBy, scheduled, rotateLimit, storagePoolID...)
 	}
-	return lxcManager.CreateSnapshot(id, createdBy, scheduled, rotateLimit)
+	return lxcManager.CreateSnapshot(id, createdBy, scheduled, rotateLimit, storagePoolID...)
 }
 
 func deleteSnapshotByRuntime(snapshotID string) error {

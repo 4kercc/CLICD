@@ -1,23 +1,38 @@
 import { Dispatch, SetStateAction, useCallback, useEffect, useState } from 'react'
-import { Clock, Globe, Lock, LogIn, Monitor, RefreshCw, ShieldCheck, Terminal, Upload, UserCog } from 'lucide-react'
+import { Clock, Globe, ListTodo, Lock, LogIn, Minus, Monitor, Plus, RefreshCw, Save, ShieldCheck, Terminal, Upload, UserCog } from 'lucide-react'
 import {
   changePassword,
   changeUsername,
   getLoginLogs,
   getSSLSettings,
+  getTaskQueueSettings,
   getWebSSHOriginSettings,
   LoginLog,
   SSLSettings,
+  TaskQueueSettings,
+  updateTaskQueueSettings,
   updateSSLSettings,
   updateWebSSHOriginSettings,
   WebSSHOriginSettings,
 } from '../services/api'
 import { useDialog } from '../components/Dialog'
 import { useAuth } from '../contexts/AuthContext'
+import { useLanguage } from '../contexts/LanguageContext'
+
+type SettingsSection = 'tasks' | 'account' | 'webssh' | 'ssl' | 'logs'
+
+const settingsSections = [
+  { id: 'tasks', label: '任务队列', icon: ListTodo },
+  { id: 'account', label: '账号设置', icon: UserCog },
+  { id: 'webssh', label: 'WebSSH 访问', icon: Terminal },
+  { id: 'ssl', label: 'SSL 证书', icon: ShieldCheck },
+  { id: 'logs', label: '登录日志', icon: LogIn },
+] as const
 
 export default function Settings() {
   const dialog = useDialog()
   const { username } = useAuth()
+  const { t } = useLanguage()
   const [logs, setLogs] = useState<LoginLog[]>([])
   const [loading, setLoading] = useState(true)
   const [logPage, setLogPage] = useState(1)
@@ -39,6 +54,10 @@ export default function Settings() {
   const [webSSHOrigins, setWebSSHOrigins] = useState<WebSSHOriginSettings | null>(null)
   const [webSSHOriginsText, setWebSSHOriginsText] = useState('')
   const [savingWebSSHOrigins, setSavingWebSSHOrigins] = useState(false)
+  const [taskQueue, setTaskQueue] = useState<TaskQueueSettings | null>(null)
+  const [taskConcurrency, setTaskConcurrency] = useState(2)
+  const [savingTaskQueue, setSavingTaskQueue] = useState(false)
+  const [activeSection, setActiveSection] = useState<SettingsSection>('tasks')
 
   const fetchLogs = useCallback(async () => {
     try {
@@ -78,13 +97,49 @@ export default function Settings() {
     }
   }, [])
 
+  const fetchTaskQueue = useCallback(async () => {
+    try {
+      const res = await getTaskQueueSettings()
+      const data = res.data.data
+      if (!data) return
+      setTaskQueue(data)
+      setTaskConcurrency(data.concurrency)
+    } catch (err) {
+      console.error(err)
+    }
+  }, [])
+
   useEffect(() => {
     fetchLogs()
     fetchSSL()
     fetchWebSSHOrigins()
-    const timer = setInterval(fetchLogs, 15000)
-    return () => clearInterval(timer)
-  }, [fetchLogs, fetchSSL, fetchWebSSHOrigins])
+    fetchTaskQueue()
+    const logTimer = setInterval(fetchLogs, 15000)
+    const taskTimer = setInterval(fetchTaskQueue, 5000)
+    return () => {
+      clearInterval(logTimer)
+      clearInterval(taskTimer)
+    }
+  }, [fetchLogs, fetchSSL, fetchTaskQueue, fetchWebSSHOrigins])
+
+  const handleSaveTaskQueue = async () => {
+    const concurrency = Math.max(1, Math.min(16, Math.round(taskConcurrency || 1)))
+    setSavingTaskQueue(true)
+    try {
+      const res = await updateTaskQueueSettings(concurrency)
+      const data = res.data.data
+      if (data) {
+        setTaskQueue(data)
+        setTaskConcurrency(data.concurrency)
+      }
+      dialog.alert('完成', '任务队列并发设置已保存并立即生效')
+    } catch (err: unknown) {
+      const e = err as { response?: { data?: { message?: string } } }
+      dialog.alert('失败', e.response?.data?.message || '任务队列设置保存失败')
+    } finally {
+      setSavingTaskQueue(false)
+    }
+  }
 
   const handleSSLModeChange = (mode: SSLSettings['mode']) => {
     setSSLMode(mode)
@@ -190,72 +245,173 @@ export default function Settings() {
   const totalPages = Math.ceil(logs.length / pageSize)
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-5">
       <div>
-        <h1 className="text-2xl font-bold text-black">面板设置</h1>
-        <p className="mt-1 text-sm text-gray-500">账号、安全证书与登录日志</p>
+        <h1 className="text-2xl font-bold text-black dark:text-white">面板设置</h1>
+        <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">任务队列、账号、安全证书与访问记录</p>
       </div>
 
-      <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,1.15fr)_minmax(360px,0.85fr)]">
-        <div className="space-y-6">
-          <SSLCard
-            ssl={ssl}
-            sslEnabled={sslEnabled}
-            sslMode={sslMode}
-            sslTarget={sslTarget}
-            sslEmail={sslEmail}
-            certPEM={certPEM}
-            keyPEM={keyPEM}
-            applyNow={applyNow}
-            savingSSL={savingSSL}
-            onRefresh={fetchSSL}
-            onEnabledChange={setSSLEnabled}
-            onModeChange={handleSSLModeChange}
-            onTargetChange={setSSLTarget}
-            onEmailChange={setSSLEmail}
-            onCertChange={setCertPEM}
-            onKeyChange={setKeyPEM}
-            onApplyNowChange={setApplyNow}
-            onSave={handleSaveSSL}
-          />
+      <div className="grid items-start gap-4 lg:grid-cols-[210px_minmax(0,1fr)]">
+        <aside className="overflow-x-auto rounded-lg border border-gray-200 bg-white p-2 dark:border-gray-700 dark:bg-gray-900 lg:sticky lg:top-4">
+          <nav className="flex min-w-max gap-1 lg:min-w-0 lg:flex-col" aria-label="设置分类">
+            {settingsSections.map((section) => {
+              const Icon = section.icon
+              const active = activeSection === section.id
+              return (
+                <button
+                  key={section.id}
+                  type="button"
+                  onClick={() => setActiveSection(section.id)}
+                  className={`flex items-center gap-2 rounded-md px-3 py-2.5 text-left text-sm font-medium transition-colors ${active ? 'bg-black text-white dark:bg-white dark:text-black' : 'text-gray-600 hover:bg-gray-100 hover:text-black dark:text-gray-300 dark:hover:bg-gray-800 dark:hover:text-white'}`}
+                >
+                  <Icon className="h-4 w-4 flex-shrink-0" />
+                  <span>{t(section.label)}</span>
+                </button>
+              )
+            })}
+          </nav>
+        </aside>
 
-          <WebSSHOriginCard
-            settings={webSSHOrigins}
-            originsText={webSSHOriginsText}
-            saving={savingWebSSHOrigins}
-            onOriginsTextChange={setWebSSHOriginsText}
-            onRefresh={fetchWebSSHOrigins}
-            onSave={handleSaveWebSSHOrigins}
-          />
+        <section className="min-w-0">
+          {activeSection === 'tasks' && (
+            <TaskQueueCard
+              settings={taskQueue}
+              concurrency={taskConcurrency}
+              saving={savingTaskQueue}
+              onConcurrencyChange={setTaskConcurrency}
+              onRefresh={fetchTaskQueue}
+              onSave={handleSaveTaskQueue}
+            />
+          )}
+
+          {activeSection === 'account' && (
+            <div className="rounded-lg border border-gray-200 bg-white p-5 dark:border-gray-700 dark:bg-gray-900">
+              <h2 className="mb-4 flex items-center gap-2 text-sm font-semibold text-black dark:text-white">
+                <UserCog className="h-4 w-4" />账号设置
+              </h2>
+              <div className="grid gap-4 md:grid-cols-2">
+                <div>
+                  <label className="mb-1 block text-xs text-gray-500">当前用户名</label>
+                  <input type="text" value={username || ''} disabled className="w-full rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-400 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-500" />
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs text-gray-500">新用户名，留空则不修改</label>
+                  <input type="text" value={newUsername} onChange={(e) => setNewUsername(e.target.value)} className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-black dark:border-gray-700 dark:bg-gray-950 dark:text-white" placeholder="至少 3 位" />
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs text-gray-500">新密码，留空则不修改</label>
+                  <input type="password" value={newPwd} onChange={(e) => setNewPwd(e.target.value)} className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-black dark:border-gray-700 dark:bg-gray-950 dark:text-white" placeholder="至少 6 位" />
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs text-gray-500">当前密码，验证身份</label>
+                  <input type="password" value={oldPwd} onChange={(e) => setOldPwd(e.target.value)} className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-black dark:border-gray-700 dark:bg-gray-950 dark:text-white" placeholder="输入当前密码以确认修改" />
+                </div>
+              </div>
+              <div className="mt-4 flex justify-end">
+                <button onClick={handleSaveAccount} className="rounded-md bg-black px-4 py-2 text-sm text-white hover:bg-gray-800 dark:bg-white dark:text-black dark:hover:bg-gray-200">保存修改</button>
+              </div>
+            </div>
+          )}
+
+          {activeSection === 'webssh' && (
+            <WebSSHOriginCard
+              settings={webSSHOrigins}
+              originsText={webSSHOriginsText}
+              saving={savingWebSSHOrigins}
+              onOriginsTextChange={setWebSSHOriginsText}
+              onRefresh={fetchWebSSHOrigins}
+              onSave={handleSaveWebSSHOrigins}
+            />
+          )}
+
+          {activeSection === 'ssl' && (
+            <SSLCard
+              ssl={ssl}
+              sslEnabled={sslEnabled}
+              sslMode={sslMode}
+              sslTarget={sslTarget}
+              sslEmail={sslEmail}
+              certPEM={certPEM}
+              keyPEM={keyPEM}
+              applyNow={applyNow}
+              savingSSL={savingSSL}
+              onRefresh={fetchSSL}
+              onEnabledChange={setSSLEnabled}
+              onModeChange={handleSSLModeChange}
+              onTargetChange={setSSLTarget}
+              onEmailChange={setSSLEmail}
+              onCertChange={setCertPEM}
+              onKeyChange={setKeyPEM}
+              onApplyNowChange={setApplyNow}
+              onSave={handleSaveSSL}
+            />
+          )}
+
+          {activeSection === 'logs' && (
+            <LoginLogCard logs={logs} logPage={logPage} pageSize={pageSize} totalPages={totalPages} setLogPage={setLogPage} />
+          )}
+        </section>
+      </div>
+    </div>
+  )
+}
+
+interface TaskQueueCardProps {
+  settings: TaskQueueSettings | null
+  concurrency: number
+  saving: boolean
+  onConcurrencyChange: (value: number) => void
+  onRefresh: () => void
+  onSave: () => void
+}
+
+function TaskQueueCard(props: TaskQueueCardProps) {
+  const setBounded = (value: number) => props.onConcurrencyChange(Math.max(1, Math.min(16, value)))
+  return (
+    <div className="rounded-lg border border-gray-200 bg-white p-4">
+      <div className="mb-4 flex items-center justify-between gap-3">
+        <h2 className="flex items-center gap-2 text-sm font-semibold text-black">
+          <ListTodo className="h-4 w-4" />任务队列
+        </h2>
+        <button onClick={props.onRefresh} className="rounded-md border border-gray-200 p-1.5 text-gray-500 hover:bg-gray-50" title="刷新">
+          <RefreshCw className="h-4 w-4" />
+        </button>
+      </div>
+      <div className="grid grid-cols-2 divide-x divide-gray-200 border-y border-gray-100 bg-gray-50">
+        <div className="px-3 py-2">
+          <div className="text-[11px] text-gray-500">运行中</div>
+          <div className="mt-0.5 text-lg font-semibold text-gray-900">{props.settings?.active ?? 0}</div>
         </div>
-
-        <div className="rounded-lg border border-gray-200 bg-white p-5">
-          <h2 className="mb-4 flex items-center gap-2 text-sm font-semibold text-black">
-            <UserCog className="h-4 w-4" />账号设置
-          </h2>
-          <div className="space-y-4">
-            <div>
-              <label className="mb-1 block text-xs text-gray-500">当前用户名</label>
-              <input type="text" value={username || ''} disabled className="w-full rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-400" />
-            </div>
-            <div>
-              <label className="mb-1 block text-xs text-gray-500">新用户名，留空则不修改</label>
-              <input type="text" value={newUsername} onChange={(e) => setNewUsername(e.target.value)} className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-black" placeholder="至少 3 位" />
-            </div>
-            <div className="border-t border-gray-100 pt-3">
-              <label className="mb-1 block text-xs text-gray-500">新密码，留空则不修改</label>
-              <input type="password" value={newPwd} onChange={(e) => setNewPwd(e.target.value)} className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-black" placeholder="至少 6 位" />
-            </div>
-            <div>
-              <label className="mb-1 block text-xs text-gray-500">当前密码，验证身份</label>
-              <input type="password" value={oldPwd} onChange={(e) => setOldPwd(e.target.value)} className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-black" placeholder="输入当前密码以确认修改" />
-            </div>
-            <button onClick={handleSaveAccount} className="w-full rounded-md bg-black px-4 py-2 text-sm text-white hover:bg-gray-800">保存修改</button>
-          </div>
+        <div className="px-3 py-2">
+          <div className="text-[11px] text-gray-500">等待中</div>
+          <div className="mt-0.5 text-lg font-semibold text-gray-900">{props.settings?.pending ?? 0}</div>
         </div>
       </div>
-
-      <LoginLogCard logs={logs} logPage={logPage} pageSize={pageSize} totalPages={totalPages} setLogPage={setLogPage} />
+      <div className="mt-4">
+        <label className="mb-1.5 block text-xs text-gray-500">总并发上限</label>
+        <div className="flex h-9 items-stretch">
+          <button type="button" onClick={() => setBounded(props.concurrency - 1)} disabled={props.concurrency <= 1} className="flex w-10 items-center justify-center rounded-l-md border border-gray-300 text-gray-600 hover:bg-gray-50 disabled:opacity-30" title="减少并发">
+            <Minus className="h-4 w-4" />
+          </button>
+          <input
+            type="number"
+            min={1}
+            max={16}
+            value={props.concurrency}
+            onChange={(event) => setBounded(Number(event.target.value) || 1)}
+            className="min-w-0 flex-1 border-y border-gray-300 px-2 text-center text-sm font-medium text-black outline-none focus:ring-2 focus:ring-inset focus:ring-black"
+          />
+          <button type="button" onClick={() => setBounded(props.concurrency + 1)} disabled={props.concurrency >= 16} className="flex w-10 items-center justify-center rounded-r-md border border-gray-300 text-gray-600 hover:bg-gray-50 disabled:opacity-30" title="增加并发">
+            <Plus className="h-4 w-4" />
+          </button>
+        </div>
+      </div>
+      <div className="mt-4 flex justify-end">
+        <button onClick={props.onSave} disabled={props.saving} className="inline-flex items-center justify-center gap-2 rounded-md bg-black px-4 py-2 text-sm text-white hover:bg-gray-800 disabled:opacity-50">
+          <Save className="h-4 w-4" />
+          {props.saving ? '保存中...' : '保存队列设置'}
+        </button>
+      </div>
     </div>
   )
 }
@@ -292,7 +448,7 @@ interface WebSSHOriginCardProps {
 
 function WebSSHOriginCard(props: WebSSHOriginCardProps) {
   return (
-    <div className="rounded-lg border border-gray-200 bg-white p-5">
+    <div className="rounded-lg border border-gray-200 bg-white p-4">
       <div className="mb-4 flex items-center justify-between gap-3">
         <h2 className="flex items-center gap-2 text-sm font-semibold text-black">
           <Terminal className="h-4 w-4" />WebSSH Origin 白名单
@@ -307,7 +463,7 @@ function WebSSHOriginCard(props: WebSSHOriginCardProps) {
           <textarea
             value={props.originsText}
             onChange={(e) => props.onOriginsTextChange(e.target.value)}
-            rows={5}
+            rows={4}
             className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 font-mono text-xs text-black"
           />
         </div>
@@ -315,10 +471,12 @@ function WebSSHOriginCard(props: WebSSHOriginCardProps) {
           <div className="truncate font-mono" title={props.settings?.current_origin || ''}>当前面板来源：{props.settings?.current_origin || '-'}</div>
           <div className="mt-1">默认允许当前面板来源和本机回环来源；额外域名每行填写一个完整 Origin。</div>
         </div>
-        <button onClick={props.onSave} disabled={props.saving} className="inline-flex w-full items-center justify-center gap-2 rounded-md bg-black px-4 py-2 text-sm text-white hover:bg-gray-800 disabled:opacity-50">
-          <Upload className="h-4 w-4" />
-          {props.saving ? '保存中...' : '保存 Origin 白名单'}
-        </button>
+        <div className="flex justify-end">
+          <button onClick={props.onSave} disabled={props.saving} className="inline-flex items-center justify-center gap-2 rounded-md bg-black px-4 py-2 text-sm text-white hover:bg-gray-800 disabled:opacity-50">
+            <Upload className="h-4 w-4" />
+            {props.saving ? '保存中...' : '保存 Origin 白名单'}
+          </button>
+        </div>
       </div>
     </div>
   )
@@ -425,10 +583,12 @@ function SSLCard(props: SSLCardProps) {
           保存后自动重启服务并立即生效
         </label>
 
-        <button onClick={props.onSave} disabled={props.savingSSL} className="inline-flex w-full items-center justify-center gap-2 rounded-md bg-black px-4 py-2 text-sm text-white hover:bg-gray-800 disabled:opacity-50">
-          <Upload className="h-4 w-4" />
-          {props.savingSSL ? '保存中...' : '保存 SSL 设置'}
-        </button>
+        <div className="flex justify-end">
+          <button onClick={props.onSave} disabled={props.savingSSL} className="inline-flex items-center justify-center gap-2 rounded-md bg-black px-4 py-2 text-sm text-white hover:bg-gray-800 disabled:opacity-50">
+            <Upload className="h-4 w-4" />
+            {props.savingSSL ? '保存中...' : '保存 SSL 设置'}
+          </button>
+        </div>
       </div>
     </div>
   )

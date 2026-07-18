@@ -93,11 +93,15 @@ func TestSQLiteConfigMigratesLegacyJSONAndPersists(t *testing.T) {
 	if len(cfg.Tasks) != 1 || !strings.Contains(cfg.Tasks[0].Config, `"extra_ports":[80,443]`) {
 		t.Fatalf("task config was not restored from sqlite columns: %+v", cfg.Tasks)
 	}
+	if cfg.TaskConcurrency != DefaultTaskConcurrency {
+		t.Fatalf("legacy task concurrency = %d, want default %d", cfg.TaskConcurrency, DefaultTaskConcurrency)
+	}
 	if _, err := os.Stat(filepath.Join(dir, "config.db")); err != nil {
 		t.Fatalf("sqlite database was not created: %v", err)
 	}
 
 	cfg.Containers[0].Status = "stopped"
+	cfg.TaskConcurrency = 6
 	if err := SaveConfig(); err != nil {
 		t.Fatal(err)
 	}
@@ -110,6 +114,9 @@ func TestSQLiteConfigMigratesLegacyJSONAndPersists(t *testing.T) {
 	}
 	if got := cfg.Containers[0].Status; got != "stopped" {
 		t.Fatalf("expected sqlite value to win after migration, got %q", got)
+	}
+	if got := cfg.TaskConcurrency; got != 6 {
+		t.Fatalf("persisted task concurrency = %d, want 6", got)
 	}
 }
 

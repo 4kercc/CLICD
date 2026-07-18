@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Copy, HardDrive, KeyRound, LogIn, RefreshCw, Save, ScrollText, UserCog, X } from 'lucide-react'
 import { useDialog } from '../components/Dialog'
+import { useLanguage } from '../contexts/LanguageContext'
 import api, { AuditLog, ImageInfo, LoginLog, getImages, updateSubUserImages } from '../services/api'
 import { copyToClipboard } from '../utils/clipboard'
 
@@ -31,6 +32,7 @@ interface AuditLogExt extends AuditLog {
 
 export default function SubUserManagement() {
   const dialog = useDialog()
+  const { t } = useLanguage()
   const [users, setUsers] = useState<SubUserItem[]>([])
   const [loading, setLoading] = useState(true)
   const [auditLogs, setAuditLogs] = useState<AuditLogExt[] | null>(null)
@@ -173,8 +175,10 @@ export default function SubUserManagement() {
   return (
     <div className="space-y-5">
       <div>
-        <h1 className="text-xl font-semibold text-black dark:text-white">子用户管理</h1>
-        <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">容器分配的子用户列表，共 {users.length} 个</p>
+        <h1 className="text-xl font-semibold text-black dark:text-white">{t('子用户管理')}</h1>
+        <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
+          {t('容器分配的子用户列表，共')} {users.length} {t('个')}
+        </p>
       </div>
 
       <div className="overflow-hidden rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900">

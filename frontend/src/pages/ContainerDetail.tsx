@@ -44,6 +44,7 @@ import {
   getContainerSnapshots,
   getContainerUsage,
   getHostInfo,
+  getStorageInfo,
   getTrafficInfo,
   HostInfo,
   TrafficInfo,
@@ -61,6 +62,7 @@ import {
   stopContainer,
   Snapshot,
   SnapshotSchedule,
+  StorageInfo,
   Template,
   updateContainerExpiry,
   updateFirewall,
@@ -75,6 +77,7 @@ import {
 } from '../services/api'
 import { useDialog } from '../components/Dialog'
 import { useAuth } from '../contexts/AuthContext'
+import { useLanguage } from '../contexts/LanguageContext'
 import WebSSHViewer from '../components/WebSSHViewer'
 import WebVNCViewer from '../components/WebVNCViewer'
 import { RingStat } from '../components/RingStats'
@@ -127,6 +130,7 @@ export default function ContainerDetail() {
   const navigate = useNavigate()
   const dialog = useDialog()
   const { isSubUser } = useAuth()
+  const { t } = useLanguage()
   const [container, setContainer] = useState<Container | null>(null)
   const [hostInfo, setHostInfo] = useState<HostInfo | null>(null)
   const [usage, setUsage] = useState<ContainerUsage | null>(null)
@@ -182,6 +186,9 @@ export default function ContainerDetail() {
   const [editingSnapshotQuota, setEditingSnapshotQuota] = useState(false)
   const [snapshotSchedule, setSnapshotSchedule] = useState<SnapshotSchedule | null>(null)
   const [snapshotBusy, setSnapshotBusy] = useState('')
+  const [storageInfo, setStorageInfo] = useState<StorageInfo | null>(null)
+  const [storageLoading, setStorageLoading] = useState(!isSubUser)
+  const [snapshotStoragePoolID, setSnapshotStoragePoolID] = useState('')
   const [showSnapshotSchedule, setShowSnapshotSchedule] = useState(false)
   const [snapshotScheduleDraft, setSnapshotScheduleDraft] = useState({ intervalHours: 24, time: '03:00' })
   const [showFirewall, setShowFirewall] = useState(false)
@@ -223,6 +230,23 @@ export default function ContainerDetail() {
       console.error('Failed to fetch snapshots:', err)
     }
   }, [containerIdentifier, container?.snapshot_limit])
+
+  const fetchStorage = useCallback(async () => {
+    if (isSubUser) {
+      setStorageLoading(false)
+      return
+    }
+    setStorageLoading(true)
+    try {
+      const res = await getStorageInfo()
+      setStorageInfo(res.data.data || null)
+    } catch (err) {
+      console.error('Failed to fetch storage:', err)
+      setStorageInfo(null)
+    } finally {
+      setStorageLoading(false)
+    }
+  }, [isSubUser])
 
   const fetchMetricHistory = useCallback(async () => {
     if (!containerIdentifier) return
@@ -297,8 +321,11 @@ export default function ContainerDetail() {
   }, [fetchMetricHistory])
 
   useEffect(() => {
-    if (showSnapshots) fetchSnapshots()
-  }, [showSnapshots, fetchSnapshots])
+    if (showSnapshots) {
+      fetchSnapshots()
+      fetchStorage()
+    }
+  }, [showSnapshots, fetchSnapshots, fetchStorage])
 
   // Poll task status for this container
   useEffect(() => {
@@ -774,6 +801,10 @@ export default function ContainerDetail() {
   const handleCreateSnapshot = async () => {
     if (!containerIdentifier) return
     if (!(await ensureSubUserCanOperate())) return
+    if (!snapshotStorageReady) {
+      await dialog.alert('未配置快照存储', '请先在存储管理中为快照开启至少一块存储磁盘。')
+      return
+    }
     if (isSubUser && snapshots.length >= snapshotQuota) {
       await dialog.alert('快照配额已满', '已达到管理员设置的快照配额，请先删除旧快照。')
       return
@@ -787,7 +818,7 @@ export default function ContainerDetail() {
     }
     setSnapshotBusy('create')
     try {
-      await createContainerSnapshot(containerIdentifier)
+      await createContainerSnapshot(containerIdentifier, { storage_pool_id: snapshotStoragePoolID || undefined })
       await Promise.all([fetchSnapshots(), fetchContainer()])
     } catch (err: unknown) {
       const error = err as { response?: { data?: { message?: string } } }
@@ -799,6 +830,10 @@ export default function ContainerDetail() {
 
   const openSnapshotSchedule = () => {
     if (isSubUser && container?.policy_blocked) return
+    if (!snapshotStorageReady) {
+      dialog.alert('未配置快照存储', '请先在存储管理中为快照开启至少一块存储磁盘。')
+      return
+    }
     setSnapshotScheduleDraft({
       intervalHours: Math.max(snapshotSchedule?.interval_hours || 24, 24),
       time: snapshotSchedule?.time || '03:00',
@@ -924,6 +959,10 @@ export default function ContainerDetail() {
   const hasIndependentIPv4 = assignedIPv4List.length > 0
   const hasIndependentIPv6 = ipv6List.length > 0
   const defaultConnPort = isWindows ? 3389 : 22
+  const snapshotStoragePools = (storageInfo?.pools || []).filter((pool) =>
+    pool.enabled !== false && pool.available !== false && (pool.content_types || []).includes('snapshots')
+  )
+  const snapshotStorageReady = isSubUser || snapshotStoragePools.length > 0
 
   let publicEndpoint = '-'
   let sshCommand = ''
@@ -1231,8 +1270,8 @@ export default function ContainerDetail() {
           <PlainRow label="vCPU" value={`${container.vcpu} 核`} />
           <PlainRow label="内存" value={`${container.ram_mb} MB`} />
           <PlainRow label="磁盘" value={`${container.disk_gb} GB`} />
-          <PlainRow label="网络速率" value={formatDirectionalLimit('下行', networkDownLimit, '上行', networkUpLimit, 'Mbps')} />
-          <PlainRow label="IO 速度" value={formatDirectionalLimit('读取', ioReadLimit, '写入', ioWriteLimit, 'MB/s')} />
+          <PlainRow label="网络速率" value={formatDirectionalLimit(t('下行'), networkDownLimit, t('上行'), networkUpLimit, 'Mbps')} />
+          <PlainRow label="IO 速度" value={formatDirectionalLimit(t('读取'), ioReadLimit, t('写入'), ioWriteLimit, 'MB/s')} />
         </Panel>
 
         <Panel title="实时状态">
@@ -1492,7 +1531,7 @@ export default function ContainerDetail() {
             <div className="flex items-center gap-2">
               <button
                 onClick={openSnapshotSchedule}
-                disabled={!!snapshotBusy}
+                disabled={!!snapshotBusy || storageLoading || !snapshotStorageReady}
                 className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs ${
                   snapshotSchedule?.enabled
                     ? 'border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100'
@@ -1504,7 +1543,7 @@ export default function ContainerDetail() {
               </button>
               <button
                 onClick={handleCreateSnapshot}
-                disabled={!!snapshotBusy || (isSubUser && snapshots.length >= snapshotQuota)}
+                disabled={!!snapshotBusy || storageLoading || !snapshotStorageReady || (isSubUser && snapshots.length >= snapshotQuota)}
                 className="inline-flex items-center gap-1.5 rounded-md bg-black px-3 py-1.5 text-xs text-white hover:bg-gray-800 disabled:opacity-50"
               >
                 <Camera className="w-3.5 h-3.5" />
@@ -1514,6 +1553,20 @@ export default function ContainerDetail() {
           }
         >
           <div className="space-y-4">
+            {storageLoading && !isSubUser && (
+              <div className="flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-600">
+                <RefreshCw className="h-4 w-4 animate-spin" />
+                正在检查存储配置...
+              </div>
+            )}
+            {!storageLoading && !snapshotStorageReady && (
+              <div className="flex items-center justify-between gap-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                <span>尚未开启快照存储，无法新建或启用定时快照。</span>
+                <button onClick={() => { setShowSnapshots(false); navigate('/storage') }} className="shrink-0 rounded-md border border-amber-300 bg-white px-3 py-1.5 text-xs font-medium hover:bg-amber-100">
+                  去开启
+                </button>
+              </div>
+            )}
             <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-xs text-gray-600">
               <div>
                 快照数量：
@@ -1548,6 +1601,26 @@ export default function ContainerDetail() {
                 <div>下次执行：<span className="font-mono text-gray-900">{formatDateTime(snapshotSchedule.next_run)}</span></div>
               )}
             </div>
+
+            {!isSubUser && snapshotStoragePools.length > 0 && (
+              <div className="flex flex-wrap items-end gap-3 rounded-lg border border-gray-200 bg-white px-4 py-3">
+                <Field label="新建快照存储磁盘">
+                  <select
+                    value={snapshotStoragePoolID}
+                    onChange={(event) => setSnapshotStoragePoolID(event.target.value)}
+                    className="w-72 px-3 py-2 border border-gray-300 rounded-md text-sm text-black bg-white focus:outline-none focus:ring-2 focus:ring-black focus:border-black"
+                  >
+                    <option value="">自动选择（默认盘优先，空间不足自动切换）</option>
+                    {snapshotStoragePools.map((pool) => (
+                      <option key={pool.id} value={pool.id}>
+                        {pool.name} · {pool.mount_point || pool.path}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <div className="pb-2 text-xs text-gray-400">仅影响手动新建快照；定时快照使用默认磁盘。</div>
+              </div>
+            )}
 
             {editingSnapshotQuota && !isSubUser && (
               <div className="flex flex-wrap items-end gap-3 rounded-lg border border-gray-200 bg-white px-4 py-3">

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { CalendarClock, RefreshCw, X } from 'lucide-react'
-import { batchCreate, getIPv6Status, getEnabledImages, getHostInfo, getHostReport, CreateContainerRequest, HostInfo, HostProbeReport, IPv6Status, Template } from '../services/api'
+import { useNavigate } from 'react-router-dom'
+import { batchCreate, getIPv6Status, getEnabledImages, getHostInfo, getHostReport, getStorageInfo, CreateContainerRequest, HostInfo, HostProbeReport, IPv6Status, StorageInfo, Template } from '../services/api'
 import { useDialog } from './Dialog'
 import { useLanguage, type Language } from '../contexts/LanguageContext'
 import { generateSSHPassword, sshPasswordError, sshPublicKeyError, type SSHAuthMode } from '../utils/sshAuth'
@@ -16,6 +17,7 @@ const defaultForm: CreateContainerRequest = {
   name: '',
   virtualization: 'lxc',
   template_id: '',
+  storage_pool_id: '',
   vcpu: 1,
   cpu_percent: 100,
   ram_mb: 512,
@@ -54,6 +56,7 @@ const defaultForm: CreateContainerRequest = {
 }
 
 export default function CreateContainerModal({ isOpen, onClose, onSuccess, existingNames = [] }: CreateContainerModalProps) {
+  const navigate = useNavigate()
   const dialog = useDialog()
   const { language } = useLanguage()
   const networkText = createNetworkText[language]
@@ -63,6 +66,8 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
   const [form, setForm] = useState<CreateContainerRequest>(defaultForm)
   const [hostInfo, setHostInfo] = useState<HostInfo | null>(null)
   const [hostReport, setHostReport] = useState<HostProbeReport | null>(null)
+  const [storageInfo, setStorageInfo] = useState<StorageInfo | null>(null)
+  const [storageLoading, setStorageLoading] = useState(true)
   const [ipv6Status, setIPv6Status] = useState<IPv6Status | null>(null)
   const [nameError, setNameError] = useState('')
 
@@ -107,7 +112,25 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
     getHostReport()
       .then((res) => setHostReport(res.data.data || null))
       .catch(() => setHostReport(null))
+
   }, [isOpen, form.virtualization])
+
+  useEffect(() => {
+    if (!isOpen) return
+    let active = true
+    setStorageLoading(true)
+    getStorageInfo()
+      .then((res) => {
+        if (active) setStorageInfo(res.data.data || null)
+      })
+      .catch(() => {
+        if (active) setStorageInfo(null)
+      })
+      .finally(() => {
+        if (active) setStorageLoading(false)
+      })
+    return () => { active = false }
+  }, [isOpen])
 
   const ipv6Available = !!ipv6Status?.available
   const ipv6Prefixes = ipv6Status?.prefixes || []
@@ -118,6 +141,11 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
   const maxVCPU = hostInfo?.cpu.cores || 64
   const maxRAMMB = hostInfo?.ram.total_mb ? Number(hostInfo.ram.total_mb) : undefined
   const kvmAvailable = !!hostInfo?.runtime?.kvm_available
+  const storagePools = useMemo(() => {
+    const content = form.virtualization === 'kvm' ? 'kvm' : 'lxc'
+    return (storageInfo?.pools || []).filter((pool) => pool.enabled && pool.available !== false && (pool.content_types || []).includes(content))
+  }, [storageInfo, form.virtualization])
+  const storageReady = storagePools.length > 0
 
   useEffect(() => {
     if (hostInfo && !kvmAvailable && form.virtualization === 'kvm') {
@@ -197,6 +225,11 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
       }
     }
 
+    if (!storageReady) {
+      dialog.alert('未配置存储', `请先在存储管理中为 ${form.virtualization === 'kvm' ? 'KVM 磁盘' : 'LXC 容器'}开启至少一块存储磁盘`)
+      return
+    }
+
     const authError = validateSSHAuthInputs(form)
     if (authError) {
       dialog.alert('登录方式有误', authError)
@@ -273,7 +306,7 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
             <div className="grid grid-cols-2 gap-2">
               <button
                 type="button"
-                onClick={() => setForm((prev) => applyTemplateDefaults({ ...prev, virtualization: 'lxc', template_id: '', allowed_image_ids: [], image_limit_configured: false }))}
+                onClick={() => setForm((prev) => applyTemplateDefaults({ ...prev, virtualization: 'lxc', template_id: '', storage_pool_id: '', allowed_image_ids: [], image_limit_configured: false }))}
                 className={`rounded-md border px-3 py-2 text-sm font-medium transition-colors ${form.virtualization === 'lxc' ? 'border-black bg-black text-white' : 'border-gray-300 text-gray-700 hover:bg-gray-50'}`}
               >
                 LXC 容器
@@ -284,7 +317,7 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
                 title={kvmAvailable ? '' : '当前宿主机不支持 KVM'}
                 onClick={() => {
                   if (kvmAvailable) {
-                    setForm((prev) => applyTemplateDefaults({ ...prev, virtualization: 'kvm', template_id: '', allowed_image_ids: [], image_limit_configured: false }))
+                    setForm((prev) => applyTemplateDefaults({ ...prev, virtualization: 'kvm', template_id: '', storage_pool_id: '', allowed_image_ids: [], image_limit_configured: false }))
                   }
                 }}
                 className={`rounded-md border px-3 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:border-gray-200 disabled:bg-gray-50 disabled:text-gray-400 ${form.virtualization === 'kvm' ? 'border-black bg-black text-white' : 'border-gray-300 text-gray-700 hover:bg-gray-50'}`}
@@ -318,6 +351,39 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
             </select>
             )}
 
+          </Field>
+
+          <Field label="存储磁盘">
+            {storageLoading ? (
+              <div className="flex items-center gap-2 rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-600">
+                <RefreshCw className="h-4 w-4 animate-spin" />
+                正在检查存储配置...
+              </div>
+            ) : storagePools.length > 0 ? (
+              <select
+                value={form.storage_pool_id || ''}
+                onChange={(event) => setForm({ ...form, storage_pool_id: event.target.value })}
+                className={inputClass}
+              >
+                <option value="">自动选择（默认盘优先，空间不足自动切换）</option>
+                {storagePools.map((pool) => (
+                  <option key={pool.id} value={pool.id}>
+                    {pool.name} · {pool.mount_point || pool.path}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <div className="flex items-center justify-between gap-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                <span>尚未开启{form.virtualization === 'kvm' ? ' KVM 磁盘' : ' LXC 容器'}存储，当前无法创建。</span>
+                <button
+                  type="button"
+                  onClick={() => { onClose(); navigate('/storage') }}
+                  className="shrink-0 rounded-md border border-amber-300 bg-white px-2.5 py-1.5 text-xs font-medium text-amber-800 hover:bg-amber-100"
+                >
+                  去开启
+                </button>
+              </div>
+            )}
           </Field>
 
           {templates.length > 0 && (
@@ -821,7 +887,7 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
           </button>
           <button
             onClick={handleSubmit}
-            disabled={loading}
+            disabled={loading || storageLoading || !storageReady}
             className="px-4 py-2 text-sm bg-black text-white rounded-md hover:bg-gray-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {loading ? '创建中...' : '创建容器'}

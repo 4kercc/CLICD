@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"sort"
 	"strconv"
@@ -88,6 +89,20 @@ func listContainerSnapshots(w http.ResponseWriter, r *http.Request, containerID 
 
 func createContainerSnapshot(w http.ResponseWriter, r *http.Request, containerID int) {
 	user := requestUser(r)
+	var req struct {
+		StoragePoolID string `json:"storage_pool_id"`
+	}
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+			jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Invalid request body"})
+			return
+		}
+	}
+	req.StoragePoolID = strings.TrimSpace(req.StoragePoolID)
+	if _, err := config.SelectStoragePoolForContent(config.StorageContentSnapshots, req.StoragePoolID, 0); err != nil {
+		jsonResponse(w, http.StatusConflict, APIResponse{Success: false, Message: err.Error()})
+		return
+	}
 	if isSubUserRequest(r) {
 		c := config.FindContainer(containerID)
 		limit := config.ContainerSnapshotLimit(c)
@@ -96,7 +111,7 @@ func createContainerSnapshot(w http.ResponseWriter, r *http.Request, containerID
 			return
 		}
 	}
-	snapshot, err := createSnapshotByRuntime(containerID, user, false, 0)
+	snapshot, err := createSnapshotByRuntime(containerID, user, false, 0, req.StoragePoolID)
 	if err != nil {
 		jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: err.Error()})
 		return
@@ -158,6 +173,12 @@ func updateSnapshotSchedule(w http.ResponseWriter, r *http.Request, containerID 
 	}
 	if req.Time == "" {
 		req.Time = "03:00"
+	}
+	if req.Enabled {
+		if _, err := config.SelectStoragePoolForContent(config.StorageContentSnapshots, "", 0); err != nil {
+			jsonResponse(w, http.StatusConflict, APIResponse{Success: false, Message: err.Error()})
+			return
+		}
 	}
 	user := requestUser(r)
 	c, err := setSnapshotScheduleByRuntime(containerID, req.Enabled, req.IntervalHours, req.Time, user)

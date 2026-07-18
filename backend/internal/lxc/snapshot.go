@@ -16,7 +16,7 @@ import (
 
 var snapshotMu sync.Mutex
 
-func (m *Manager) CreateSnapshot(id int, createdBy string, scheduled bool, rotateLimit int) (config.Snapshot, error) {
+func (m *Manager) CreateSnapshot(id int, createdBy string, scheduled bool, rotateLimit int, storagePoolID ...string) (config.Snapshot, error) {
 	snapshotMu.Lock()
 	defer snapshotMu.Unlock()
 
@@ -42,12 +42,21 @@ func (m *Manager) CreateSnapshot(id int, createdBy string, scheduled bool, rotat
 	if _, err := os.Stat(containerDir); err != nil {
 		return config.Snapshot{}, fmt.Errorf("container storage not found: %v", err)
 	}
+	pool, err := config.SelectStoragePoolForContent(
+		config.StorageContentSnapshots,
+		firstString(storagePoolID),
+		dirSizeBytes(containerDir),
+	)
+	if err != nil {
+		return config.Snapshot{}, err
+	}
 
 	now := time.Now()
 	snapshotID := fmt.Sprintf("snap-%d-%s", id, now.Format("20060102150405-000000000"))
 	// Use container ID instead of lxcName to avoid collision when containers are recreated
-	snapshotDir := filepath.Join(snapshotBaseDir(), strconv.Itoa(id), snapshotID)
-	if err := safePathUnder(snapshotDir, snapshotBaseDir()); err != nil {
+	baseDir := filepath.Join(pool.Path, "snapshots")
+	snapshotDir := filepath.Join(baseDir, strconv.Itoa(id), snapshotID)
+	if err := safePathUnder(snapshotDir, baseDir); err != nil {
 		return config.Snapshot{}, err
 	}
 	if err := os.MkdirAll(snapshotDir, 0700); err != nil {
@@ -100,7 +109,7 @@ func (m *Manager) DeleteSnapshot(id string) error {
 
 func (m *Manager) deleteSnapshotLocked(snapshot config.Snapshot) error {
 	if snapshot.Path != "" {
-		if err := safePathUnder(snapshot.Path, snapshotBaseDir()); err != nil {
+		if err := safeSnapshotPath(snapshot.Path); err != nil {
 			return err
 		}
 		if err := os.RemoveAll(snapshot.Path); err != nil {
@@ -122,7 +131,7 @@ func (m *Manager) RestoreSnapshot(id string) error {
 	if snapshot.Path == "" {
 		return fmt.Errorf("snapshot path is empty")
 	}
-	if err := safePathUnder(snapshot.Path, snapshotBaseDir()); err != nil {
+	if err := safeSnapshotPath(snapshot.Path); err != nil {
 		return err
 	}
 	if _, err := os.Stat(snapshot.Path); err != nil {
@@ -295,7 +304,33 @@ func (m *Manager) prepareContainerForColdCopy(id int, lxcName string, containerD
 }
 
 func snapshotBaseDir() string {
-	return filepath.Join(config.AppConfig.DataDir, "snapshots")
+	return snapshotBaseDirForPool("")
+}
+
+func snapshotBaseDirForPool(poolID string) string {
+	if pool, err := config.SelectStoragePoolForContent(config.StorageContentSnapshots, poolID, 0); err == nil {
+		return filepath.Join(pool.Path, "snapshots")
+	}
+	return ""
+}
+
+func safeSnapshotPath(path string) error {
+	if err := safePathUnder(path, filepath.Join(config.AppConfig.DataDir, "snapshots")); err == nil {
+		return nil
+	}
+	for _, pool := range config.StoragePoolsForContent(config.StorageContentSnapshots) {
+		if err := safePathUnder(path, filepath.Join(pool.Path, "snapshots")); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("unsafe snapshot path: %s", path)
+}
+
+func firstString(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(values[0])
 }
 
 func copyTree(src string, dst string) error {
@@ -313,6 +348,9 @@ func copyTree(src string, dst string) error {
 }
 
 func dirSizeBytes(path string) int64 {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
 	out, err := exec.Command("du", "-s", "-B1", path).Output()
 	if err != nil {
 		return 0

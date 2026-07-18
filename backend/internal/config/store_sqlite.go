@@ -23,6 +23,7 @@ type savedTaskConfig struct {
 	Name                 string   `json:"name"`
 	Virtualization       string   `json:"virtualization,omitempty"`
 	TemplateID           string   `json:"template_id"`
+	StoragePoolID        string   `json:"storage_pool_id,omitempty"`
 	VCPU                 float64  `json:"vcpu"`
 	CPUPercent           int      `json:"cpu_percent"`
 	RAMMB                int      `json:"ram_mb"`
@@ -190,6 +191,8 @@ func ensureSchema() error {
 			lxc_name TEXT,
 			kvm_name TEXT,
 			disk_image TEXT,
+			storage_pool_id TEXT,
+			storage_path TEXT,
 			mac_address TEXT,
 			template TEXT,
 			vcpu REAL,
@@ -461,6 +464,8 @@ func ensureSchemaMigrations() error {
 		{"containers", "allowed_image_ids", "TEXT"},
 		{"containers", "image_limit_configured", "INTEGER NOT NULL DEFAULT 0"},
 		{"containers", "restore_on_host_boot", "INTEGER NOT NULL DEFAULT 0"},
+		{"containers", "storage_pool_id", "TEXT"},
+		{"containers", "storage_path", "TEXT"},
 		{"containers", "lan_ipv4_mode", "TEXT"},
 		{"containers", "lan_interface", "TEXT"},
 		{"containers", "lan_ipv4_address", "TEXT NOT NULL DEFAULT ''"},
@@ -513,6 +518,11 @@ func ensureSchemaMigrations() error {
 		    lan_ipv4_address = COALESCE(lan_ipv4_address, ''),
 		    lan_ipv4_prefix_len = COALESCE(lan_ipv4_prefix_len, 0),
 		    lan_ipv4_gateway = COALESCE(lan_ipv4_gateway, '')`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`UPDATE containers
+		SET storage_pool_id = COALESCE(storage_pool_id, ''),
+		    storage_path = COALESCE(storage_path, '')`); err != nil {
 		return err
 	}
 	if _, err := db.Exec(`UPDATE tasks
@@ -585,6 +595,7 @@ func loadConfigFromDB() (*ClicdConfig, bool, error) {
 		NATPortEnd:           atoi(meta["nat_port_end"]),
 		SetupComplete:        atob(meta["setup_complete"]),
 		SecurityAutoShutdown: atob(meta["security_auto_shutdown"]),
+		TaskConcurrency:      atoi(meta["task_concurrency"]),
 		Language:             meta["language"],
 	}
 	if raw := strings.TrimSpace(meta["ssl"]); raw != "" {
@@ -601,6 +612,9 @@ func loadConfigFromDB() (*ClicdConfig, bool, error) {
 	}
 	if raw := strings.TrimSpace(meta["webssh_allowed_origins"]); raw != "" {
 		_ = json.Unmarshal([]byte(raw), &cfg.WebSSHAllowedOrigins)
+	}
+	if raw := strings.TrimSpace(meta["storage_pools"]); raw != "" {
+		_ = json.Unmarshal([]byte(raw), &cfg.StoragePools)
 	}
 
 	if cfg.Containers, err = loadContainers(); err != nil {
@@ -701,6 +715,7 @@ func saveMeta(tx *sql.Tx) error {
 	publicIPv4PoolJSON, _ := json.Marshal(AppConfig.PublicIPv4Pool)
 	publicIPv6PrefixesJSON, _ := json.Marshal(AppConfig.PublicIPv6Prefixes)
 	webSSHAllowedOriginsJSON, _ := json.Marshal(AppConfig.WebSSHAllowedOrigins)
+	storagePoolsJSON, _ := json.Marshal(AppConfig.StoragePools)
 	values := map[string]string{
 		"admin_user":             AppConfig.AdminUser,
 		"admin_pass_hash":        AppConfig.AdminPassHash,
@@ -714,12 +729,14 @@ func saveMeta(tx *sql.Tx) error {
 		"nat_port_end":           strconv.Itoa(AppConfig.NATPortEnd),
 		"setup_complete":         btoa(AppConfig.SetupComplete),
 		"security_auto_shutdown": btoa(AppConfig.SecurityAutoShutdown),
+		"task_concurrency":       strconv.Itoa(AppConfig.TaskConcurrency),
 		"language":               NormalizeLanguage(AppConfig.Language),
 		"ssl":                    string(sslJSON),
 		"ssl_certificates":       string(sslCertificatesJSON),
 		"public_ipv4_pool":       string(publicIPv4PoolJSON),
 		"public_ipv6_prefixes":   string(publicIPv6PrefixesJSON),
 		"webssh_allowed_origins": string(webSSHAllowedOriginsJSON),
+		"storage_pools":          string(storagePoolsJSON),
 		"schema_version":         "1",
 		"updated_at":             time.Now().Format("2006-01-02 15:04:05"),
 	}
@@ -736,7 +753,7 @@ func saveContainers(tx *sql.Tx) error {
 		NormalizeContainerResourceAliases(&c)
 		allowedImageIDs := encodeStringSlice(c.AllowedImageIDs)
 		if _, err := tx.Exec(`INSERT INTO containers (
-			id, uuid, name, virtualization, lxc_name, kvm_name, disk_image, mac_address, template,
+			id, uuid, name, virtualization, lxc_name, kvm_name, disk_image, storage_pool_id, storage_path, mac_address, template,
 			vcpu, ram_mb, disk_gb, network_bw_mbps, network_down_mbps, network_up_mbps,
 			monthly_traffic_gb, traffic_mode, traffic_in_gb,
 			traffic_out_gb, traffic_used_rx, traffic_used_tx, traffic_reset_date,
@@ -748,8 +765,8 @@ func saveContainers(tx *sql.Tx) error {
 			snapshot_schedule_last_run, snapshot_schedule_next_run, snapshot_schedule_created_by,
 			policy_blocked, policy_blocked_reason, policy_blocked_at,
 			firewall_enabled, firewall_default_action, firewall_rules, allowed_image_ids, image_limit_configured
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			c.ID, c.UUID, c.Name, c.Virtualization, c.LXCName, c.KVMName, c.DiskImage, c.MACAddress, c.Template,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			c.ID, c.UUID, c.Name, c.Virtualization, c.LXCName, c.KVMName, c.DiskImage, c.StoragePoolID, c.StoragePath, c.MACAddress, c.Template,
 			c.VCPU, c.RAMMB, c.DiskGB, c.NetworkBWMbps, c.NetworkDownMbps, c.NetworkUpMbps,
 			c.MonthlyTrafficGB, c.TrafficMode, c.TrafficInGB,
 			c.TrafficOutGB, c.TrafficUsedRX, c.TrafficUsedTX, c.TrafficResetDate,
@@ -957,7 +974,7 @@ func saveSnapshots(tx *sql.Tx) error {
 
 func loadContainers() ([]Container, error) {
 	rows, err := db.Query(`SELECT
-		id, uuid, name, virtualization, lxc_name, kvm_name, disk_image, mac_address, template,
+		id, uuid, name, virtualization, lxc_name, kvm_name, disk_image, storage_pool_id, storage_path, mac_address, template,
 		vcpu, ram_mb, disk_gb, network_bw_mbps, network_down_mbps, network_up_mbps,
 		monthly_traffic_gb, traffic_mode, traffic_in_gb,
 		traffic_out_gb, traffic_used_rx, traffic_used_tx, traffic_reset_date,
@@ -981,11 +998,12 @@ func loadContainers() ([]Container, error) {
 		var scheduleEnabled, policyBlocked, firewallEnabled, imageLimitConfigured, restoreOnHostBoot int
 		var firewallDefaultAction string
 		var firewallRulesJSON, allowedImageIDs sql.NullString
+		var storagePoolID, storagePath sql.NullString
 		var lanIPv4Mode, lanInterface sql.NullString
 		var lanIPv4Address, lanIPv4Gateway sql.NullString
 		var lanIPv4PrefixLen sql.NullInt64
 		if err := rows.Scan(
-			&c.ID, &c.UUID, &c.Name, &c.Virtualization, &c.LXCName, &c.KVMName, &c.DiskImage, &c.MACAddress, &c.Template,
+			&c.ID, &c.UUID, &c.Name, &c.Virtualization, &c.LXCName, &c.KVMName, &c.DiskImage, &storagePoolID, &storagePath, &c.MACAddress, &c.Template,
 			&c.VCPU, &c.RAMMB, &c.DiskGB, &c.NetworkBWMbps, &c.NetworkDownMbps, &c.NetworkUpMbps,
 			&c.MonthlyTrafficGB, &c.TrafficMode, &c.TrafficInGB,
 			&c.TrafficOutGB, &c.TrafficUsedRX, &c.TrafficUsedTX, &c.TrafficResetDate,
@@ -1000,6 +1018,8 @@ func loadContainers() ([]Container, error) {
 		); err != nil {
 			return nil, err
 		}
+		c.StoragePoolID = storagePoolID.String
+		c.StoragePath = storagePath.String
 		c.LANIPv4Mode = lanIPv4Mode.String
 		c.LANInterface = lanInterface.String
 		c.LANIPv4Address = lanIPv4Address.String

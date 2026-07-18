@@ -95,6 +95,9 @@ var (
 )
 
 func BaseDir() string {
+	if pool := config.PreferredStoragePoolForContent(config.StorageContentKVM); pool != nil {
+		return filepath.Join(pool.Path, "kvm")
+	}
 	return "/var/lib/clicd/kvm"
 }
 
@@ -102,11 +105,30 @@ func NewManager() *Manager {
 	return &Manager{BasePath: BaseDir()}
 }
 
+func NewManagerForStoragePool(poolID string) *Manager {
+	if pool := config.StoragePoolByID(poolID); pool != nil && pool.Enabled {
+		for _, content := range pool.ContentTypes {
+			if content == config.StorageContentKVM {
+				return &Manager{BasePath: filepath.Join(pool.Path, "kvm")}
+			}
+		}
+	}
+	return NewManager()
+}
+
 func (m *Manager) instancesDir() string {
 	return filepath.Join(m.BasePath, "instances")
 }
 
 func (m *Manager) instanceDir(name string) string {
+	if config.AppConfig != nil {
+		for i := range config.AppConfig.Containers {
+			c := &config.AppConfig.Containers[i]
+			if c.IsKVM() && c.VirshName() == name && strings.TrimSpace(c.DiskImage) != "" {
+				return filepath.Dir(c.DiskImage)
+			}
+		}
+	}
 	return filepath.Join(m.instancesDir(), name)
 }
 
@@ -135,10 +157,19 @@ func DownloadImage(image Image) error {
 }
 
 func DownloadImageWithProgress(ctx context.Context, image Image, progress DownloadProgressFunc) error {
-	if err := os.MkdirAll(CacheDir(), 0755); err != nil {
+	pool, err := config.SelectStoragePoolForContent(config.StorageContentImages, "", 1024*1024*1024)
+	if err != nil {
 		return err
 	}
-	target := ImagePath(image.ID)
+	cacheDir := filepath.Join(pool.Path, "images", "kvm")
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		return err
+	}
+	ext := ".qcow2"
+	if image.Distro == "windows" {
+		ext = ".iso"
+	}
+	target := filepath.Join(cacheDir, image.ID+ext)
 	if ok, _ := ImageDownloadedInfo(image.ID); ok {
 		return nil
 	}
@@ -348,6 +379,7 @@ func normalizeQCOW2(ctx context.Context, src, target string) error {
 
 func (m *Manager) CreateContainer(cfg lxc.ContainerConfig) error {
 	cfg.NormalizeResourceAliases()
+	cfg.ReportProgress("preparing", "检查 KVM 镜像与创建参数")
 	image := FindImage(cfg.TemplateID)
 	if image == nil {
 		return fmt.Errorf("KVM image not found: %s", cfg.TemplateID)
@@ -367,6 +399,22 @@ func (m *Manager) CreateContainer(cfg lxc.ContainerConfig) error {
 	if cfg.VCPU < 1 || cfg.VCPU != float64(int(cfg.VCPU)) {
 		return fmt.Errorf("KVM vCPU must be a whole number and at least 1")
 	}
+	if IsWindowsImage(image.ID) && cfg.DiskGB < 30 {
+		cfg.DiskGB = 30
+	} else if image.Desktop != "" && cfg.DiskGB < 20 {
+		cfg.DiskGB = 20
+	}
+	cfg.ReportProgress("storage", "选择虚拟机存储磁盘")
+	pool, err := config.SelectStoragePoolForContent(
+		config.StorageContentKVM,
+		cfg.StoragePoolID,
+		int64(cfg.DiskGB)*1024*1024*1024,
+	)
+	if err != nil {
+		return err
+	}
+	cfg.StoragePoolID = pool.ID
+	m = NewManagerForStoragePool(pool.ID)
 	if cfg.WantsNAT() && cfg.PortMappingCount < 2 {
 		cfg.PortMappingCount = 2
 	} else if !cfg.WantsNAT() {
@@ -424,6 +472,7 @@ func (m *Manager) defineContainer(id int, vmName string, cfg lxc.ContainerConfig
 		sshPublicKey = sshAccess.PublicKey
 		sshAuthMode = sshAccess.Mode
 	}
+	cfg.ReportProgress("addresses", "分配 IPv4 与 IPv6 地址")
 	publicIPv4s, err := lxc.AllocatePublicIPv4Assignments(id, cfg.PublicIPv4s, cfg.IPv4Count, cfg.AssignIPv4)
 	if err != nil {
 		return nil, err
@@ -451,6 +500,7 @@ func (m *Manager) defineContainer(id int, vmName string, cfg lxc.ContainerConfig
 		if cfg.DiskGB < 30 {
 			cfg.DiskGB = 30
 		}
+		cfg.ReportProgress("disk", "创建 Windows 虚拟磁盘")
 		if err := createEmptyDisk(diskPath, cfg.DiskGB); err != nil {
 			return nil, err
 		}
@@ -459,6 +509,7 @@ func (m *Manager) defineContainer(id int, vmName string, cfg lxc.ContainerConfig
 		}
 		winAdminPassword = generateWindowsPassword()
 		unattendPath := filepath.Join(m.instanceDir(vmName), "unattend.iso")
+		cfg.ReportProgress("cloud_init", "生成 Windows 自动应答配置")
 		if err := createWindowsUnattendISO(unattendPath, cfg.Name, winAdminPassword, mac, ipv6List, ipv4List); err != nil {
 			return nil, err
 		}
@@ -472,9 +523,11 @@ func (m *Manager) defineContainer(id int, vmName string, cfg lxc.ContainerConfig
 				cfg.DiskGB = 20
 			}
 		}
+		cfg.ReportProgress("disk", "创建 KVM 系统磁盘")
 		if err := createOverlayDisk(ImagePath(image.ID), diskPath, cfg.DiskGB); err != nil {
 			return nil, err
 		}
+		cfg.ReportProgress("cloud_init", "生成 cloud-init 初始化配置")
 		if err := createSeedISO(seedPath, vmName, cfg.Name, sshPassword, sshPublicKey, mac, ipv6List, ipv4List, *image, sshAuthMode); err != nil {
 			return nil, err
 		}
@@ -484,6 +537,7 @@ func (m *Manager) defineContainer(id int, vmName string, cfg lxc.ContainerConfig
 	if err := os.WriteFile(xmlPath, []byte(xml), 0644); err != nil {
 		return nil, err
 	}
+	cfg.ReportProgress("define", "注册 KVM 虚拟机")
 	cmd := exec.Command("virsh", "define", xmlPath)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("virsh define failed: %v, output: %s", err, string(output))
@@ -492,6 +546,7 @@ func (m *Manager) defineContainer(id int, vmName string, cfg lxc.ContainerConfig
 	sshPort := 0
 	portMappings := []config.PortMapping{}
 	if allocatePorts && cfg.WantsNAT() {
+		cfg.ReportProgress("nat", "分配并配置 NAT 端口")
 		sshPort, err = config.AllocateSSHPort()
 		if err != nil {
 			return nil, err
@@ -538,6 +593,12 @@ func (m *Manager) defineContainer(id int, vmName string, cfg lxc.ContainerConfig
 	if trafficMode == "" {
 		trafficMode = "total"
 	}
+	storagePoolID := cfg.StoragePoolID
+	if storagePoolID == "" {
+		if pool := config.DefaultStoragePoolForContent(config.StorageContentKVM); pool != nil {
+			storagePoolID = pool.ID
+		}
+	}
 	container := &config.Container{
 		ID:               id,
 		UUID:             config.NewContainerUUID(),
@@ -545,6 +606,8 @@ func (m *Manager) defineContainer(id int, vmName string, cfg lxc.ContainerConfig
 		Virtualization:   config.VirtualizationKVM,
 		KVMName:          vmName,
 		DiskImage:        diskPath,
+		StoragePoolID:    storagePoolID,
+		StoragePath:      m.instanceDir(vmName),
 		MACAddress:       mac,
 		Template:         cfg.TemplateID,
 		VCPU:             cfg.VCPU,
@@ -580,6 +643,7 @@ func (m *Manager) defineContainer(id int, vmName string, cfg lxc.ContainerConfig
 		ExpiresAt:            cfg.ExpiresAt,
 	}
 	container.NormalizeNetworkAssignments()
+	cfg.ReportProgress("metadata", "保存虚拟机配置")
 	return container, nil
 }
 
@@ -954,7 +1018,7 @@ func (m *Manager) ensureDomainDefinition(c *config.Container) error {
 	return nil
 }
 
-func (m *Manager) CreateSnapshot(id int, createdBy string, scheduled bool, rotateLimit int) (config.Snapshot, error) {
+func (m *Manager) CreateSnapshot(id int, createdBy string, scheduled bool, rotateLimit int, storagePoolID ...string) (config.Snapshot, error) {
 	kvmSnapshotMu.Lock()
 	defer kvmSnapshotMu.Unlock()
 
@@ -980,17 +1044,26 @@ func (m *Manager) CreateSnapshot(id int, createdBy string, scheduled bool, rotat
 
 	name := c.VirshName()
 	instanceDir := m.instanceDir(name)
-	if err := safePathUnder(instanceDir, m.instancesDir()); err != nil {
+	if err := safePathUnder(instanceDir, filepath.Dir(instanceDir)); err != nil {
 		return config.Snapshot{}, err
 	}
 	if _, err := os.Stat(instanceDir); err != nil {
 		return config.Snapshot{}, fmt.Errorf("VM storage not found: %v", err)
 	}
+	pool, err := config.SelectStoragePoolForContent(
+		config.StorageContentSnapshots,
+		firstString(storagePoolID),
+		dirSizeBytes(instanceDir),
+	)
+	if err != nil {
+		return config.Snapshot{}, err
+	}
 
 	now := time.Now()
 	snapshotID := fmt.Sprintf("snap-%d-%s", id, now.Format("20060102150405-000000000"))
-	snapshotDir := filepath.Join(snapshotBaseDir(), "kvm", strconv.Itoa(id), snapshotID)
-	if err := safePathUnder(snapshotDir, snapshotBaseDir()); err != nil {
+	baseDir := filepath.Join(pool.Path, "snapshots")
+	snapshotDir := filepath.Join(baseDir, "kvm", strconv.Itoa(id), snapshotID)
+	if err := safePathUnder(snapshotDir, baseDir); err != nil {
 		return config.Snapshot{}, err
 	}
 	if err := os.MkdirAll(snapshotDir, 0700); err != nil {
@@ -1043,7 +1116,7 @@ func (m *Manager) DeleteSnapshot(id string) error {
 
 func (m *Manager) deleteSnapshotLocked(snapshot config.Snapshot) error {
 	if snapshot.Path != "" {
-		if err := safePathUnder(snapshot.Path, snapshotBaseDir()); err != nil {
+		if err := safeSnapshotPath(snapshot.Path); err != nil {
 			return err
 		}
 		if err := os.RemoveAll(snapshot.Path); err != nil {
@@ -1065,7 +1138,7 @@ func (m *Manager) RestoreSnapshot(id string) error {
 	if snapshot.Path == "" {
 		return fmt.Errorf("snapshot path is empty")
 	}
-	if err := safePathUnder(snapshot.Path, snapshotBaseDir()); err != nil {
+	if err := safeSnapshotPath(snapshot.Path); err != nil {
 		return err
 	}
 	if _, err := os.Stat(snapshot.Path); err != nil {
@@ -1081,7 +1154,8 @@ func (m *Manager) RestoreSnapshot(id string) error {
 	}
 	name := c.VirshName()
 	instanceDir := m.instanceDir(name)
-	if err := safePathUnder(instanceDir, m.instancesDir()); err != nil {
+	instanceParent := filepath.Dir(instanceDir)
+	if err := safePathUnder(instanceDir, instanceParent); err != nil {
 		return err
 	}
 
@@ -1089,8 +1163,8 @@ func (m *Manager) RestoreSnapshot(id string) error {
 	if err != nil {
 		return err
 	}
-	backupDir := filepath.Join(m.instancesDir(), fmt.Sprintf(".%s-restore-backup-%d", name, time.Now().UnixNano()))
-	if err := safePathUnder(backupDir, m.instancesDir()); err != nil {
+	backupDir := filepath.Join(instanceParent, fmt.Sprintf(".%s-restore-backup-%d", name, time.Now().UnixNano()))
+	if err := safePathUnder(backupDir, instanceParent); err != nil {
 		return err
 	}
 	if err := os.Rename(instanceDir, backupDir); err != nil && !os.IsNotExist(err) {
@@ -1110,6 +1184,7 @@ func (m *Manager) RestoreSnapshot(id string) error {
 		return fmt.Errorf("virsh define failed after restore: %v, output: %s", err, string(output))
 	}
 	c.DiskImage = filepath.Join(instanceDir, "disk.qcow2")
+	c.StoragePath = instanceDir
 	c.Status = "stopped"
 	c.IP = ""
 	config.SaveConfig()
@@ -1244,7 +1319,33 @@ func nextSnapshotRun(from time.Time, intervalHours int, scheduleTime string) tim
 }
 
 func snapshotBaseDir() string {
-	return filepath.Join(config.AppConfig.DataDir, "snapshots")
+	return snapshotBaseDirForPool("")
+}
+
+func snapshotBaseDirForPool(poolID string) string {
+	if pool, err := config.SelectStoragePoolForContent(config.StorageContentSnapshots, poolID, 0); err == nil {
+		return filepath.Join(pool.Path, "snapshots")
+	}
+	return ""
+}
+
+func safeSnapshotPath(path string) error {
+	if err := safePathUnder(path, filepath.Join(config.AppConfig.DataDir, "snapshots")); err == nil {
+		return nil
+	}
+	for _, pool := range config.StoragePoolsForContent(config.StorageContentSnapshots) {
+		if err := safePathUnder(path, filepath.Join(pool.Path, "snapshots")); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("unsafe snapshot path: %s", path)
+}
+
+func firstString(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(values[0])
 }
 
 func copyTree(src string, dst string) error {

@@ -121,6 +121,29 @@ func TestManagedPrlimitLinesDoNotSetNproc(t *testing.T) {
 	}
 }
 
+func TestSameFilesystemPathResolvesContainerStorageSymlink(t *testing.T) {
+	base := t.TempDir()
+	storageContainer := filepath.Join(base, "storage", "ct-1")
+	rootfs := filepath.Join(storageContainer, "rootfs")
+	if err := os.MkdirAll(rootfs, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	lxcPath := filepath.Join(base, "lxc")
+	if err := os.MkdirAll(lxcPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	containerLink := filepath.Join(lxcPath, "ct-1")
+	if err := os.Symlink(storageContainer, containerLink); err != nil {
+		t.Skipf("directory symlinks are unavailable: %v", err)
+	}
+
+	linkedRootfs := filepath.Join(containerLink, "rootfs")
+	if !sameFilesystemPath(rootfs, linkedRootfs) {
+		t.Fatalf("sameFilesystemPath(%q, %q) = false, want true", rootfs, linkedRootfs)
+	}
+}
+
 func TestAppendMissingSeccompRulesAddsFutexMitigationOnce(t *testing.T) {
 	base := "2\ndenylist\n[all]\nopen_by_handle_at errno 1\n"
 

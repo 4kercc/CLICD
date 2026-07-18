@@ -30,6 +30,8 @@ type Task struct {
 	ContainerName string              `json:"container_name"`
 	Status        string              `json:"status"`
 	Error         string              `json:"error,omitempty"`
+	Stage         string              `json:"stage,omitempty"`
+	StageDetail   string              `json:"stage_detail,omitempty"`
 	CreatedAt     string              `json:"created_at"`
 	TemplateID    string              `json:"template_id,omitempty"`
 	Config        lxc.ContainerConfig `json:"config,omitempty"`
@@ -37,30 +39,74 @@ type Task struct {
 	User          string              `json:"user,omitempty"` // who created this task
 	IP            string              `json:"ip,omitempty"`
 	UserAgent     string              `json:"user_agent,omitempty"`
+	activeKey     string
 }
 
 type TaskQueue struct {
-	mu          sync.Mutex
-	createQueue []*Task
-	opQueue     []*Task
-	tasks       map[string]*Task
-	nextID      int
-	createCond  *sync.Cond
-	opCond      *sync.Cond
-	stop        chan struct{}
+	mu             sync.Mutex
+	createQueue    []*Task
+	opQueue        []*Task
+	tasks          map[string]*Task
+	nextID         int
+	createCond     *sync.Cond
+	opCond         *sync.Cond
+	maxConcurrency int
+	activeTasks    int
+	activeTargets  map[string]bool
+	stop           chan struct{}
+}
+
+type TaskQueueSettings struct {
+	Concurrency int `json:"concurrency"`
+	Active      int `json:"active"`
+	Pending     int `json:"pending"`
 }
 
 var globalQueue *TaskQueue
 
 func init() {
-	globalQueue = &TaskQueue{
-		tasks: make(map[string]*Task),
-		stop:  make(chan struct{}),
+	globalQueue = newTaskQueue(config.DefaultTaskConcurrency)
+	go globalQueue.createDispatcher()
+	go globalQueue.opDispatcher()
+}
+
+func newTaskQueue(concurrency int) *TaskQueue {
+	q := &TaskQueue{
+		tasks:          make(map[string]*Task),
+		maxConcurrency: config.NormalizeTaskConcurrency(concurrency),
+		activeTargets:  make(map[string]bool),
+		stop:           make(chan struct{}),
 	}
-	globalQueue.createCond = sync.NewCond(&globalQueue.mu)
-	globalQueue.opCond = sync.NewCond(&globalQueue.mu)
-	go globalQueue.createWorker()
-	go globalQueue.opWorker()
+	q.createCond = sync.NewCond(&q.mu)
+	q.opCond = sync.NewCond(&q.mu)
+	return q
+}
+
+func ConfigureTaskQueue(concurrency int) {
+	globalQueue.SetConcurrency(concurrency)
+}
+
+func (q *TaskQueue) SetConcurrency(concurrency int) {
+	q.mu.Lock()
+	q.maxConcurrency = config.NormalizeTaskConcurrency(concurrency)
+	q.createCond.Broadcast()
+	q.opCond.Broadcast()
+	q.mu.Unlock()
+}
+
+func (q *TaskQueue) Settings() TaskQueueSettings {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return TaskQueueSettings{
+		Concurrency: q.maxConcurrency,
+		Active:      q.activeTasks,
+		Pending:     len(q.createQueue) + len(q.opQueue),
+	}
+}
+
+func (q *TaskQueue) signalDispatchers() {
+	q.createCond.Broadcast()
+	q.opCond.Broadcast()
 }
 
 func (q *TaskQueue) enqueueTask(task *Task) {
@@ -90,6 +136,8 @@ func (q *TaskQueue) EnqueueWithAudit(containerID int, containerName string, task
 		ContainerID:   containerID,
 		ContainerName: containerName,
 		Status:        "pending",
+		Stage:         "queued",
+		StageDetail:   "排队等待",
 		CreatedAt:     time.Now().Format("2006-01-02 15:04:05"),
 		TemplateID:    templateID,
 		User:          user,
@@ -172,6 +220,8 @@ func (q *TaskQueue) enqueueBatchCreateList(configs []lxc.ContainerConfig, user s
 			ContainerID:   0,
 			ContainerName: cfgCopy.Name,
 			Status:        "pending",
+			Stage:         "queued",
+			StageDetail:   "排队等待",
 			CreatedAt:     time.Now().Format("2006-01-02 15:04:05"),
 			Config:        cfgCopy,
 			User:          user,
@@ -202,6 +252,8 @@ func (q *TaskQueue) enqueueSingleWithAudit(containerID int, containerName string
 		ContainerID:   containerID,
 		ContainerName: containerName,
 		Status:        "pending",
+		Stage:         "queued",
+		StageDetail:   "排队等待",
 		CreatedAt:     time.Now().Format("2006-01-02 15:04:05"),
 		TemplateID:    templateID,
 		User:          user,
@@ -262,174 +314,249 @@ func (q *TaskQueue) CancelPendingSecurityStops() int {
 	return cancelled
 }
 
-// createWorker handles TaskCreate: lxc-create, resource setup, start, and SSH init.
-// If a restored task already has a same-name container in config, it resumes
-// initialization instead of creating another ct-{id}.
-func (q *TaskQueue) createWorker() {
+// The two dispatchers keep long-running creates from blocking power operations,
+// while sharing one global concurrency budget.
+func (q *TaskQueue) createDispatcher() {
 	for {
-		q.mu.Lock()
-		for len(q.createQueue) == 0 {
-			q.createCond.Wait()
-		}
-		task := q.createQueue[0]
-		q.createQueue = q.createQueue[1:]
-		task.Status = "running"
-		q.mu.Unlock()
-
-		createdByTask := false
-		if task.Config.Name == "" {
-			task.Config.Name = task.ContainerName
-		}
-		task.Config.NormalizeResourceAliases()
-		if task.Config.Name == "" {
-			task.Status = "failed"
-			task.Error = "container name is required"
-			config.AddAuditLog(string(task.Type), task.ContainerName, "failed: "+task.Error, "admin")
-			q.mu.Lock()
-			q.persistTasks()
-			q.mu.Unlock()
-			continue
-		}
-		c := config.FindContainerByName(task.Config.Name)
-		if c == nil {
-			// 1) Download image + apply limits (lxc-create)
-			err := createByRuntime(task.Config)
-			if err != nil {
-				task.Status = "failed"
-				task.Error = err.Error()
-				config.AddAuditLog(string(task.Type), task.Config.Name, "失败: "+err.Error(), "admin")
-				q.mu.Lock()
-				q.persistTasks()
-				q.mu.Unlock()
-				continue
-			}
-			createdByTask = true
-
-			// 2) Find created container by name
-			c = config.FindContainerByName(task.Config.Name)
-			if c == nil {
-				task.Status = "failed"
-				task.Error = "created but not found in config"
-				config.AddAuditLog(string(task.Type), task.Config.Name, "失败: "+task.Error, "admin")
-				q.mu.Lock()
-				q.persistTasks()
-				q.mu.Unlock()
-				continue
-			}
-		}
-
-		task.ContainerID = c.ID
-		task.ContainerName = c.Name
-
-		// 3) Start + initialize SSH/network in the same worker.
-		//    If init fails, destroy the container so no dead entry remains.
-		startErr := startByRuntime(c.ID)
-		if startErr != nil {
-			if createdByTask {
-				_ = destroyByRuntime(c.ID)
-			}
-			task.Status = "failed"
-			task.Error = startErr.Error()
-			config.AddAuditLog(string(task.Type), task.ContainerName, "初始化失败: "+startErr.Error(), "admin")
-		} else {
-			task.Status = "done"
-			config.AddAuditLog(string(task.Type), task.ContainerName, "成功", "admin")
-		}
-
-		q.mu.Lock()
-		q.persistTasks()
-		q.mu.Unlock()
+		task := q.takeNextTask(true)
+		go q.runCreateTask(task)
 	}
 }
 
-// opWorker handles all non-create tasks (start, stop, restart, delete, reinstall)
-// including the follow-up initialization after a create succeeds.
-func (q *TaskQueue) opWorker() {
+func (q *TaskQueue) opDispatcher() {
 	for {
-		q.mu.Lock()
-		for len(q.opQueue) == 0 {
-			q.opCond.Wait()
-		}
-		task := q.opQueue[0]
-		q.opQueue = q.opQueue[1:]
-		task.Status = "running"
-		q.mu.Unlock()
-
-		var err error
-		skipped := false
-		err = resolveTaskContainer(task)
-		// Block operations on expired or traffic-exceeded containers (except stop/delete)
-		if err == nil && (task.Type == TaskStart || task.Type == TaskRestart || task.Type == TaskReinstall) {
-			c := config.FindContainer(task.ContainerID)
-			if c != nil {
-				if lxc.IsExpired(*c) {
-					err = fmt.Errorf("容器已到期，不允许此操作")
-				} else if lxc.IsTrafficExceeded(*c) {
-					err = fmt.Errorf("容器流量已超限，不允许此操作")
-				}
-			}
-		}
-		if err == nil && isSecurityStopTask(task) && !config.AppConfig.SecurityAutoShutdown {
-			skipped = true
-		}
-		if err == nil {
-			if !skipped {
-				switch task.Type {
-				case TaskStart:
-					err = startByRuntime(task.ContainerID)
-				case TaskStop:
-					err = stopByRuntime(task.ContainerID)
-				case TaskRestart:
-					err = restartByRuntime(task.ContainerID)
-				case TaskDelete:
-					err = destroyByRuntime(task.ContainerID)
-					if err == nil {
-						time.Sleep(1 * time.Second)
-						if config.FindContainer(task.ContainerID) != nil {
-							err = fmt.Errorf("container still exists after delete: %d", task.ContainerID)
-						}
-					}
-				case TaskReinstall:
-					if lxc.HasSSHAuthOptions(task.Config) {
-						err = reinstallByRuntime(task.ContainerID, task.TemplateID, task.Config)
-					} else {
-						err = reinstallByRuntime(task.ContainerID, task.TemplateID)
-					}
-				}
-			}
-		}
-
-		q.mu.Lock()
-		auditUser := task.User
-		if auditUser == "" {
-			auditUser = "admin"
-		}
-		if err != nil {
-			task.Status = "failed"
-			task.Error = err.Error()
-			config.AddAuditLogFull(string(task.Type), task.ContainerName, "失败: "+err.Error(), auditUser, task.IP, task.UserAgent, false, err.Error())
-		} else if skipped {
-			task.Status = "done"
-			config.AddAuditLogFull(string(task.Type), task.ContainerName, "跳过: 安全告警自动关机已关闭", auditUser, task.IP, task.UserAgent, true, "")
-		} else {
-			task.Status = "done"
-			config.AddAuditLogFull(string(task.Type), task.ContainerName, "成功", auditUser, task.IP, task.UserAgent, true, "")
-			switch task.Type {
-			case TaskStart:
-				config.UpdateContainerStatus(task.ContainerID, "running")
-				clearPolicyBlockAfterAdminRecovery(task)
-			case TaskStop:
-				config.UpdateContainerStatus(task.ContainerID, "stopped")
-			case TaskRestart:
-				config.UpdateContainerStatus(task.ContainerID, "running")
-				clearPolicyBlockAfterAdminRecovery(task)
-			case TaskReinstall:
-				clearPolicyBlockAfterAdminRecovery(task)
-			}
-		}
-		q.persistTasks()
-		q.mu.Unlock()
+		task := q.takeNextTask(false)
+		go q.runOperationTask(task)
 	}
+}
+
+func (q *TaskQueue) takeNextTask(create bool) *Task {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	cond := q.opCond
+	if create {
+		cond = q.createCond
+	}
+	for {
+		queue := q.opQueue
+		if create {
+			queue = q.createQueue
+		}
+		if q.activeTasks < q.maxConcurrency {
+			if index := runnableTaskIndex(queue, q.activeTargets); index >= 0 {
+				task := queue[index]
+				queue = append(queue[:index], queue[index+1:]...)
+				if create {
+					q.createQueue = queue
+				} else {
+					q.opQueue = queue
+				}
+				task.Status = "running"
+				task.Error = ""
+				task.Stage = "preparing"
+				task.StageDetail = "准备初始化环境"
+				task.activeKey = taskConcurrencyKey(task)
+				q.activeTargets[task.activeKey] = true
+				q.activeTasks++
+				q.persistTasks()
+				return task
+			}
+		}
+		cond.Wait()
+	}
+}
+
+func runnableTaskIndex(queue []*Task, activeTargets map[string]bool) int {
+	for index, task := range queue {
+		if !activeTargets[taskConcurrencyKey(task)] {
+			return index
+		}
+	}
+	return -1
+}
+
+func taskConcurrencyKey(task *Task) string {
+	if task == nil {
+		return "task:nil"
+	}
+	name := strings.TrimSpace(task.ContainerName)
+	if name == "" {
+		name = strings.TrimSpace(task.Config.Name)
+	}
+	if name != "" {
+		return "name:" + strings.ToLower(name)
+	}
+	if task.ContainerID > 0 {
+		return fmt.Sprintf("id:%d", task.ContainerID)
+	}
+	return "task:" + task.ID
+}
+
+func (q *TaskQueue) finishTask(task *Task, status string, taskErr error) {
+	q.mu.Lock()
+	task.Status = status
+	if taskErr != nil {
+		task.Error = taskErr.Error()
+		if task.Type == TaskCreate {
+			task.Stage = "failed"
+			task.StageDetail = "初始化失败"
+		}
+	} else {
+		task.Error = ""
+		if task.Type == TaskCreate {
+			task.Stage = "completed"
+			task.StageDetail = "初始化完成"
+		}
+	}
+	if task.activeKey != "" {
+		delete(q.activeTargets, task.activeKey)
+		task.activeKey = ""
+	}
+	if q.activeTasks > 0 {
+		q.activeTasks--
+	}
+	q.persistTasks()
+	q.signalDispatchers()
+	q.mu.Unlock()
+}
+
+func (q *TaskQueue) updateTaskStage(task *Task, stage, detail string) {
+	q.mu.Lock()
+	task.Stage = stage
+	task.StageDetail = detail
+	q.mu.Unlock()
+}
+
+// runCreateTask handles lxc-create, resource setup, start, and SSH init. A
+// restored task resumes initialization when the same-name container exists.
+func (q *TaskQueue) runCreateTask(task *Task) {
+	q.mu.Lock()
+	createdByTask := false
+	if task.Config.Name == "" {
+		task.Config.Name = task.ContainerName
+	}
+	task.Config.NormalizeResourceAliases()
+	cfg := task.Config
+	q.mu.Unlock()
+	cfg.Progress = func(stage, detail string) {
+		q.updateTaskStage(task, stage, detail)
+	}
+	if cfg.Name == "" {
+		err := fmt.Errorf("container name is required")
+		config.AddAuditLog(string(task.Type), task.ContainerName, "failed: "+err.Error(), "admin")
+		q.finishTask(task, "failed", err)
+		return
+	}
+	c := config.FindContainerByName(cfg.Name)
+	if c == nil {
+		if err := createByRuntime(cfg); err != nil {
+			config.AddAuditLog(string(task.Type), cfg.Name, "失败: "+err.Error(), "admin")
+			q.finishTask(task, "failed", err)
+			return
+		}
+		createdByTask = true
+		c = config.FindContainerByName(cfg.Name)
+		if c == nil {
+			err := fmt.Errorf("created but not found in config")
+			config.AddAuditLog(string(task.Type), task.Config.Name, "失败: "+err.Error(), "admin")
+			q.finishTask(task, "failed", err)
+			return
+		}
+	}
+
+	q.mu.Lock()
+	task.ContainerID = c.ID
+	task.ContainerName = c.Name
+	q.mu.Unlock()
+	startDetail := "启动容器并等待网络就绪"
+	if strings.EqualFold(cfg.Virtualization, config.VirtualizationKVM) {
+		startDetail = "启动虚拟机并等待网络就绪"
+	}
+	q.updateTaskStage(task, "starting", startDetail)
+	if err := startByRuntime(c.ID); err != nil {
+		if createdByTask {
+			_ = destroyByRuntime(c.ID)
+		}
+		config.AddAuditLog(string(task.Type), task.ContainerName, "初始化失败: "+err.Error(), "admin")
+		q.finishTask(task, "failed", err)
+		return
+	}
+	config.AddAuditLog(string(task.Type), task.ContainerName, "成功", "admin")
+	q.finishTask(task, "done", nil)
+}
+
+func (q *TaskQueue) runOperationTask(task *Task) {
+	q.mu.Lock()
+	err := resolveTaskContainer(task)
+	q.mu.Unlock()
+	skipped := false
+	if err == nil && (task.Type == TaskStart || task.Type == TaskRestart || task.Type == TaskReinstall) {
+		c := config.FindContainer(task.ContainerID)
+		if c != nil {
+			if lxc.IsExpired(*c) {
+				err = fmt.Errorf("容器已到期，不允许此操作")
+			} else if lxc.IsTrafficExceeded(*c) {
+				err = fmt.Errorf("容器流量已超限，不允许此操作")
+			}
+		}
+	}
+	if err == nil && isSecurityStopTask(task) && !config.AppConfig.SecurityAutoShutdown {
+		skipped = true
+	}
+	if err == nil && !skipped {
+		switch task.Type {
+		case TaskStart:
+			err = startByRuntime(task.ContainerID)
+		case TaskStop:
+			err = stopByRuntime(task.ContainerID)
+		case TaskRestart:
+			err = restartByRuntime(task.ContainerID)
+		case TaskDelete:
+			err = destroyByRuntime(task.ContainerID)
+			if err == nil {
+				time.Sleep(time.Second)
+				if config.FindContainer(task.ContainerID) != nil {
+					err = fmt.Errorf("container still exists after delete: %d", task.ContainerID)
+				}
+			}
+		case TaskReinstall:
+			if lxc.HasSSHAuthOptions(task.Config) {
+				err = reinstallByRuntime(task.ContainerID, task.TemplateID, task.Config)
+			} else {
+				err = reinstallByRuntime(task.ContainerID, task.TemplateID)
+			}
+		}
+	}
+
+	auditUser := task.User
+	if auditUser == "" {
+		auditUser = "admin"
+	}
+	if err != nil {
+		config.AddAuditLogFull(string(task.Type), task.ContainerName, "失败: "+err.Error(), auditUser, task.IP, task.UserAgent, false, err.Error())
+		q.finishTask(task, "failed", err)
+		return
+	}
+	if skipped {
+		config.AddAuditLogFull(string(task.Type), task.ContainerName, "跳过: 安全告警自动关机已关闭", auditUser, task.IP, task.UserAgent, true, "")
+		q.finishTask(task, "done", nil)
+		return
+	}
+
+	config.AddAuditLogFull(string(task.Type), task.ContainerName, "成功", auditUser, task.IP, task.UserAgent, true, "")
+	switch task.Type {
+	case TaskStart:
+		config.UpdateContainerStatus(task.ContainerID, "running")
+		clearPolicyBlockAfterAdminRecovery(task)
+	case TaskStop:
+		config.UpdateContainerStatus(task.ContainerID, "stopped")
+	case TaskRestart:
+		config.UpdateContainerStatus(task.ContainerID, "running")
+		clearPolicyBlockAfterAdminRecovery(task)
+	case TaskReinstall:
+		clearPolicyBlockAfterAdminRecovery(task)
+	}
+	q.finishTask(task, "done", nil)
 }
 
 func isSecurityStopTask(task *Task) bool {
@@ -503,7 +630,8 @@ func (q *TaskQueue) GetTasks() []*Task {
 	result := make([]*Task, 0, len(q.tasks))
 	// Collect all task IDs, sort by creation time (extracted from ID number)
 	for _, t := range q.tasks {
-		result = append(result, t)
+		copyTask := *t
+		result = append(result, &copyTask)
 	}
 	// Stable sort by ID number (task-N where N is sequential)
 	for i := 0; i < len(result); i++ {
@@ -659,6 +787,10 @@ func HandleBatchCreate(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.Containers[i].DiskGB < 1 {
 			req.Containers[i].DiskGB = 5
+		}
+		if err := validateCreateStoragePool(&req.Containers[i]); err != nil {
+			jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: name + ": " + err.Error()})
+			return
 		}
 		if !isImageEnabledAndDownloaded(req.Containers[i].TemplateID, req.Containers[i].Virtualization) {
 			jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: name + ": template is not enabled or downloaded"})
@@ -879,6 +1011,8 @@ func HandleTasks(w http.ResponseWriter, r *http.Request) {
 
 // RestoreTasks restores task queue from config
 func RestoreTasks() {
+	globalQueue.mu.Lock()
+	defer globalQueue.mu.Unlock()
 	for _, st := range config.AppConfig.Tasks {
 		if st.Type == string(TaskStop) && st.User == "system:security" && !config.AppConfig.SecurityAutoShutdown {
 			continue
@@ -908,6 +1042,8 @@ func RestoreTasks() {
 			ContainerName: containerName,
 			Status:        st.Status,
 			Error:         st.Error,
+			Stage:         "queued",
+			StageDetail:   "排队等待",
 			CreatedAt:     st.CreatedAt,
 			TemplateID:    st.TemplateID,
 			Config:        cfg,
@@ -936,4 +1072,18 @@ func parseIDNum(id string) int {
 		}
 	}
 	return num
+}
+
+func validateCreateStoragePool(cfg *lxc.ContainerConfig) error {
+	required := config.StorageContentLXC
+	if cfg.Virtualization == config.VirtualizationKVM {
+		required = config.StorageContentKVM
+	}
+	requiredBytes := int64(cfg.DiskGB) * 1024 * 1024 * 1024
+	pool, err := config.SelectStoragePoolForContent(required, cfg.StoragePoolID, requiredBytes)
+	if err != nil {
+		return err
+	}
+	cfg.StoragePoolID = pool.ID
+	return nil
 }

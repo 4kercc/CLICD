@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
   Download,
   Trash2,
@@ -11,15 +12,18 @@ import {
   AlertCircle,
   X,
 } from 'lucide-react'
-import { getImages, downloadImage, cancelImageDownload, deleteImage, toggleImage, ImageInfo } from '../services/api'
+import { getImages, getStorageInfo, downloadImage, cancelImageDownload, deleteImage, toggleImage, ImageInfo, StorageInfo } from '../services/api'
 import { useDialog } from '../components/Dialog'
 
 export default function ImageManagement() {
   const dialog = useDialog()
+  const navigate = useNavigate()
   const [images, setImages] = useState<ImageInfo[]>([])
   const [loading, setLoading] = useState(true)
   const [actionLoading, setActionLoading] = useState<string | null>(null)
   const [error, setError] = useState('')
+  const [storageInfo, setStorageInfo] = useState<StorageInfo | null>(null)
+  const [storageLoading, setStorageLoading] = useState(true)
 
   const fetchImages = useCallback(async () => {
     try {
@@ -33,9 +37,22 @@ export default function ImageManagement() {
     }
   }, [])
 
+  const fetchStorage = useCallback(async () => {
+    setStorageLoading(true)
+    try {
+      const res = await getStorageInfo()
+      setStorageInfo(res.data.data || null)
+    } catch {
+      setStorageInfo(null)
+    } finally {
+      setStorageLoading(false)
+    }
+  }, [])
+
   useEffect(() => {
     fetchImages()
-  }, [fetchImages])
+    fetchStorage()
+  }, [fetchImages, fetchStorage])
 
   useEffect(() => {
     const hasDownloads = images.some((img) => img.downloading)
@@ -101,6 +118,9 @@ export default function ImageManagement() {
   const downloadedCount = images.filter((img) => img.downloaded).length
   const lxcImages = images.filter((img) => img.type === 'lxc')
   const kvmImages = images.filter((img) => img.type === 'kvm')
+  const imageStorageReady = (storageInfo?.pools || []).some((pool) =>
+    pool.enabled !== false && pool.available !== false && (pool.content_types || []).includes('images')
+  )
 
   if (loading) {
     return (
@@ -121,7 +141,7 @@ export default function ImageManagement() {
           </p>
         </div>
         <button
-          onClick={fetchImages}
+          onClick={() => { fetchImages(); fetchStorage() }}
           className="flex items-center gap-1.5 px-3 py-1.5 border border-gray-300 text-gray-700 rounded-md hover:bg-gray-50 transition-colors text-xs font-medium"
         >
           <RefreshCw className="w-3.5 h-3.5" />
@@ -136,6 +156,25 @@ export default function ImageManagement() {
         </div>
       )}
 
+      {storageLoading && (
+        <div className="flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-600">
+          <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+          正在检查存储配置...
+        </div>
+      )}
+
+      {!storageLoading && !imageStorageReady && (
+        <div className="flex items-center justify-between gap-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="h-4 w-4 shrink-0" />
+            尚未开启镜像缓存存储，无法下载新镜像。
+          </div>
+          <button onClick={() => navigate('/storage')} className="shrink-0 rounded-md border border-amber-300 bg-white px-3 py-1.5 text-xs font-medium hover:bg-amber-100">
+            去开启
+          </button>
+        </div>
+      )}
+
       <ImageTable
         title="LXC 容器镜像"
         images={lxcImages}
@@ -146,6 +185,8 @@ export default function ImageManagement() {
         onCancelDownload={handleCancelDownload}
         onDelete={handleDelete}
         onToggle={handleToggle}
+        storageReady={imageStorageReady}
+        storageLoading={storageLoading}
       />
 
       {kvmImages.length > 0 && (
@@ -159,6 +200,8 @@ export default function ImageManagement() {
           onCancelDownload={handleCancelDownload}
           onDelete={handleDelete}
           onToggle={handleToggle}
+          storageReady={imageStorageReady}
+          storageLoading={storageLoading}
         />
       )}
     </div>
@@ -175,6 +218,8 @@ function ImageTable({
   onCancelDownload,
   onDelete,
   onToggle,
+  storageReady,
+  storageLoading,
 }: {
   title: string
   images: ImageInfo[]
@@ -185,6 +230,8 @@ function ImageTable({
   onCancelDownload: (id: string) => void
   onDelete: (id: string) => void
   onToggle: (id: string, enabled: boolean) => void
+  storageReady: boolean
+  storageLoading: boolean
 }) {
   return (
     <div className="space-y-3">
@@ -253,7 +300,8 @@ function ImageTable({
                         {!img.downloaded && !img.downloading && (
                           <button
                             onClick={() => onDownload(img.id)}
-                            disabled={isBusy}
+                            disabled={isBusy || storageLoading || !storageReady}
+                            title={storageLoading ? '正在检查存储配置...' : storageReady ? '下载镜像' : '请先在存储管理中开启镜像缓存存储'}
                             className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-black text-white rounded-md hover:bg-gray-800 transition-colors text-xs font-medium disabled:opacity-50"
                           >
                             {isBusy ? (
@@ -281,7 +329,8 @@ function ImageTable({
                           <>
                             <button
                               onClick={() => onToggle(img.id, img.enabled)}
-                              disabled={isBusy}
+                              disabled={isBusy || storageLoading || !storageReady}
+                              title={storageLoading ? '正在检查存储配置...' : storageReady ? (img.enabled ? '禁用镜像' : '启用镜像') : '请先在存储管理中开启镜像缓存存储'}
                               className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs font-medium transition-colors disabled:opacity-50 ${
                                 img.enabled
                                   ? 'bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100'
@@ -317,7 +366,7 @@ function ImageTable({
 function StatusBadge({ img }: { img: ImageInfo }) {
   if (img.downloading) {
     const progress = Math.max(0, Math.min(100, img.progress || 0))
-    const showProgress = img.stage === 'downloading' && progress > 0
+    const showProgress = img.stage === 'downloading' && (progress > 0 || img.downloaded_bytes > 0)
     return (
       <div className="inline-flex flex-col gap-1">
         <span
@@ -329,7 +378,10 @@ function StatusBadge({ img }: { img: ImageInfo }) {
         </span>
         {showProgress && (
           <span className="block h-1 w-24 overflow-hidden rounded-full bg-amber-100">
-            <span className="block h-full rounded-full bg-amber-500 transition-all" style={{ width: `${progress}%` }} />
+            <span
+              className={`block h-full rounded-full bg-amber-500 transition-all ${progress <= 0 ? 'animate-pulse' : ''}`}
+              style={{ width: progress > 0 ? `${progress}%` : '35%' }}
+            />
           </span>
         )}
       </div>
@@ -375,6 +427,7 @@ function downloadStatusLabel(img: ImageInfo) {
   if (img.stage === 'converting') return '转换中'
   if (img.stage === 'lxc-create') return '下载中'
   if (img.progress > 0) return `下载中 ${Math.min(100, img.progress)}%`
+  if (img.downloaded_bytes > 0) return `下载中 · ${formatSize(img.downloaded_bytes)}`
   return '下载中'
 }
 

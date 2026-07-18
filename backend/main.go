@@ -52,6 +52,7 @@ func main() {
 		installShutdownStateCapture()
 
 		// Restore persisted state
+		api.ConfigureTaskQueue(cfg.TaskConcurrency)
 		api.RestoreTasks()
 		api.RestoreLoginLogs()
 

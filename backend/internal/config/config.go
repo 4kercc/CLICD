@@ -5,9 +5,12 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -109,6 +112,8 @@ type Container struct {
 	LXCName                       string                 `json:"lxc_name,omitempty"`
 	KVMName                       string                 `json:"kvm_name,omitempty"`
 	DiskImage                     string                 `json:"disk_image,omitempty"`
+	StoragePoolID                 string                 `json:"storage_pool_id,omitempty"`
+	StoragePath                   string                 `json:"storage_path,omitempty"`
 	MACAddress                    string                 `json:"mac_address,omitempty"`
 	Template                      string                 `json:"template"`
 	VCPU                          float64                `json:"vcpu"`
@@ -200,6 +205,308 @@ func (c *Container) UsesLANStaticIPv4() bool {
 
 func (c *Container) UsesLANIPv4() bool {
 	return c.UsesLANDHCP() || c.UsesLANStaticIPv4()
+}
+
+func normalizeStoragePools() bool {
+	if AppConfig == nil {
+		return false
+	}
+	changed := false
+	result := make([]StoragePool, 0, len(AppConfig.StoragePools))
+	seen := map[string]bool{}
+	defaultSeen := map[string]bool{}
+	for _, pool := range AppConfig.StoragePools {
+		pool.ID = strings.TrimSpace(pool.ID)
+		pool.Name = strings.TrimSpace(pool.Name)
+		pool.Path = filepath.Clean(strings.TrimSpace(pool.Path))
+		pool.MountPoint = filepath.Clean(strings.TrimSpace(pool.MountPoint))
+		if pool.MountPoint == "." {
+			pool.MountPoint = ""
+		}
+		if pool.ID == "" {
+			pool.ID = storagePoolIDFromName(pool.Name, pool.Path)
+			changed = true
+		}
+		if pool.Name == "" {
+			pool.Name = pool.ID
+			changed = true
+		}
+		if pool.Path == "." || !filepath.IsAbs(pool.Path) || seen[pool.ID] {
+			changed = true
+			continue
+		}
+		seen[pool.ID] = true
+		pool.ContentTypes = normalizeStorageContentTypes(pool.ContentTypes)
+		pool.DefaultContents = normalizeStorageContentTypes(pool.DefaultContents)
+		allowed := map[string]bool{}
+		for _, content := range pool.ContentTypes {
+			allowed[content] = true
+		}
+		defaults := make([]string, 0, len(pool.DefaultContents))
+		for _, content := range pool.DefaultContents {
+			if !allowed[content] || defaultSeen[content] {
+				changed = true
+				continue
+			}
+			defaultSeen[content] = true
+			defaults = append(defaults, content)
+		}
+		pool.DefaultContents = defaults
+		if pool.ContentTypes == nil {
+			pool.ContentTypes = []string{}
+		}
+		result = append(result, pool)
+	}
+	if len(result) != len(AppConfig.StoragePools) {
+		changed = true
+	}
+	AppConfig.StoragePools = result
+	return changed
+}
+
+func storagePoolIDFromName(name, path string) string {
+	base := strings.ToLower(strings.TrimSpace(name))
+	if base == "" {
+		base = filepath.Base(filepath.Clean(path))
+	}
+	replacer := strings.NewReplacer(" ", "-", "_", "-", ".", "-", "/", "-")
+	base = replacer.Replace(base)
+	base = strings.Trim(base, "-")
+	if base == "" {
+		base = "storage"
+	}
+	return base
+}
+
+func normalizeStorageContentTypes(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	valid := map[string]bool{
+		StorageContentLXC:       true,
+		StorageContentKVM:       true,
+		StorageContentImages:    true,
+		StorageContentSnapshots: true,
+		StorageContentBackups:   true,
+	}
+	seen := map[string]bool{}
+	result := []string{}
+	for _, value := range values {
+		next := strings.ToLower(strings.TrimSpace(value))
+		if !valid[next] || seen[next] {
+			continue
+		}
+		seen[next] = true
+		result = append(result, next)
+	}
+	return result
+}
+
+func StoragePoolsForContent(content string) []StoragePool {
+	if AppConfig == nil {
+		return nil
+	}
+	content = strings.ToLower(strings.TrimSpace(content))
+	result := []StoragePool{}
+	for _, pool := range AppConfig.StoragePools {
+		if !pool.Enabled || !storagePoolAllows(pool, content) {
+			continue
+		}
+		result = append(result, pool)
+	}
+	return result
+}
+
+func StoragePoolByID(id string) *StoragePool {
+	if AppConfig == nil {
+		return nil
+	}
+	id = strings.TrimSpace(id)
+	for i := range AppConfig.StoragePools {
+		if AppConfig.StoragePools[i].ID == id {
+			return &AppConfig.StoragePools[i]
+		}
+	}
+	return nil
+}
+
+func StoragePoolAllowsContent(pool StoragePool, content string) bool {
+	return storagePoolAllows(pool, strings.ToLower(strings.TrimSpace(content)))
+}
+
+func StoragePathForContent(content, fallback string) string {
+	if pool := DefaultStoragePoolForContent(content); pool != nil {
+		return pool.Path
+	}
+	return fallback
+}
+
+// PreferredStoragePoolForContent returns the configured default without doing
+// filesystem probes. Use SelectStoragePoolForContent for new writes.
+func PreferredStoragePoolForContent(content string) *StoragePool {
+	if AppConfig == nil {
+		return nil
+	}
+	content = strings.ToLower(strings.TrimSpace(content))
+	for i := range AppConfig.StoragePools {
+		pool := &AppConfig.StoragePools[i]
+		if !pool.Enabled || !storagePoolAllows(*pool, content) {
+			continue
+		}
+		for _, item := range pool.DefaultContents {
+			if item == content {
+				return pool
+			}
+		}
+	}
+	for i := range AppConfig.StoragePools {
+		pool := &AppConfig.StoragePools[i]
+		if pool.Enabled && storagePoolAllows(*pool, content) {
+			return pool
+		}
+	}
+	return nil
+}
+
+func DefaultStoragePoolForContent(content string) *StoragePool {
+	pool, _ := SelectStoragePoolForContent(content, "", 0)
+	return pool
+}
+
+const storagePoolFreeReserveBytes int64 = 256 * 1024 * 1024
+
+type storagePoolCandidate struct {
+	pool      *StoragePool
+	freeBytes int64
+	isDefault bool
+}
+
+// SelectStoragePoolForContent picks a writable mounted pool. The requested or
+// configured default pool is preferred while it has enough space; remaining
+// pools are tried by available space from largest to smallest.
+func SelectStoragePoolForContent(content, requestedPoolID string, requiredBytes int64) (*StoragePool, error) {
+	if AppConfig == nil {
+		return nil, fmt.Errorf("storage configuration is not loaded")
+	}
+	content = strings.ToLower(strings.TrimSpace(content))
+	requestedPoolID = strings.TrimSpace(requestedPoolID)
+	if requiredBytes < 0 {
+		requiredBytes = 0
+	}
+	requiredFree := requiredBytes + storagePoolFreeReserveBytes
+	candidates := make([]storagePoolCandidate, 0, len(AppConfig.StoragePools))
+	configured := 0
+	for i := range AppConfig.StoragePools {
+		pool := &AppConfig.StoragePools[i]
+		if !pool.Enabled || !storagePoolAllows(*pool, content) {
+			continue
+		}
+		configured++
+		freeBytes, available := probeStoragePoolFreeBytes(*pool)
+		if !available {
+			continue
+		}
+		candidate := storagePoolCandidate{pool: pool, freeBytes: freeBytes}
+		for _, item := range pool.DefaultContents {
+			if item == content {
+				candidate.isDefault = true
+				break
+			}
+		}
+		candidates = append(candidates, candidate)
+	}
+	if configured == 0 {
+		return nil, fmt.Errorf("no storage disk is enabled for %s", storageContentLabel(content))
+	}
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("all storage disks enabled for %s are unavailable or unmounted", storageContentLabel(content))
+	}
+
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return candidates[i].freeBytes > candidates[j].freeBytes
+	})
+	preferred := func(match func(storagePoolCandidate) bool) *StoragePool {
+		for _, candidate := range candidates {
+			if match(candidate) && candidate.freeBytes >= requiredFree {
+				return candidate.pool
+			}
+		}
+		return nil
+	}
+	if requestedPoolID != "" {
+		if pool := preferred(func(candidate storagePoolCandidate) bool { return candidate.pool.ID == requestedPoolID }); pool != nil {
+			return pool, nil
+		}
+	}
+	if pool := preferred(func(candidate storagePoolCandidate) bool { return candidate.isDefault }); pool != nil {
+		return pool, nil
+	}
+	if pool := preferred(func(storagePoolCandidate) bool { return true }); pool != nil {
+		return pool, nil
+	}
+	return nil, fmt.Errorf("storage disks enabled for %s do not have enough free space", storageContentLabel(content))
+}
+
+var probeStoragePoolFreeBytes = storagePoolFreeBytes
+
+func storagePoolFreeBytes(pool StoragePool) (int64, bool) {
+	if strings.TrimSpace(pool.Path) == "" {
+		return 0, false
+	}
+	if _, err := os.Stat(pool.Path); err != nil {
+		if !os.IsNotExist(err) || filepath.Clean(pool.MountPoint) != string(os.PathSeparator) {
+			return 0, false
+		}
+		if err := os.MkdirAll(pool.Path, 0755); err != nil {
+			return 0, false
+		}
+	}
+	if mountPoint := strings.TrimSpace(pool.MountPoint); mountPoint != "" {
+		out, err := exec.Command("findmnt", "-n", "-o", "TARGET", "--target", pool.Path).Output()
+		if err != nil || filepath.Clean(strings.TrimSpace(string(out))) != filepath.Clean(mountPoint) {
+			return 0, false
+		}
+	}
+	out, err := exec.Command("df", "-B1", "-P", pool.Path).Output()
+	if err != nil {
+		return 0, false
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) < 2 {
+		return 0, false
+	}
+	fields := strings.Fields(lines[len(lines)-1])
+	if len(fields) < 4 {
+		return 0, false
+	}
+	freeBytes, err := strconv.ParseInt(fields[3], 10, 64)
+	return freeBytes, err == nil
+}
+
+func storageContentLabel(content string) string {
+	switch content {
+	case StorageContentLXC:
+		return "LXC containers"
+	case StorageContentKVM:
+		return "KVM disks"
+	case StorageContentImages:
+		return "image cache"
+	case StorageContentSnapshots:
+		return "snapshots"
+	case StorageContentBackups:
+		return "backups"
+	default:
+		return content
+	}
+}
+
+func storagePoolAllows(pool StoragePool, content string) bool {
+	for _, item := range pool.ContentTypes {
+		if item == content {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Container) NormalizeNetworkAssignments() bool {
@@ -422,6 +729,43 @@ type SSLConfig struct {
 	LastError    string `json:"last_error,omitempty"`
 }
 
+const (
+	StorageContentLXC       = "lxc"
+	StorageContentKVM       = "kvm"
+	StorageContentImages    = "images"
+	StorageContentSnapshots = "snapshots"
+	StorageContentBackups   = "backups"
+)
+
+type StoragePool struct {
+	ID              string   `json:"id"`
+	Name            string   `json:"name"`
+	Path            string   `json:"path"`
+	MountPoint      string   `json:"mount_point,omitempty"`
+	ContentTypes    []string `json:"content_types"`
+	DefaultContents []string `json:"default_contents,omitempty"`
+	Enabled         bool     `json:"enabled"`
+}
+
+func defaultPrimaryStoragePool() StoragePool {
+	contents := []string{
+		StorageContentLXC,
+		StorageContentKVM,
+		StorageContentImages,
+		StorageContentSnapshots,
+		StorageContentBackups,
+	}
+	return StoragePool{
+		ID:              "disk-root",
+		Name:            "system (/)",
+		Path:            "/var/lib/clicd",
+		MountPoint:      "/",
+		ContentTypes:    append([]string(nil), contents...),
+		DefaultContents: append([]string(nil), contents...),
+		Enabled:         true,
+	}
+}
+
 // ClicdConfig is the main configuration structure
 type ClicdConfig struct {
 	AdminUser            string                 `json:"admin_user"`
@@ -447,15 +791,23 @@ type ClicdConfig struct {
 	PublicIPv6Prefixes   []PublicIPv6Prefix     `json:"public_ipv6_prefixes"`
 	WebSSHAllowedOrigins []string               `json:"webssh_allowed_origins"`
 	SecurityAutoShutdown bool                   `json:"security_auto_shutdown"`
+	TaskConcurrency      int                    `json:"task_concurrency"`
 	Language             string                 `json:"language"`
 	SSL                  SSLConfig              `json:"ssl"`
 	SSLCertificates      map[string]SSLConfig   `json:"ssl_certificates"`
+	StoragePools         []StoragePool          `json:"storage_pools"`
 }
 
 var configPath string
 var AppConfig *ClicdConfig
+var allocationMu sync.Mutex
 
 const DefaultSnapshotLimit = 3
+
+const (
+	DefaultTaskConcurrency = 2
+	MaxTaskConcurrency     = 16
+)
 
 const (
 	DefaultNATPortStart = 20000
@@ -588,6 +940,8 @@ func InitConfig() (*ClicdConfig, error) {
 		PublicIPv4Pool:       []PublicIPv4Assignment{},
 		PublicIPv6Prefixes:   []PublicIPv6Prefix{},
 		WebSSHAllowedOrigins: []string{},
+		TaskConcurrency:      DefaultTaskConcurrency,
+		StoragePools:         []StoragePool{defaultPrimaryStoragePool()},
 	}
 
 	if err := SaveConfig(); err != nil {
@@ -629,6 +983,10 @@ func normalizeConfigDefaults(dataDir string) bool {
 		AppConfig.NextContainerID = 1
 		changed = true
 	}
+	if normalized := NormalizeTaskConcurrency(AppConfig.TaskConcurrency); AppConfig.TaskConcurrency != normalized {
+		AppConfig.TaskConcurrency = normalized
+		changed = true
+	}
 	if AppConfig.DataDir == "" {
 		AppConfig.DataDir = dataDir
 		changed = true
@@ -654,6 +1012,13 @@ func normalizeConfigDefaults(dataDir string) bool {
 		changed = true
 	} else if normalized, err := NormalizeAllowedOrigins(AppConfig.WebSSHAllowedOrigins); err == nil && strings.Join(normalized, "\n") != strings.Join(AppConfig.WebSSHAllowedOrigins, "\n") {
 		AppConfig.WebSSHAllowedOrigins = normalized
+		changed = true
+	}
+	if len(AppConfig.StoragePools) == 0 {
+		AppConfig.StoragePools = []StoragePool{defaultPrimaryStoragePool()}
+		changed = true
+	}
+	if normalizeStoragePools() {
 		changed = true
 	}
 	if AppConfig.SubUsers == nil {
@@ -699,6 +1064,16 @@ func normalizeConfigDefaults(dataDir string) bool {
 		changed = true
 	}
 	return changed
+}
+
+func NormalizeTaskConcurrency(value int) int {
+	if value <= 0 {
+		return DefaultTaskConcurrency
+	}
+	if value > MaxTaskConcurrency {
+		return MaxTaskConcurrency
+	}
+	return value
 }
 
 func NormalizeLanguage(language string) string {
@@ -1047,6 +1422,8 @@ func SaveConfig() error {
 
 // AddContainer adds a container to the config
 func AddContainer(c Container) {
+	allocationMu.Lock()
+	defer allocationMu.Unlock()
 	if c.UUID == "" {
 		c.UUID = NewContainerUUID()
 	}
@@ -1058,6 +1435,8 @@ func AddContainer(c Container) {
 
 // AllocateContainerID allocates a new container ID
 func AllocateContainerID() int {
+	allocationMu.Lock()
+	defer allocationMu.Unlock()
 	id := AppConfig.NextContainerID
 	AppConfig.NextContainerID++
 	SaveConfig()
@@ -1334,6 +1713,8 @@ func normalizeNATPortRangeDefaults() bool {
 
 // AllocateSSHPort allocates a new SSH port, skipping ports already used by any container
 func AllocateSSHPort() (int, error) {
+	allocationMu.Lock()
+	defer allocationMu.Unlock()
 	used := collectAllHostPorts()
 	start, end := NATPortRange()
 	port := AppConfig.NextSSHPort

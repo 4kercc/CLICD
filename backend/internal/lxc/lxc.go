@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"clicd/internal/config"
@@ -227,44 +228,53 @@ func NewManager() *Manager {
 
 // ContainerConfig defines container creation parameters
 type ContainerConfig struct {
-	Name                 string   `json:"name"`
-	Virtualization       string   `json:"virtualization,omitempty"`
-	TemplateID           string   `json:"template_id"`
-	VCPU                 float64  `json:"vcpu"`
-	CPUPercent           int      `json:"cpu_percent"`
-	RAMMB                int      `json:"ram_mb"`
-	DiskGB               int      `json:"disk_gb"`
-	NetworkBWMbps        int      `json:"network_bw_mbps"`
-	NetworkDownMbps      int      `json:"network_down_mbps"`
-	NetworkUpMbps        int      `json:"network_up_mbps"`
-	MonthlyTrafficGB     int      `json:"monthly_traffic_gb"`
-	TrafficMode          string   `json:"traffic_mode"`   // "total" or "in_out"
-	TrafficInGB          int      `json:"traffic_in_gb"`  // 0=unlimited
-	TrafficOutGB         int      `json:"traffic_out_gb"` // 0=unlimited
-	IOSpeedMBps          int      `json:"io_speed_mbps"`
-	IOReadMBps           int      `json:"io_read_mbps"`
-	IOWriteMBps          int      `json:"io_write_mbps"`
-	ExtraPorts           []int    `json:"extra_ports"`
-	PortMappingCount     int      `json:"port_mapping_count"`
-	AssignNAT            *bool    `json:"assign_nat,omitempty"`
-	LANIPv4Mode          string   `json:"lan_ipv4_mode,omitempty"`
-	LANInterface         string   `json:"lan_interface,omitempty"`
-	LANIPv4Address       string   `json:"lan_ipv4_address,omitempty"`
-	LANIPv4PrefixLen     int      `json:"lan_ipv4_prefix_len,omitempty"`
-	LANIPv4Gateway       string   `json:"lan_ipv4_gateway,omitempty"`
-	SnapshotLimit        int      `json:"snapshot_limit"`
-	AllowedImageIDs      []string `json:"allowed_image_ids,omitempty"`
-	ImageLimitConfigured bool     `json:"image_limit_configured,omitempty"`
-	AssignIPv4           bool     `json:"assign_ipv4"`
-	IPv4Count            int      `json:"ipv4_count,omitempty"`
-	PublicIPv4s          []string `json:"public_ipv4s,omitempty"`
-	AssignIPv6           bool     `json:"assign_ipv6"`
-	IPv6Count            int      `json:"ipv6_count,omitempty"`
-	IPv6Addresses        []string `json:"ipv6_addresses,omitempty"`
-	SSHAuthMode          string   `json:"ssh_auth_mode,omitempty"`
-	SSHPassword          string   `json:"ssh_password,omitempty"`
-	SSHPublicKey         string   `json:"ssh_public_key,omitempty"`
-	ExpiresAt            string   `json:"expires_at"`
+	Name                 string                     `json:"name"`
+	Virtualization       string                     `json:"virtualization,omitempty"`
+	TemplateID           string                     `json:"template_id"`
+	StoragePoolID        string                     `json:"storage_pool_id,omitempty"`
+	VCPU                 float64                    `json:"vcpu"`
+	CPUPercent           int                        `json:"cpu_percent"`
+	RAMMB                int                        `json:"ram_mb"`
+	DiskGB               int                        `json:"disk_gb"`
+	NetworkBWMbps        int                        `json:"network_bw_mbps"`
+	NetworkDownMbps      int                        `json:"network_down_mbps"`
+	NetworkUpMbps        int                        `json:"network_up_mbps"`
+	MonthlyTrafficGB     int                        `json:"monthly_traffic_gb"`
+	TrafficMode          string                     `json:"traffic_mode"`   // "total" or "in_out"
+	TrafficInGB          int                        `json:"traffic_in_gb"`  // 0=unlimited
+	TrafficOutGB         int                        `json:"traffic_out_gb"` // 0=unlimited
+	IOSpeedMBps          int                        `json:"io_speed_mbps"`
+	IOReadMBps           int                        `json:"io_read_mbps"`
+	IOWriteMBps          int                        `json:"io_write_mbps"`
+	ExtraPorts           []int                      `json:"extra_ports"`
+	PortMappingCount     int                        `json:"port_mapping_count"`
+	AssignNAT            *bool                      `json:"assign_nat,omitempty"`
+	LANIPv4Mode          string                     `json:"lan_ipv4_mode,omitempty"`
+	LANInterface         string                     `json:"lan_interface,omitempty"`
+	LANIPv4Address       string                     `json:"lan_ipv4_address,omitempty"`
+	LANIPv4PrefixLen     int                        `json:"lan_ipv4_prefix_len,omitempty"`
+	LANIPv4Gateway       string                     `json:"lan_ipv4_gateway,omitempty"`
+	SnapshotLimit        int                        `json:"snapshot_limit"`
+	AllowedImageIDs      []string                   `json:"allowed_image_ids,omitempty"`
+	ImageLimitConfigured bool                       `json:"image_limit_configured,omitempty"`
+	AssignIPv4           bool                       `json:"assign_ipv4"`
+	IPv4Count            int                        `json:"ipv4_count,omitempty"`
+	PublicIPv4s          []string                   `json:"public_ipv4s,omitempty"`
+	AssignIPv6           bool                       `json:"assign_ipv6"`
+	IPv6Count            int                        `json:"ipv6_count,omitempty"`
+	IPv6Addresses        []string                   `json:"ipv6_addresses,omitempty"`
+	SSHAuthMode          string                     `json:"ssh_auth_mode,omitempty"`
+	SSHPassword          string                     `json:"ssh_password,omitempty"`
+	SSHPublicKey         string                     `json:"ssh_public_key,omitempty"`
+	ExpiresAt            string                     `json:"expires_at"`
+	Progress             func(stage, detail string) `json:"-"`
+}
+
+// ReportProgress reports a best-effort creation phase to the task queue.
+func (cfg ContainerConfig) ReportProgress(stage, detail string) {
+	if cfg.Progress != nil {
+		cfg.Progress(stage, detail)
+	}
 }
 
 func (cfg *ContainerConfig) NormalizeResourceAliases() {
@@ -324,6 +334,7 @@ func (cfg ContainerConfig) WantsLANIPv4() bool {
 // CreateContainer creates a new LXC container. Uses ct-{id} as LXC name internally.
 func (m *Manager) CreateContainer(cfg ContainerConfig) error {
 	cfg.NormalizeResourceAliases()
+	cfg.ReportProgress("preparing", "检查模板与创建参数")
 	tmpl := FindTemplate(cfg.TemplateID)
 	if tmpl == nil {
 		return fmt.Errorf("template not found: %s", cfg.TemplateID)
@@ -369,6 +380,7 @@ func (m *Manager) CreateContainer(cfg ContainerConfig) error {
 	fmt.Printf("Creating LXC container: %s (ID=%d, template: %s/%s/%s)\n",
 		lxcName, id, tmpl.Distro, tmpl.Release, tmpl.Arch)
 
+	cfg.ReportProgress("rootfs", "下载模板并创建基础文件系统")
 	args := []string{"-n", lxcName, "-t", "download", "--",
 		"-d", tmpl.Distro, "-r", tmpl.Release, "-a", tmpl.Arch}
 	if tmpl.Variant != "" {
@@ -380,10 +392,19 @@ func (m *Manager) CreateContainer(cfg ContainerConfig) error {
 		return fmt.Errorf("lxc-create failed: %v, output: %s", err, string(output))
 	}
 
+	cfg.ReportProgress("storage", "复制容器数据到存储磁盘")
+	storagePoolID, storagePath, err := m.moveContainerToStoragePool(lxcName, cfg.StoragePoolID)
+	if err != nil {
+		_ = m.cleanupContainerStorage(lxcName)
+		return err
+	}
+
+	cfg.ReportProgress("disk", "创建容量限制磁盘并复制 rootfs")
 	if err := m.applyDiskLimit(lxcName, cfg.DiskGB); err != nil {
 		_ = m.cleanupContainerStorage(lxcName)
 		return err
 	}
+	cfg.ReportProgress("resources", "配置 CPU、内存与网络限制")
 	if cfg.WantsLANIPv4() {
 		iface, err := m.applyLANIPv4Config(lxcName, cfg)
 		if err != nil {
@@ -399,6 +420,7 @@ func (m *Manager) CreateContainer(cfg ContainerConfig) error {
 		return err
 	}
 
+	cfg.ReportProgress("addresses", "分配 IPv4、IPv6 与 NAT 端口")
 	publicIPv4s, err := AllocatePublicIPv4Assignments(id, cfg.PublicIPv4s, cfg.IPv4Count, cfg.AssignIPv4)
 	if err != nil {
 		_ = m.cleanupContainerStorage(lxcName)
@@ -472,6 +494,8 @@ func (m *Manager) CreateContainer(cfg ContainerConfig) error {
 		Name:                 cfg.Name,
 		Virtualization:       config.VirtualizationLXC,
 		LXCName:              lxcName,
+		StoragePoolID:        storagePoolID,
+		StoragePath:          storagePath,
 		Template:             cfg.TemplateID,
 		VCPU:                 cfg.VCPU,
 		RAMMB:                cfg.RAMMB,
@@ -509,16 +533,19 @@ func (m *Manager) CreateContainer(cfg ContainerConfig) error {
 		ExpiresAt:            cfg.ExpiresAt,
 	}
 	container.NormalizeNetworkAssignments()
+	cfg.ReportProgress("metadata", "保存容器配置")
 	config.AddContainer(container)
 
 	// Pre-configure network and SSH in the rootfs before first boot.
 	rootfsPath := filepath.Join(m.LxcPath, lxcName, "rootfs")
+	cfg.ReportProgress("network", "写入容器网络配置")
 	m.preconfigureNetwork(rootfsPath, cfg)
 	if len(ipv6Assignments) > 0 {
 		if err := installContainerIPv6Init(rootfsPath, ipv6AssignmentAddresses(ipv6Assignments)...); err != nil {
 			fmt.Printf("Warning: failed to install IPv6 init in %s: %v\n", lxcName, err)
 		}
 	}
+	cfg.ReportProgress("ssh", "安装并配置 SSH 服务")
 	if err := m.preconfigureSSH(rootfsPath, cfg.TemplateID, sshAccess.Mode); err != nil {
 		fmt.Printf("Warning: failed to pre-configure SSH in %s: %v\n", lxcName, err)
 	}
@@ -530,6 +557,7 @@ func (m *Manager) CreateContainer(cfg ContainerConfig) error {
 		}
 	}
 
+	cfg.ReportProgress("permissions", "转换非特权容器文件权限")
 	if err := m.shiftRootfsForUnprivileged(lxcName); err != nil {
 		_ = m.cleanupContainerStorage(lxcName)
 		config.RemoveContainer(id)
@@ -538,6 +566,7 @@ func (m *Manager) CreateContainer(cfg ContainerConfig) error {
 
 	// Set root password AFTER shiftRootfsForUnprivileged,
 	// otherwise /etc/shadow ownership breaks and SSHD cannot authenticate.
+	cfg.ReportProgress("credentials", "设置容器登录凭据")
 	if err := m.setRootfsPassword(rootfsPath, sshPassword); err != nil {
 		fmt.Printf("Warning: failed to set root password in %s: %v\n", lxcName, err)
 	}
@@ -1128,6 +1157,78 @@ func (m *Manager) applyLoopbackDiskLimit(lxcName string, diskGB int) error {
 	return nil
 }
 
+func (m *Manager) moveContainerToStoragePool(lxcName string, requestedPoolID string) (string, string, error) {
+	sourceDir := filepath.Join(m.LxcPath, lxcName)
+	requiredBytes := dirSizeBytes(sourceDir)
+	pool, err := config.SelectStoragePoolForContent(config.StorageContentLXC, requestedPoolID, requiredBytes)
+	if err != nil {
+		return "", "", err
+	}
+	targetRoot := filepath.Join(pool.Path, "lxc")
+	targetDir := filepath.Join(targetRoot, lxcName)
+	sourceAbs, err := filepath.Abs(sourceDir)
+	if err != nil {
+		return "", "", err
+	}
+	targetAbs, err := filepath.Abs(targetDir)
+	if err != nil {
+		return "", "", err
+	}
+	if sourceAbs == targetAbs {
+		return pool.ID, targetAbs, nil
+	}
+	if err := os.MkdirAll(targetRoot, 0755); err != nil {
+		return "", "", err
+	}
+	if _, err := os.Lstat(targetDir); err == nil {
+		return "", "", fmt.Errorf("target storage directory already exists: %s", targetDir)
+	}
+	if err := moveLXCStorageDirectory(sourceDir, targetDir); err != nil {
+		return "", "", err
+	}
+	return pool.ID, targetAbs, nil
+}
+
+func moveLXCStorageDirectory(sourceDir, targetDir string) error {
+	if err := os.Rename(sourceDir, targetDir); err == nil {
+		if err := os.Symlink(targetDir, sourceDir); err != nil {
+			_ = os.Rename(targetDir, sourceDir)
+			return fmt.Errorf("failed to create LXC storage symlink: %v", err)
+		}
+		return nil
+	} else if !errors.Is(err, syscall.EXDEV) {
+		return fmt.Errorf("failed to move LXC container to storage pool: %v", err)
+	}
+
+	if err := copyTree(sourceDir, targetDir); err != nil {
+		_ = os.RemoveAll(targetDir)
+		return fmt.Errorf("failed to copy LXC container to storage pool: %v", err)
+	}
+	backupDir := sourceDir + fmt.Sprintf(".storage-move-%d", time.Now().UnixNano())
+	if err := os.Rename(sourceDir, backupDir); err != nil {
+		_ = os.RemoveAll(targetDir)
+		return fmt.Errorf("failed to finalize LXC storage move: %v", err)
+	}
+	if err := os.Symlink(targetDir, sourceDir); err != nil {
+		_ = os.Rename(backupDir, sourceDir)
+		_ = os.RemoveAll(targetDir)
+		return fmt.Errorf("failed to create LXC storage symlink: %v", err)
+	}
+	if err := os.RemoveAll(backupDir); err != nil {
+		fmt.Printf("Warning: LXC storage moved but source cleanup failed: %v\n", err)
+	}
+	return nil
+}
+
+func storagePoolAllowsContent(pool config.StoragePool, content string) bool {
+	for _, item := range pool.ContentTypes {
+		if item == content {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *Manager) ensureDiskImageMounted(lxcName string) error {
 	containerDir := filepath.Join(m.LxcPath, lxcName)
 	rootfsPath := filepath.Join(containerDir, "rootfs")
@@ -1183,15 +1284,30 @@ func diskImageMounted(lxcName, rootfsPath string) bool {
 	if err != nil {
 		return false
 	}
-	targetAbs, err := filepath.Abs(strings.TrimSpace(target))
-	if err != nil {
-		return false
+	return sameFilesystemPath(strings.TrimSpace(target), rootfsPath)
+}
+
+func sameFilesystemPath(left, right string) bool {
+	leftInfo, leftErr := os.Stat(left)
+	rightInfo, rightErr := os.Stat(right)
+	if leftErr == nil && rightErr == nil && os.SameFile(leftInfo, rightInfo) {
+		return true
 	}
-	rootfsAbs, err := filepath.Abs(rootfsPath)
-	if err != nil {
-		return false
+
+	canonical := func(path string) (string, error) {
+		absolute, err := filepath.Abs(path)
+		if err != nil {
+			return "", err
+		}
+		resolved, err := filepath.EvalSymlinks(absolute)
+		if err == nil {
+			absolute = resolved
+		}
+		return filepath.Clean(absolute), nil
 	}
-	return targetAbs == rootfsAbs
+	leftPath, leftErr := canonical(left)
+	rightPath, rightErr := canonical(right)
+	return leftErr == nil && rightErr == nil && leftPath == rightPath
 }
 
 func applyXFSProjectQuota(rootfsPath, lxcName string, diskGB int) error {
@@ -2745,6 +2861,17 @@ func (m *Manager) cleanupContainerStorage(lxcName string) error {
 	if _, err := os.Stat(cleanPath); os.IsNotExist(err) {
 		return nil
 	}
+	var linkedTarget string
+	if info, err := os.Lstat(cleanPath); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		if target, err := os.Readlink(cleanPath); err == nil {
+			if !filepath.IsAbs(target) {
+				target = filepath.Join(filepath.Dir(cleanPath), target)
+			}
+			if abs, err := filepath.Abs(target); err == nil && lxcStorageTargetAllowed(abs) {
+				linkedTarget = abs
+			}
+		}
+	}
 	exec.Command("lxc-stop", "-n", lxcName, "-k").Run()
 	exec.Command("lxc-destroy", "-n", lxcName, "-f").Run()
 	m.detachContainerMounts(cleanPath)
@@ -2756,7 +2883,23 @@ func (m *Manager) cleanupContainerStorage(lxcName string) error {
 	if err := os.RemoveAll(cleanPath); err != nil {
 		return fmt.Errorf("failed to remove container directory %s: %v", cleanPath, err)
 	}
+	if linkedTarget != "" {
+		m.detachContainerMounts(linkedTarget)
+		m.detachContainerLoopDevices(linkedTarget)
+		_ = os.RemoveAll(linkedTarget)
+	}
 	return nil
+}
+
+func lxcStorageTargetAllowed(path string) bool {
+	for _, pool := range config.StoragePoolsForContent(config.StorageContentLXC) {
+		root := filepath.Join(pool.Path, "lxc")
+		rel, err := filepath.Rel(root, path)
+		if err == nil && rel != "." && !strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel) {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Manager) detachContainerMounts(containerDir string) {

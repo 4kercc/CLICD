@@ -1,8 +1,11 @@
 package kvm
 
 import (
+	"os"
 	"path/filepath"
 	"runtime"
+
+	"clicd/internal/config"
 )
 
 type Image struct {
@@ -180,6 +183,9 @@ func FindImage(id string) *Image {
 }
 
 func CacheDir() string {
+	if pool := config.PreferredStoragePoolForContent(config.StorageContentImages); pool != nil {
+		return filepath.Join(pool.Path, "images", "kvm")
+	}
 	return filepath.Join(BaseDir(), "images")
 }
 
@@ -189,7 +195,18 @@ func ImagePath(id string) string {
 	if img != nil && img.Distro == "windows" {
 		ext = ".iso"
 	}
-	return filepath.Join(CacheDir(), id+ext)
+	fileName := id + ext
+	for _, pool := range config.StoragePoolsForContent(config.StorageContentImages) {
+		candidate := filepath.Join(pool.Path, "images", "kvm", fileName)
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate
+		}
+	}
+	legacy := filepath.Join("/var/lib/clicd/kvm/images", fileName)
+	if info, err := os.Stat(legacy); err == nil && !info.IsDir() {
+		return legacy
+	}
+	return filepath.Join(CacheDir(), fileName)
 }
 
 // IsWindowsImage returns true if the image distro is "windows".

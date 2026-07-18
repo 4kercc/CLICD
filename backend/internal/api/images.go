@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -41,6 +42,9 @@ type ImageInfo struct {
 
 var imageDownloadsMu sync.Mutex
 var imageDownloads = map[string]*imageDownloadStatus{}
+var lxcImageCacheMu sync.Mutex
+var lxcImageDownloadMu sync.Mutex
+var lxcImageDownloadActive bool
 
 type imageDownloadStatus struct {
 	Downloading     bool
@@ -134,6 +138,22 @@ func isImageDownloadActive(id string) bool {
 	defer imageDownloadsMu.Unlock()
 	st := imageDownloads[id]
 	return st != nil && st.Downloading
+}
+
+func beginLXCImageDownload() bool {
+	lxcImageDownloadMu.Lock()
+	defer lxcImageDownloadMu.Unlock()
+	if lxcImageDownloadActive {
+		return false
+	}
+	lxcImageDownloadActive = true
+	return true
+}
+
+func endLXCImageDownload() {
+	lxcImageDownloadMu.Lock()
+	lxcImageDownloadActive = false
+	lxcImageDownloadMu.Unlock()
 }
 
 func lxcImageDownloadTempName(id string) string {
@@ -307,7 +327,6 @@ func HandleImageDownload(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "template_id required"})
 		return
 	}
-
 	tmpl := lxc.FindTemplate(req.TemplateID)
 	if tmpl == nil {
 		image := kvm.FindImage(req.TemplateID)
@@ -317,6 +336,10 @@ func HandleImageDownload(w http.ResponseWriter, r *http.Request) {
 		}
 		if !hostKVMAvailable() {
 			jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "KVM is not available on this host"})
+			return
+		}
+		if _, err := config.SelectStoragePoolForContent(config.StorageContentImages, "", 1024*1024*1024); err != nil {
+			jsonResponse(w, http.StatusConflict, APIResponse{Success: false, Message: err.Error()})
 			return
 		}
 		if ok, _ := kvm.ImageDownloadedInfo(image.ID); ok {
@@ -359,6 +382,29 @@ func HandleImageDownload(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusAccepted, APIResponse{Success: true, Message: "Download started"})
 		return
 	}
+	if !beginLXCImageDownload() {
+		jsonResponse(w, http.StatusConflict, APIResponse{Success: false, Message: "Another LXC image download is active"})
+		return
+	}
+	lxcDownloadHandedOff := false
+	defer func() {
+		if !lxcDownloadHandedOff {
+			endLXCImageDownload()
+		}
+	}()
+	imagePool, err := config.SelectStoragePoolForContent(
+		config.StorageContentImages,
+		"",
+		dirSizeBytes("/var/cache/lxc/download")+1024*1024*1024,
+	)
+	if err != nil {
+		jsonResponse(w, http.StatusConflict, APIResponse{Success: false, Message: err.Error()})
+		return
+	}
+	if err := ensureLXCImageCachePool(*imagePool); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: err.Error()})
+		return
+	}
 
 	// Already downloaded? Just enable if needed.
 	if isImageDownloaded(tmpl.Distro, tmpl.Release, tmpl.Arch) {
@@ -375,6 +421,7 @@ func HandleImageDownload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	go func(tmpl lxc.Template) {
+		defer endLXCImageDownload()
 		// Download via lxc-create with a temp container, then destroy it.
 		tmpName := lxcImageDownloadTempName(tmpl.ID)
 		args := []string{"-n", tmpName, "-t", "download", "--",
@@ -386,7 +433,7 @@ func HandleImageDownload(w http.ResponseWriter, r *http.Request) {
 			st.Stage = "lxc-create"
 		})
 		cmd := exec.CommandContext(ctx, "lxc-create", args...)
-		output, err := cmd.CombinedOutput()
+		output, err := runLXCImageDownloadCommand(cmd, tmpl.ID)
 
 		// Clean up the temp container unconditionally.
 		cleanupLXCImageDownloadTemp(tmpl.ID)
@@ -403,8 +450,152 @@ func HandleImageDownload(w http.ResponseWriter, r *http.Request) {
 		ensureImageEnabled(tmpl.ID)
 		finishImageDownload(tmpl.ID, nil)
 	}(*tmpl)
+	lxcDownloadHandedOff = true
 
 	jsonResponse(w, http.StatusAccepted, APIResponse{Success: true, Message: "Download started"})
+}
+
+type lxcImageDownloadCommandResult struct {
+	output []byte
+	err    error
+}
+
+func runLXCImageDownloadCommand(cmd *exec.Cmd, templateID string) ([]byte, error) {
+	startedAt := time.Now()
+	done := make(chan lxcImageDownloadCommandResult, 1)
+	go func() {
+		output, err := cmd.CombinedOutput()
+		done <- lxcImageDownloadCommandResult{output: output, err: err}
+	}()
+
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	var lastBytes int64
+	for {
+		select {
+		case result := <-done:
+			return result.output, result.err
+		case <-ticker.C:
+			downloadedBytes := newestLXCRootfsDownloadSize(startedAt)
+			if downloadedBytes <= 0 || downloadedBytes == lastBytes {
+				continue
+			}
+			lastBytes = downloadedBytes
+			updateImageDownload(templateID, func(st *imageDownloadStatus) {
+				st.Stage = "downloading"
+				st.DownloadedBytes = downloadedBytes
+			})
+		}
+	}
+}
+
+func newestLXCRootfsDownloadSize(startedAt time.Time) int64 {
+	matches, _ := filepath.Glob("/tmp/tmp.*/rootfs.tar.xz")
+	var newestTime time.Time
+	var newestSize int64
+	for _, match := range matches {
+		info, err := os.Stat(match)
+		if err != nil || info.IsDir() || info.ModTime().Before(startedAt.Add(-5*time.Second)) {
+			continue
+		}
+		if info.ModTime().After(newestTime) {
+			newestTime = info.ModTime()
+			newestSize = info.Size()
+		}
+	}
+	return newestSize
+}
+
+func ensureLXCImageCachePool(pool config.StoragePool) error {
+	lxcImageCacheMu.Lock()
+	defer lxcImageCacheMu.Unlock()
+
+	cachePath := "/var/cache/lxc/download"
+	targetPath := filepath.Join(pool.Path, "images", "lxc")
+	targetAbs, err := filepath.Abs(targetPath)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(targetAbs, 0755); err != nil {
+		return fmt.Errorf("failed to create LXC image storage: %v", err)
+	}
+
+	info, err := os.Lstat(cachePath)
+	if os.IsNotExist(err) {
+		if err := os.MkdirAll(filepath.Dir(cachePath), 0755); err != nil {
+			return err
+		}
+		return os.Symlink(targetAbs, cachePath)
+	}
+	if err != nil {
+		return err
+	}
+
+	sourcePath := cachePath
+	linked := info.Mode()&os.ModeSymlink != 0
+	if linked {
+		sourcePath, err = filepath.EvalSymlinks(cachePath)
+		if err != nil {
+			return fmt.Errorf("failed to resolve LXC image cache: %v", err)
+		}
+	}
+	sourceAbs, err := filepath.Abs(sourcePath)
+	if err != nil {
+		return err
+	}
+	if sourceAbs == targetAbs {
+		return nil
+	}
+	if strings.HasPrefix(targetAbs, sourceAbs+string(os.PathSeparator)) || strings.HasPrefix(sourceAbs, targetAbs+string(os.PathSeparator)) {
+		return fmt.Errorf("LXC image cache source and target must not be nested")
+	}
+	if !info.IsDir() && !linked {
+		return fmt.Errorf("LXC image cache is not a directory: %s", cachePath)
+	}
+
+	if output, err := exec.Command("cp", "-a", sourceAbs+string(os.PathSeparator)+".", targetAbs+string(os.PathSeparator)).CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to migrate LXC image cache: %v, output: %s", err, strings.TrimSpace(string(output)))
+	}
+
+	tempLink := fmt.Sprintf("%s.clicd-new-%d", cachePath, time.Now().UnixNano())
+	if err := os.Symlink(targetAbs, tempLink); err != nil {
+		return err
+	}
+	if linked {
+		if err := os.Rename(tempLink, cachePath); err != nil {
+			_ = os.Remove(tempLink)
+			return fmt.Errorf("failed to switch LXC image cache: %v", err)
+		}
+		if isManagedLXCImageCachePath(sourceAbs) {
+			_ = os.RemoveAll(sourceAbs)
+		}
+		return nil
+	}
+
+	backupPath := fmt.Sprintf("%s.clicd-backup-%d", cachePath, time.Now().UnixNano())
+	if err := os.Rename(cachePath, backupPath); err != nil {
+		_ = os.Remove(tempLink)
+		return fmt.Errorf("failed to prepare LXC image cache migration: %v", err)
+	}
+	if err := os.Rename(tempLink, cachePath); err != nil {
+		_ = os.Rename(backupPath, cachePath)
+		_ = os.Remove(tempLink)
+		return fmt.Errorf("failed to activate LXC image storage: %v", err)
+	}
+	if err := os.RemoveAll(backupPath); err != nil {
+		return fmt.Errorf("LXC image cache migrated but old cache cleanup failed: %v", err)
+	}
+	return nil
+}
+
+func isManagedLXCImageCachePath(path string) bool {
+	path = filepath.Clean(path)
+	for _, pool := range config.StoragePoolsForContent(config.StorageContentImages) {
+		if path == filepath.Clean(filepath.Join(pool.Path, "images", "lxc")) {
+			return true
+		}
+	}
+	return path == filepath.Clean("/var/lib/clicd/images/lxc")
 }
 
 // HandleImageCancel cancels an in-progress image download.

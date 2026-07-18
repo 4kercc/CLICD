@@ -21,6 +21,7 @@ import {
 } from 'lucide-react'
 import CreateContainerModal from '../components/CreateContainerModal'
 import { useAuth } from '../contexts/AuthContext'
+import { useLanguage } from '../contexts/LanguageContext'
 import {
   Container,
   CreateContainerRequest,
@@ -391,7 +392,7 @@ export default function Containers() {
                 {pageContainers.map((container) => {
                   const isRunning = container.status === 'running'
                   const isInitializing = container.status === 'initializing'
-                  const task = (container.id > 0 ? taskStatusMap[container.id] : taskNameMap[container.name]) || container.createTask
+                  const task = (container.id > 0 ? taskStatusMap[container.id] : undefined) || taskNameMap[container.name] || container.createTask
                   const isPlaceholder = !!container.isPlaceholder
                   const isPolicyBlocked = !!container.policy_blocked
                   const usage = usageByName[container.name]
@@ -581,12 +582,13 @@ type DisplayContainer = Container & {
 }
 
 function StatusBadge({ running, initializing, task, placeholder, policyBlocked }: { running: boolean; initializing?: boolean; task?: Task; placeholder?: boolean; policyBlocked?: boolean }) {
+  const { t } = useLanguage()
   const baseClass = "inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium whitespace-nowrap"
   if (policyBlocked) {
     return (
       <span className={`${baseClass} bg-red-50 text-red-700`}>
         <span className="w-1.5 h-1.5 rounded-full bg-red-500"></span>
-        策略封禁
+        {t('策略封禁')}
       </span>
     )
   }
@@ -595,7 +597,7 @@ function StatusBadge({ running, initializing, task, placeholder, policyBlocked }
     return (
       <span className={`${baseClass} bg-red-50 text-red-700`}>
         <span className="w-1.5 h-1.5 rounded-full bg-red-500"></span>
-        初始化失败
+        {t('初始化失败')}
       </span>
     )
   }
@@ -604,16 +606,17 @@ function StatusBadge({ running, initializing, task, placeholder, policyBlocked }
     return (
       <span className={`${baseClass} bg-emerald-50 text-emerald-700`}>
         <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
-        初始化完成
+        {t('初始化完成')}
       </span>
     )
   }
 
   if (task?.type === 'create' && task.status === 'running') {
+    const detail = t(task.stage_detail || '正在初始化')
     return (
-      <span className={`${baseClass} bg-amber-50 text-amber-700`}>
-        <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"></span>
-        正在初始化
+      <span className={`${baseClass} max-w-[210px] bg-amber-50 text-amber-700`} title={`${t('正在初始化')}: ${detail}`}>
+        <span className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-amber-500 animate-pulse"></span>
+        <span className="truncate">{detail}</span>
       </span>
     )
   }
@@ -622,7 +625,7 @@ function StatusBadge({ running, initializing, task, placeholder, policyBlocked }
     return (
       <span className={`${baseClass} bg-gray-100 text-gray-500`}>
         <span className="w-1.5 h-1.5 rounded-full bg-gray-400"></span>
-        排队等待
+        {t('排队等待')}
       </span>
     )
   }
@@ -634,7 +637,7 @@ function StatusBadge({ running, initializing, task, placeholder, policyBlocked }
     return (
       <span className={`${baseClass} bg-amber-50 text-amber-700`}>
         <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"></span>
-        {taskLabels[task.type] || '处理中'}
+        {t(taskLabels[task.type] || '处理中')}
       </span>
     )
   }
@@ -643,7 +646,7 @@ function StatusBadge({ running, initializing, task, placeholder, policyBlocked }
     return (
       <span className={`${baseClass} bg-amber-50 text-amber-700`}>
         <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"></span>
-        正在初始化
+        {t('正在初始化')}
       </span>
     )
   }
@@ -651,7 +654,7 @@ function StatusBadge({ running, initializing, task, placeholder, policyBlocked }
   return (
     <span className={`${baseClass} ${running ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-600'}`}>
       <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${running ? 'bg-green-500' : 'bg-red-500'}`}></span>
-      {running ? '在线' : '离线'}
+      {t(running ? '在线' : '离线')}
     </span>
   )
 }
@@ -788,7 +791,7 @@ type ContainerFilters = {
 function filterContainers(containers: DisplayContainer[], filters: ContainerFilters): DisplayContainer[] {
   const keyword = filters.search.trim().toLowerCase()
   return containers.filter((container) => {
-    const task = (container.id > 0 ? filters.taskStatusMap[container.id] : filters.taskNameMap[container.name]) || container.createTask
+    const task = (container.id > 0 ? filters.taskStatusMap[container.id] : undefined) || filters.taskNameMap[container.name] || container.createTask
     if (filters.system !== 'all' && getSystemFilterValue(container.template) !== filters.system) {
       return false
     }
@@ -865,6 +868,7 @@ function getContainerStatusFilterValue(container: DisplayContainer, task?: Task)
 function taskLineLabel(task: Task, actionLabels: Record<string, string>) {
   if (task.status === 'failed') return task.type === 'create' ? '初始化失败' : '处理失败'
   if (task.type === 'create' && task.status === 'done') return '初始化完成'
+  if (task.type === 'create' && task.status === 'running') return task.stage_detail || '正在初始化'
   return actionLabels[task.type] || '处理中...'
 }
 
@@ -873,13 +877,14 @@ function TaskQueueModal({ tasks, onRefresh, onClose }: {
   onRefresh: () => void | Promise<void>
   onClose: () => void
 }) {
+  const { t } = useLanguage()
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-      <div className="flex max-h-[86vh] w-full max-w-5xl flex-col overflow-hidden rounded-lg border border-gray-200 bg-white shadow-xl">
+      <div className="flex max-h-[86vh] w-full max-w-6xl flex-col overflow-hidden rounded-lg border border-gray-200 bg-white shadow-xl">
         <div className="flex items-center justify-between gap-4 border-b border-gray-200 px-5 py-4">
           <div>
-            <h2 className="text-base font-semibold text-black">任务队列</h2>
-            <p className="mt-0.5 text-xs text-gray-500">共 {tasks.length} 个任务</p>
+            <h2 className="text-base font-semibold text-black">{t('任务队列')}</h2>
+            <p className="mt-0.5 text-xs text-gray-500">{t(`共 ${tasks.length} 个任务`)}</p>
           </div>
           <div className="flex items-center gap-2">
             <button
@@ -887,26 +892,27 @@ function TaskQueueModal({ tasks, onRefresh, onClose }: {
               className="inline-flex items-center gap-2 rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
             >
               <RefreshCw className="h-4 w-4" />
-              刷新
+              {t('刷新')}
             </button>
-            <button onClick={onClose} className="rounded p-2 text-gray-500 hover:bg-gray-100" title="关闭">
+            <button onClick={onClose} className="rounded p-2 text-gray-500 hover:bg-gray-100" title={t('关闭')}>
               <X className="h-4 w-4" />
             </button>
           </div>
         </div>
 
         {tasks.length === 0 ? (
-          <div className="p-8 text-center text-sm text-gray-500">暂无任务</div>
+          <div className="p-8 text-center text-sm text-gray-500">{t('暂无任务')}</div>
         ) : (
           <div className="overflow-auto">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-gray-100 bg-gray-50 text-left text-xs font-medium text-gray-500">
-                  <th className="whitespace-nowrap px-4 py-2.5">状态</th>
-                  <th className="whitespace-nowrap px-4 py-2.5">操作</th>
-                  <th className="whitespace-nowrap px-4 py-2.5">容器</th>
-                  <th className="whitespace-nowrap px-4 py-2.5">创建时间</th>
-                  <th className="px-4 py-2.5">错误</th>
+                  <th className="whitespace-nowrap px-4 py-2.5">{t('状态')}</th>
+                  <th className="whitespace-nowrap px-4 py-2.5">{t('操作')}</th>
+                  <th className="whitespace-nowrap px-4 py-2.5">{t('容器')}</th>
+                  <th className="whitespace-nowrap px-4 py-2.5">{t('当前阶段')}</th>
+                  <th className="whitespace-nowrap px-4 py-2.5">{t('创建时间')}</th>
+                  <th className="px-4 py-2.5">{t('错误')}</th>
                   <th className="whitespace-nowrap px-4 py-2.5 w-10"></th>
                 </tr>
               </thead>
@@ -915,11 +921,14 @@ function TaskQueueModal({ tasks, onRefresh, onClose }: {
                   <tr key={task.id} className="hover:bg-gray-50">
                     <td className="whitespace-nowrap px-4 py-2.5">
                       <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${taskStatusClass(task.status)}`}>
-                        {taskStatusLabel(task.status)}
+                        {t(taskStatusLabel(task.status))}
                       </span>
                     </td>
-                    <td className="whitespace-nowrap px-4 py-2.5 text-gray-800">{actionLabel(task.type)}</td>
+                    <td className="whitespace-nowrap px-4 py-2.5 text-gray-800">{t(actionLabel(task.type))}</td>
                     <td className="whitespace-nowrap px-4 py-2.5 font-mono text-xs text-gray-700">{task.container_name}</td>
+                    <td className="min-w-[210px] px-4 py-2.5 text-xs text-gray-700">
+                      {task.type === 'create' ? t(task.stage_detail || (task.status === 'pending' ? '排队等待' : '-')) : '-'}
+                    </td>
                     <td className="whitespace-nowrap px-4 py-2.5 font-mono text-xs text-gray-500">{task.created_at}</td>
                     <td className="min-w-[260px] px-4 py-2.5 text-gray-600">{task.error || '-'}</td>
                     <td className="whitespace-nowrap px-2 py-2.5">
@@ -932,7 +941,7 @@ function TaskQueueModal({ tasks, onRefresh, onClose }: {
                             } catch { /* ignore */ }
                           }}
                           className="p-1 rounded hover:bg-red-50 text-gray-400 hover:text-red-600 transition-colors"
-                          title="取消任务"
+                          title={t('取消任务')}
                         >
                           <X className="w-3.5 h-3.5" />
                         </button>

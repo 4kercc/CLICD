@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -43,6 +44,38 @@ func HandleLanguage(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusOK, APIResponse{Success: true, Data: map[string]string{
 			"language": config.AppConfig.Language,
 		}})
+	default:
+		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
+	}
+}
+
+// HandleTaskQueueSettings returns or updates the global task concurrency limit.
+func HandleTaskQueueSettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		jsonResponse(w, http.StatusOK, APIResponse{Success: true, Data: globalQueue.Settings()})
+	case http.MethodPut, http.MethodPost:
+		var req struct {
+			Concurrency int `json:"concurrency"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Invalid request body"})
+			return
+		}
+		if req.Concurrency < 1 || req.Concurrency > config.MaxTaskConcurrency {
+			jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "任务并发数必须在 1 到 16 之间"})
+			return
+		}
+		previous := config.AppConfig.TaskConcurrency
+		config.AppConfig.TaskConcurrency = req.Concurrency
+		if err := config.SaveConfig(); err != nil {
+			config.AppConfig.TaskConcurrency = previous
+			jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: "保存任务队列设置失败"})
+			return
+		}
+		globalQueue.SetConcurrency(req.Concurrency)
+		auditRequest(r, "settings.task_queue", "task_concurrency", fmt.Sprintf("concurrency=%d", req.Concurrency), true, "")
+		jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: "任务队列设置已保存", Data: globalQueue.Settings()})
 	default:
 		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
 	}
