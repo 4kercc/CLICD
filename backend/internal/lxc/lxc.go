@@ -708,7 +708,7 @@ func (m *Manager) applyLANIPv4Config(lxcName string, cfg ContainerConfig) (strin
 		values["lxc.net.0.ipv4.gateway"] = strings.TrimSpace(cfg.LANIPv4Gateway)
 	}
 	seen := map[string]bool{}
-	next := make([]string, 0, len(lines)+len(values))
+	next := make([]string, 0, len(lines))
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if !cfg.WantsLANStaticIPv4() && (strings.HasPrefix(trimmed, "lxc.net.0.ipv4.address") || strings.HasPrefix(trimmed, "lxc.net.0.ipv4.gateway")) {

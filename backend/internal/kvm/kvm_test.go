@@ -3,6 +3,7 @@ package kvm
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -11,14 +12,15 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-func TestLocalImageIDRejectsPathExpressions(t *testing.T) {
-	for _, id := range []string{"", ".", "..", "../../etc/passwd", `..\\..\\windows`, "/absolute"} {
-		if got := localImageID(id); got != "__invalid_image_id__" {
-			t.Fatalf("localImageID(%q) = %q", id, got)
+func TestImagePathUsesAllowlistedImageID(t *testing.T) {
+	for _, id := range []string{"", ".", "..", "../../etc/passwd", `..\\..\\windows`, "/absolute", "unknown-image"} {
+		if got := filepath.Base(ImagePath(id)); got != "__invalid_image_id__.qcow2" {
+			t.Fatalf("ImagePath(%q) basename = %q", id, got)
 		}
 	}
-	if got := localImageID("debian-13-kvm"); got != "debian-13-kvm" {
-		t.Fatalf("localImageID(valid) = %q", got)
+	validID := GetImages()[0].ID
+	if got := filepath.Base(ImagePath(validID)); got != validID+".qcow2" {
+		t.Fatalf("ImagePath(%q) basename = %q", validID, got)
 	}
 }
 
