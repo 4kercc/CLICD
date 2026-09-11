@@ -899,6 +899,7 @@ export interface SnapshotSchedule {
   enabled: boolean
   interval_hours: number
   time: string
+  max_copies?: number
   last_run: string
   next_run: string
   created_by: string
@@ -931,10 +932,10 @@ export const syncContainerSnapshot = (id: ContainerIdentifier, snapshotId: strin
 export const syncAllContainerSnapshots = (id: ContainerIdentifier) =>
   api.post<APIResponse>(`/containers/${id}/snapshots/sync-all`, {}, { timeout: 3600000 })
 
-export const updateSnapshotSchedule = (id: ContainerIdentifier, enabled: boolean, intervalHours: number, time: string) =>
+export const updateSnapshotSchedule = (id: ContainerIdentifier, enabled: boolean, intervalHours: number, time: string, maxCopies?: number) =>
   api.post<APIResponse<{ container: Container; snapshot?: Snapshot }>>(
     `/containers/${id}/snapshots/schedule`,
-    { enabled, interval_hours: intervalHours, time },
+    { enabled, interval_hours: intervalHours, time, max_copies: maxCopies || 0 },
     { timeout: 600000 }
   )
 

@@ -93,6 +93,7 @@ func listContainerSnapshots(w http.ResponseWriter, r *http.Request, containerID 
 			"enabled":        c.SnapshotScheduleEnabled,
 			"interval_hours": c.SnapshotScheduleIntervalHours,
 			"time":           c.SnapshotScheduleTime,
+			"max_copies":     c.SnapshotScheduleMaxCopies,
 			"last_run":       c.SnapshotScheduleLastRun,
 			"next_run":       c.SnapshotScheduleNextRun,
 			"created_by":     c.SnapshotScheduleCreatedBy,
@@ -174,6 +175,7 @@ func updateSnapshotSchedule(w http.ResponseWriter, r *http.Request, containerID 
 		Enabled       bool   `json:"enabled"`
 		IntervalHours int    `json:"interval_hours"`
 		Time          string `json:"time"`
+		MaxCopies     int    `json:"max_copies"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Invalid request body"})
@@ -189,6 +191,9 @@ func updateSnapshotSchedule(w http.ResponseWriter, r *http.Request, containerID 
 	if req.Time == "" {
 		req.Time = "03:00"
 	}
+	if req.MaxCopies < 0 {
+		req.MaxCopies = 0
+	}
 	if req.Enabled {
 		if _, err := config.SelectStoragePoolForContent(config.StorageContentSnapshots, "", 0); err != nil {
 			jsonResponse(w, http.StatusConflict, APIResponse{Success: false, Message: err.Error()})
@@ -196,7 +201,7 @@ func updateSnapshotSchedule(w http.ResponseWriter, r *http.Request, containerID 
 		}
 	}
 	user := requestUser(r)
-	c, err := setSnapshotScheduleByRuntime(containerID, req.Enabled, req.IntervalHours, req.Time, user)
+	c, err := setSnapshotScheduleByRuntime(containerID, req.Enabled, req.IntervalHours, req.Time, req.MaxCopies, user)
 	if err != nil {
 		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: err.Error()})
 		return
