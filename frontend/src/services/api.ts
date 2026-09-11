@@ -986,6 +986,22 @@ export const deleteContainerBackup = (id: ContainerIdentifier, backupId: string)
 export const restoreContainerBackup = (id: ContainerIdentifier, backupId: string, options?: { source?: 'local' | 'remote' }) =>
   api.post<APIResponse>(`/containers/${id}/backups/${backupId}/restore`, options || {}, { timeout: 1800000 })
 
+export interface StorageSyncProgress {
+  id: string
+  type: string
+  stage: string
+  current_file?: string
+  transferred_bytes?: number
+  total_bytes?: number
+  percent: number
+  speed_bps?: number
+  error?: string
+  updated_at?: number
+}
+
+export const getStorageSyncProgress = (id: string) =>
+  api.get<APIResponse<StorageSyncProgress>>(`/storage/progress?id=${encodeURIComponent(id)}`)
+
 export const syncContainerBackup = (id: ContainerIdentifier, backupId: string) =>
   api.post<APIResponse<Backup>>(`/containers/${id}/backups/${backupId}/sync`, {}, { timeout: 1800000 })
 
