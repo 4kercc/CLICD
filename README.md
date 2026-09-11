@@ -77,6 +77,14 @@ curl -fsSL https://raw.githubusercontent.com/4kercc/CLICD/main/install.sh | sudo
 - 放宽第三方 Windows 维护镜像的体积限制（支持 50MB~800MB 的 WinPE / WePE / FirPE 镜像）。
 - 修复了下载体积较小的 PE 镜像被误判为“文件不完整”的问题。
 
+### 6. 🔐 管理员两步验证 (2FA / TOTP)
+- 面板内置标准 RFC 6238 TOTP 双因素认证，支持 Google Authenticator、Microsoft Authenticator、1Password 等身份验证器扫码绑定。
+- 开启后登录强制进行 6 位动态验证码校验，大幅提升公网管理面板的防护等级。
+
+### 7. 🌐 NAT 规则双栈一体化管理 (Dual-Stack NAT & IPv6 Auto-Sync)
+- 统一 NAT 规则卡片体系，创建/编辑 IPv4 NAT 端口映射时支持一键自动同步生成/放行同端口 IPv6 入站防火墙规则。
+- 默认开启一键双栈放行，也可关闭后在防火墙面板中进行独立精细化管理。
+
 
 
 ## Features / 功能介绍
