@@ -204,11 +204,11 @@ func DownloadImageWithProgress(ctx context.Context, image Image, progress Downlo
 			return err
 		}
 	}
-	if image.IsWindows() {
-		if err := validateWindowsISO(tmp, target); err != nil {
-			_ = os.Remove(tmp)
-			return err
-		}
+		if image.IsWindows() {
+			if err := validateWindowsISO(tmp, target, image.IsWindowsPE()); err != nil {
+				_ = os.Remove(tmp)
+				return err
+			}
 		// Keep Windows ISO as-is, don't convert to qcow2
 		if err := os.Rename(tmp, target); err != nil {
 			_ = os.Remove(tmp)
@@ -347,13 +347,17 @@ func validateWindowsISOResponse(target string) downloadResponseValidator {
 	}
 }
 
-func validateWindowsISO(path, target string) error {
+func validateWindowsISO(path, target string, isPE bool) error {
 	info, err := os.Stat(path)
 	if err != nil {
 		return err
 	}
-	if info.Size() < 1024*1024*1024 {
-		return fmt.Errorf("downloaded Windows ISO is unexpectedly small (%d bytes). Microsoft download links may be region/time limited; try again or manually upload the ISO to: %s", info.Size(), target)
+	minSize := int64(1024 * 1024 * 1024)
+	if isPE {
+		minSize = int64(50 * 1024 * 1024) // Windows PE / WePE can be 100MB~800MB
+	}
+	if info.Size() < minSize {
+		return fmt.Errorf("downloaded ISO is unexpectedly small (%d bytes, min %d bytes). Download links may be limited or expired; manually upload the ISO to: %s", info.Size(), minSize, target)
 	}
 	f, err := os.Open(path)
 	if err != nil {
@@ -367,7 +371,7 @@ func validateWindowsISO(path, target string) error {
 	}
 	prefix := strings.ToLower(strings.TrimSpace(string(header[:n])))
 	if strings.HasPrefix(prefix, "<!doctype html") || strings.HasPrefix(prefix, "<html") || strings.Contains(prefix, "<html") {
-		return fmt.Errorf("downloaded Windows image is an HTML page instead of an ISO. Microsoft download links may be region/time limited; manually upload the ISO to: %s", target)
+		return fmt.Errorf("downloaded image is an HTML page instead of an ISO. Microsoft/cloud download links may be region/time limited; manually upload the ISO to: %s", target)
 	}
 	return nil
 }

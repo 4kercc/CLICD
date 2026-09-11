@@ -244,7 +244,13 @@ func ImagePath(id string) string {
 func (image Image) IsWindows() bool {
 	return image.Provisioner == config.KVMProvisionerWindows10 ||
 		image.Provisioner == config.KVMProvisionerWindows11 ||
+		image.Provisioner == config.KVMProvisionerWindowsPE ||
 		(image.Provisioner == "" && image.Distro == "windows")
+}
+
+func (image Image) IsWindowsPE() bool {
+	return image.Provisioner == config.KVMProvisionerWindowsPE ||
+		(image.Provisioner == "" && (image.Distro == "wepe" || image.Distro == "firpe" || image.Release == "pe"))
 }
 
 func (image Image) IsWindows11() bool {

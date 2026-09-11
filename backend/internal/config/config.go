@@ -843,6 +843,7 @@ const (
 	KVMProvisionerLinuxCloudInit = "linux-cloud-init"
 	KVMProvisionerWindows10      = "windows-10"
 	KVMProvisionerWindows11      = "windows-11"
+	KVMProvisionerWindowsPE      = "windows-pe"
 )
 
 // CustomKVMImage is an administrator-defined KVM image source.
