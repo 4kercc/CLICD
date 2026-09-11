@@ -1,17 +1,22 @@
 import { Dispatch, SetStateAction, useCallback, useEffect, useState } from 'react'
-import { Clock, Globe, ListTodo, Lock, LogIn, Minus, Monitor, Plus, RefreshCw, Save, Shield, ShieldCheck, Terminal, Upload, UserCog } from 'lucide-react'
+import { Check, Clock, Copy, Globe, KeyRound, ListTodo, Lock, LogIn, Minus, Monitor, Plus, QrCode, RefreshCw, Save, Shield, ShieldCheck, Terminal, Upload, UserCog } from 'lucide-react'
 import {
   changePassword,
   changeUsername,
+  disableTOTP,
+  enableTOTP,
   getLoginLogs,
   getPanelAccessPolicy,
   getSSLSettings,
   getTaskQueueSettings,
+  getTOTPStatus,
   getWebSSHOriginSettings,
   LoginLog,
   PanelAccessPolicy,
+  setupTOTP,
   SSLSettings,
   TaskQueueSettings,
+  TOTPSetupResponse,
   updateTaskQueueSettings,
   updateSSLSettings,
   updatePanelAccessPolicy,
@@ -22,11 +27,12 @@ import { useDialog } from '../components/Dialog'
 import { useAuth } from '../contexts/AuthContext'
 import { useLanguage } from '../contexts/LanguageContext'
 
-type SettingsSection = 'tasks' | 'account' | 'access' | 'webssh' | 'ssl' | 'logs'
+type SettingsSection = 'tasks' | 'account' | '2fa' | 'access' | 'webssh' | 'ssl' | 'logs'
 
 const settingsSections = [
   { id: 'tasks', label: '任务队列', icon: ListTodo },
   { id: 'account', label: '账号设置', icon: UserCog },
+  { id: '2fa', label: '两步验证 (2FA)', icon: KeyRound },
   { id: 'access', label: '访问来源', icon: Shield },
   { id: 'webssh', label: 'WebSSH 访问', icon: Terminal },
   { id: 'ssl', label: 'SSL 证书', icon: ShieldCheck },
@@ -61,6 +67,13 @@ export default function Settings() {
   const [taskQueue, setTaskQueue] = useState<TaskQueueSettings | null>(null)
   const [taskConcurrency, setTaskConcurrency] = useState(2)
   const [savingTaskQueue, setSavingTaskQueue] = useState(false)
+  const [totpEnabled, setTotpEnabled] = useState(false)
+  const [totpLoading, setTotpLoading] = useState(false)
+  const [totpSetupData, setTotpSetupData] = useState<TOTPSetupResponse | null>(null)
+  const [totpVerifyCode, setTotpVerifyCode] = useState('')
+  const [totpDisablePwd, setTotpDisablePwd] = useState('')
+  const [totpDisableCode, setTotpDisableCode] = useState('')
+  const [totpCopied, setTotpCopied] = useState(false)
   const [accessPolicy, setAccessPolicy] = useState<PanelAccessPolicy | null>(null)
   const [accessEnabled, setAccessEnabled] = useState(false)
   const [allowedSourcesText, setAllowedSourcesText] = useState('')
@@ -132,19 +145,31 @@ export default function Settings() {
     }
   }, [])
 
+  const fetchTOTPStatus = useCallback(async () => {
+    try {
+      const res = await getTOTPStatus()
+      if (res.data.data) {
+        setTotpEnabled(res.data.data.enabled)
+      }
+    } catch (err) {
+      console.error(err)
+    }
+  }, [])
+
   useEffect(() => {
     fetchLogs()
     fetchSSL()
     fetchWebSSHOrigins()
     fetchTaskQueue()
     fetchAccessPolicy()
+    fetchTOTPStatus()
     const logTimer = setInterval(fetchLogs, 15000)
     const taskTimer = setInterval(fetchTaskQueue, 5000)
     return () => {
       clearInterval(logTimer)
       clearInterval(taskTimer)
     }
-  }, [fetchAccessPolicy, fetchLogs, fetchSSL, fetchTaskQueue, fetchWebSSHOrigins])
+  }, [fetchAccessPolicy, fetchLogs, fetchSSL, fetchTaskQueue, fetchTOTPStatus, fetchWebSSHOrigins])
 
   const handleSaveTaskQueue = async () => {
     const concurrency = Math.max(1, Math.min(16, Math.round(taskConcurrency || 1)))
@@ -290,6 +315,67 @@ export default function Settings() {
     }
   }
 
+  const handleStartSetupTOTP = async () => {
+    setTotpLoading(true)
+    try {
+      const res = await setupTOTP()
+      if (res.data.data) {
+        setTotpSetupData(res.data.data)
+        setTotpVerifyCode('')
+      }
+    } catch (err: unknown) {
+      const e = err as { response?: { data?: { message?: string } } }
+      dialog.alert('失败', e.response?.data?.message || '生成 2FA 密钥失败')
+    } finally {
+      setTotpLoading(false)
+    }
+  }
+
+  const handleConfirmEnableTOTP = async () => {
+    if (!totpSetupData?.secret) {
+      dialog.alert('提示', '请先生成 2FA 密钥')
+      return
+    }
+    if (!totpVerifyCode || totpVerifyCode.trim().length !== 6) {
+      dialog.alert('提示', '请输入 6 位身份验证器动态码')
+      return
+    }
+    setTotpLoading(true)
+    try {
+      const res = await enableTOTP(totpSetupData.secret, totpVerifyCode.trim())
+      dialog.alert('完成', res.data.message || '双因素认证 (2FA) 已成功启用！')
+      setTotpEnabled(true)
+      setTotpSetupData(null)
+      setTotpVerifyCode('')
+    } catch (err: unknown) {
+      const e = err as { response?: { data?: { message?: string } } }
+      dialog.alert('失败', e.response?.data?.message || '启用双因素认证失败，请检查验证码或系统时间')
+    } finally {
+      setTotpLoading(false)
+    }
+  }
+
+  const handleDisableTOTP = async () => {
+    if (!totpDisablePwd) {
+      dialog.alert('提示', '请输入管理员密码以确认关闭 2FA')
+      return
+    }
+    setTotpLoading(true)
+    try {
+      const res = await disableTOTP(totpDisablePwd, totpDisableCode.trim() || undefined)
+      dialog.alert('完成', res.data.message || '双因素认证已成功关闭')
+      setTotpEnabled(false)
+      setTotpDisablePwd('')
+      setTotpDisableCode('')
+      setTotpSetupData(null)
+    } catch (err: unknown) {
+      const e = err as { response?: { data?: { message?: string } } }
+      dialog.alert('失败', e.response?.data?.message || '关闭双因素认证失败')
+    } finally {
+      setTotpLoading(false)
+    }
+  }
+
   if (loading) {
     return (
       <div className="flex items-center justify-center py-20">
@@ -366,6 +452,169 @@ export default function Settings() {
               <div className="mt-4 flex justify-end">
                 <button onClick={handleSaveAccount} className="rounded-md bg-black px-4 py-2 text-sm text-white hover:bg-gray-800 dark:bg-white dark:text-black dark:hover:bg-gray-200">保存修改</button>
               </div>
+            </div>
+          )}
+
+          {activeSection === '2fa' && (
+            <div className="rounded-lg border border-gray-200 bg-white p-5 dark:border-gray-700 dark:bg-gray-900 space-y-6">
+              <div>
+                <div className="flex items-center justify-between">
+                  <h2 className="flex items-center gap-2 text-sm font-semibold text-black dark:text-white">
+                    <KeyRound className="h-4 w-4" />两步验证 (2FA / TOTP)
+                  </h2>
+                  <span className={`inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-medium ${totpEnabled ? 'bg-green-50 text-green-700 dark:bg-green-950 dark:text-green-300' : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400'}`}>
+                    <ShieldCheck className="h-3.5 w-3.5" />
+                    {totpEnabled ? '已启用' : '未启用'}
+                  </span>
+                </div>
+                <p className="mt-1 text-xs text-gray-500 dark:text-gray-400 leading-relaxed">
+                  通过 Google Authenticator、Microsoft Authenticator、1Password 等身份验证器生成动态验证码，在登录时保护面板安全。
+                </p>
+              </div>
+
+              {!totpEnabled ? (
+                <div className="space-y-4">
+                  {!totpSetupData ? (
+                    <div className="rounded-lg border border-dashed border-gray-300 p-6 text-center space-y-3 dark:border-gray-700">
+                      <KeyRound className="h-8 w-8 text-gray-400 mx-auto" />
+                      <div className="text-sm font-medium text-gray-800 dark:text-gray-200">启用双因素身份认证</div>
+                      <p className="text-xs text-gray-500 max-w-md mx-auto">
+                        点击下方按钮生成密钥，使用验证器扫码或手动填入密钥后，输入 6 位动态验证码即可完成绑定。
+                      </p>
+                      <button
+                        type="button"
+                        onClick={handleStartSetupTOTP}
+                        disabled={totpLoading}
+                        className="inline-flex items-center gap-2 rounded-md bg-black px-4 py-2 text-sm text-white hover:bg-gray-800 disabled:opacity-50 dark:bg-white dark:text-black dark:hover:bg-gray-200"
+                      >
+                        {totpLoading ? '正在生成...' : '立即配置 2FA'}
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="rounded-lg border border-blue-200 bg-blue-50/40 p-5 space-y-4 dark:border-blue-900/50 dark:bg-blue-950/20">
+                      <div className="text-sm font-semibold text-blue-950 dark:text-blue-200">
+                        步骤 1：使用身份验证器添加账号
+                      </div>
+
+                      <div className="grid gap-4 sm:grid-cols-[160px_minmax(0,1fr)] items-center">
+                        <div className="flex flex-col items-center justify-center p-2 bg-white rounded-lg border border-gray-200 shadow-sm dark:bg-gray-900 dark:border-gray-800">
+                          <img
+                            src={`https://api.qrserver.com/v1/create-qr-code/?size=140x140&data=${encodeURIComponent(totpSetupData.otpauth_url)}`}
+                            alt="2FA QR Code"
+                            className="w-32 h-32"
+                          />
+                          <span className="mt-1 text-[10px] text-gray-400 flex items-center gap-1">
+                            <QrCode className="h-3 w-3" />扫码添加
+                          </span>
+                        </div>
+
+                        <div className="space-y-3">
+                          <div>
+                            <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">手动输入密钥 (Base32)</label>
+                            <div className="flex items-center gap-2">
+                              <code className="block flex-1 rounded bg-white px-3 py-2 font-mono text-sm font-bold tracking-wider text-black border border-gray-300 dark:bg-gray-900 dark:text-white dark:border-gray-700">
+                                {totpSetupData.secret}
+                              </code>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  void navigator.clipboard.writeText(totpSetupData.secret)
+                                  setTotpCopied(true)
+                                  setTimeout(() => setTotpCopied(false), 2000)
+                                }}
+                                className="inline-flex items-center gap-1 rounded-md border border-gray-300 bg-white px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-200"
+                              >
+                                {totpCopied ? <Check className="h-3.5 w-3.5 text-green-600" /> : <Copy className="h-3.5 w-3.5" />}
+                                {totpCopied ? '已复制' : '复制'}
+                              </button>
+                            </div>
+                          </div>
+                          <div className="text-xs text-gray-600 dark:text-gray-400 space-y-1">
+                            <div>账号名称：<span className="font-mono font-medium text-black dark:text-white">{totpSetupData.account_name}</span></div>
+                            <div>签发主体：<span className="font-mono font-medium text-black dark:text-white">{totpSetupData.issuer}</span></div>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="border-t border-blue-200/80 pt-4 dark:border-blue-900/40">
+                        <div className="text-sm font-semibold text-blue-950 dark:text-blue-200 mb-2">
+                          步骤 2：输入 6 位动态验证码确认激活
+                        </div>
+                        <div className="flex flex-wrap items-center gap-3">
+                          <input
+                            type="text"
+                            maxLength={6}
+                            value={totpVerifyCode}
+                            onChange={(e) => setTotpVerifyCode(e.target.value.replace(/\D/g, ''))}
+                            placeholder="000000"
+                            className="w-44 rounded-md border border-gray-300 bg-white px-3 py-2 font-mono text-center text-sm font-bold tracking-widest text-black outline-none focus:border-black focus:ring-1 focus:ring-black dark:border-gray-700 dark:bg-gray-950 dark:text-white"
+                          />
+                          <button
+                            type="button"
+                            onClick={handleConfirmEnableTOTP}
+                            disabled={totpLoading || totpVerifyCode.length !== 6}
+                            className="rounded-md bg-black px-4 py-2 text-sm text-white hover:bg-gray-800 disabled:opacity-50 dark:bg-white dark:text-black dark:hover:bg-gray-200"
+                          >
+                            {totpLoading ? '验证中...' : '验证并启用'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setTotpSetupData(null)
+                              setTotpVerifyCode('')
+                            }}
+                            className="text-xs text-gray-500 hover:text-black dark:hover:text-white"
+                          >
+                            取消
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="rounded-lg border border-red-200 bg-red-50/40 p-5 space-y-4 dark:border-red-900/50 dark:bg-red-950/20">
+                  <div className="text-sm font-semibold text-red-900 dark:text-red-300">
+                    关闭双因素认证 (2FA)
+                  </div>
+                  <p className="text-xs text-red-700 dark:text-red-400 leading-relaxed">
+                    关闭两步验证后，面板登录将仅依赖用户名和密码。为了验证身份，请输入管理员当前登录密码。
+                  </p>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div>
+                      <label className="block text-xs text-gray-600 dark:text-gray-400 mb-1">管理员密码（必填）</label>
+                      <input
+                        type="password"
+                        value={totpDisablePwd}
+                        onChange={(e) => setTotpDisablePwd(e.target.value)}
+                        placeholder="输入当前密码以确认"
+                        className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-black dark:border-gray-700 dark:bg-gray-950 dark:text-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-gray-600 dark:text-gray-400 mb-1">动态验证码（可选）</label>
+                      <input
+                        type="text"
+                        maxLength={6}
+                        value={totpDisableCode}
+                        onChange={(e) => setTotpDisableCode(e.target.value.replace(/\D/g, ''))}
+                        placeholder="6位动态码（可选）"
+                        className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 font-mono text-sm text-black dark:border-gray-700 dark:bg-gray-950 dark:text-white"
+                      />
+                    </div>
+                  </div>
+                  <div className="flex justify-end">
+                    <button
+                      type="button"
+                      onClick={handleDisableTOTP}
+                      disabled={totpLoading || !totpDisablePwd}
+                      className="rounded-md bg-red-600 px-4 py-2 text-sm text-white hover:bg-red-700 disabled:opacity-50"
+                    >
+                      {totpLoading ? '处理中...' : '确认关闭 2FA'}
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 

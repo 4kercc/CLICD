@@ -617,11 +617,13 @@ func loadConfigFromDB() (*ClicdConfig, bool, error) {
 		return nil, false, nil
 	}
 
-	cfg := &ClicdConfig{
-		AdminUser:            meta["admin_user"],
-		AdminPassHash:        meta["admin_pass_hash"],
-		JWTSecret:            meta["jwt_secret"],
-		Port:                 atoi(meta["port"]),
+		cfg := &ClicdConfig{
+			AdminUser:            meta["admin_user"],
+			AdminPassHash:        meta["admin_pass_hash"],
+			AdminTOTPSecret:      meta["admin_totp_secret"],
+			AdminTOTPEnabled:     atob(meta["admin_totp_enabled"]),
+			JWTSecret:            meta["jwt_secret"],
+			Port:                 atoi(meta["port"]),
 		DataDir:              meta["data_dir"],
 		NextContainerID:      atoi(meta["next_container_id"]),
 		NextVNCPort:          atoi(meta["next_vnc_port"]),
@@ -773,11 +775,13 @@ func saveMeta(tx *sql.Tx) error {
 	storagePoolsJSON, _ := json.Marshal(AppConfig.StoragePools)
 	customKVMImagesJSON, _ := json.Marshal(AppConfig.CustomKVMImages)
 	customLXCImagesJSON, _ := json.Marshal(AppConfig.CustomLXCImages)
-	values := map[string]string{
-		"admin_user":             AppConfig.AdminUser,
-		"admin_pass_hash":        AppConfig.AdminPassHash,
-		"jwt_secret":             AppConfig.JWTSecret,
-		"port":                   strconv.Itoa(AppConfig.Port),
+		values := map[string]string{
+			"admin_user":             AppConfig.AdminUser,
+			"admin_pass_hash":        AppConfig.AdminPassHash,
+			"admin_totp_secret":      AppConfig.AdminTOTPSecret,
+			"admin_totp_enabled":     btoa(AppConfig.AdminTOTPEnabled),
+			"jwt_secret":             AppConfig.JWTSecret,
+			"port":                   strconv.Itoa(AppConfig.Port),
 		"data_dir":               AppConfig.DataDir,
 		"next_container_id":      strconv.Itoa(AppConfig.NextContainerID),
 		"next_vnc_port":          strconv.Itoa(AppConfig.NextVNCPort),

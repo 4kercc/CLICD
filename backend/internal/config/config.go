@@ -803,9 +803,11 @@ func defaultPrimaryStoragePool() StoragePool {
 
 // ClicdConfig is the main configuration structure
 type ClicdConfig struct {
-	AdminUser            string                 `json:"admin_user"`
-	AdminPassHash        string                 `json:"admin_pass_hash"`
-	JWTSecret            string                 `json:"jwt_secret"`
+		AdminUser            string                 `json:"admin_user"`
+		AdminPassHash        string                 `json:"admin_pass_hash"`
+		AdminTOTPSecret      string                 `json:"admin_totp_secret,omitempty"`
+		AdminTOTPEnabled     bool                   `json:"admin_totp_enabled"`
+		JWTSecret            string                 `json:"jwt_secret"`
 	Port                 int                    `json:"port"`
 	DataDir              string                 `json:"data_dir"`
 	Containers           []Container            `json:"containers"`

@@ -8,7 +8,7 @@ interface AuthContextType {
   username: string | null
   isSubUser: boolean
   containerIdentifiers: string[]
-  login: (username: string, password: string) => Promise<void>
+  login: (username: string, password: string, totpCode?: string) => Promise<{ requires2FA?: boolean }>
   accessCodeLogin: (code: string, password: string) => Promise<void>
   logout: () => void
   token: string | null
@@ -65,12 +65,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [navigate])
 
-  const login = async (user: string, password: string) => {
+  const login = async (user: string, password: string, totpCode?: string): Promise<{ requires2FA?: boolean }> => {
     try {
-      const response = await apiLogin(user, password)
+      const response = await apiLogin(user, password, totpCode)
       const data = response.data.data as LoginResponse
-      saveAuth(data.token, data.username, false, [])
-      navigate('/')
+      if (data.requires_2fa) {
+        return { requires2FA: true }
+      }
+      if (data.token && data.username) {
+        saveAuth(data.token, data.username, false, [])
+        navigate('/')
+      }
+      return { requires2FA: false }
     } catch (adminError) {
       try {
         const res = await api.post('/sub-user/login', { username: user, password })
@@ -78,6 +84,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         saveAuth(data.token, data.username, true, data.container_uuids || [])
         const first = data.container_uuids?.[0]
         navigate(first ? `/container/${encodeURIComponent(first)}` : '/containers')
+        return { requires2FA: false }
       } catch {
         throw adminError
       }
