@@ -1825,11 +1825,47 @@ func (m *Manager) GetResourceUsage(id int) (map[string]interface{}, error) {
 		"load15":             0.0,
 		"guest_metrics":      false,
 	}
-	if c.DiskImage != "" {
-		if info, err := os.Stat(c.DiskImage); err == nil {
-			usage["disk_usage_bytes"] = info.Size()
+		if c.DiskImage != "" {
+			if info, err := os.Stat(c.DiskImage); err == nil {
+				usage["disk_usage_bytes"] = info.Size()
+			}
+		} else {
+			defaultDiskPath := filepath.Join(m.instanceDir(name), "disk.qcow2")
+			if info, err := os.Stat(defaultDiskPath); err == nil {
+				usage["disk_usage_bytes"] = info.Size()
+			}
 		}
-	}
+		// If Guest Agent is connected, check guest-get-fsinfo for real internal OS disk usage
+		if c.Status == "running" && qemuGuestPing(name) == nil {
+			if out, err := exec.Command("virsh", "qemu-agent-command", name, `{"execute":"guest-get-fsinfo"}`).Output(); err == nil {
+				var fsResp struct {
+					Return []struct {
+						Mountpoint string `json:"mountpoint"`
+						Type       string `json:"type"`
+						UsedBytes  int64  `json:"used-bytes"`
+						TotalBytes int64  `json:"total-bytes"`
+					} `json:"return"`
+				}
+				if json.Unmarshal(out, &fsResp) == nil && len(fsResp.Return) > 0 {
+					var totalUsed int64
+					for _, fs := range fsResp.Return {
+						// Skip read-only optical drives (CDFS/iso9660)
+						if strings.EqualFold(fs.Type, "cdfs") || strings.EqualFold(fs.Type, "iso9660") {
+							continue
+						}
+						// For Windows match C: drive, for Linux match /
+						if strings.HasPrefix(strings.ToUpper(fs.Mountpoint), "C:") || fs.Mountpoint == "/" || totalUsed == 0 {
+							if fs.UsedBytes > 0 {
+								totalUsed += fs.UsedBytes
+							}
+						}
+					}
+					if totalUsed > 0 {
+						usage["disk_usage_bytes"] = totalUsed
+					}
+				}
+			}
+		}
 	if c.Status == "running" {
 		if mem := virshMemBytes(name); mem > 0 {
 			usage["memory_usage_bytes"] = mem
@@ -2214,31 +2250,31 @@ func (m *Manager) MountVirtioISO(id int, mount bool) error {
 		return fmt.Errorf("instance is not KVM: %d", id)
 	}
 	name := c.VirshName()
-	if mount {
-		if err := ensureVirtioWinISO(); err != nil {
-			return err
-		}
-		virtioPath := virtioWinISOPath()
-		// Try eject first, then insert into hdc or hdb
-		_ = exec.Command("virsh", "change-media", name, "hdc", "--eject", "--config", "--live").Run()
-		_ = exec.Command("virsh", "change-media", name, "hdc", "--eject").Run()
-		cmd := exec.Command("virsh", "change-media", name, "hdc", virtioPath, "--insert", "--config", "--live")
-		if output, err := cmd.CombinedOutput(); err != nil {
-			// Fallback without config/live flags
-			cmd2 := exec.Command("virsh", "change-media", name, "hdc", virtioPath, "--insert")
-			if out2, err2 := cmd2.CombinedOutput(); err2 != nil {
-				return fmt.Errorf("failed to mount virtio-win.iso to hdc: %v (%s)", err2, string(out2))
+		if mount {
+			if err := ensureVirtioWinISO(); err != nil {
+				return err
 			}
+			virtioPath := virtioWinISOPath()
+			// Try eject first, then insert into hdc or hdb
+			_ = exec.Command("virsh", "change-media", name, "hdc", "--eject", "--config", "--live").Run()
+			_ = exec.Command("virsh", "change-media", name, "hdc", "--eject").Run()
+			cmd := exec.Command("virsh", "change-media", name, "hdc", virtioPath, "--insert", "--config", "--live")
+			if _, err := cmd.CombinedOutput(); err != nil {
+				// Fallback without config/live flags
+				cmd2 := exec.Command("virsh", "change-media", name, "hdc", virtioPath, "--insert")
+				if out2, err2 := cmd2.CombinedOutput(); err2 != nil {
+					return fmt.Errorf("failed to mount virtio-win.iso to hdc: %v (%s)", err2, string(out2))
+				}
+			}
+			return nil
+		} else {
+			cmd := exec.Command("virsh", "change-media", name, "hdc", "--eject", "--config", "--live")
+			if _, err := cmd.CombinedOutput(); err != nil {
+				cmd2 := exec.Command("virsh", "change-media", name, "hdc", "--eject")
+				_ = cmd2.Run()
+			}
+			return nil
 		}
-		return nil
-	} else {
-		cmd := exec.Command("virsh", "change-media", name, "hdc", "--eject", "--config", "--live")
-		if output, err := cmd.CombinedOutput(); err != nil {
-			cmd2 := exec.Command("virsh", "change-media", name, "hdc", "--eject")
-			_ = cmd2.Run()
-		}
-		return nil
-	}
 }
 
 func (m *Manager) GetGuestAgentStatus(id int) (bool, map[string]interface{}, error) {
