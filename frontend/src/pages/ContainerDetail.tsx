@@ -242,6 +242,7 @@ export default function ContainerDetail() {
   const [guestAgentFS, setGuestAgentFS] = useState<any[] | null>(null)
   const [checkingGuestAgent, setCheckingGuestAgent] = useState(false)
   const [showVirtioModal, setShowVirtioModal] = useState(false)
+  const [agentInstallTab, setAgentInstallTab] = useState<'windows' | 'linux'>('windows')
   const [mountingVirtio, setMountingVirtio] = useState(false)
   const [copiedLinuxScript, setCopiedLinuxScript] = useState(false)
 
@@ -1694,7 +1695,7 @@ export default function ContainerDetail() {
                 checkingGuestAgent && guestAgentConnected === null ? (
                   '检测中...'
                 ) : guestAgentConnected ? (
-                  <span className="inline-flex items-center gap-1 text-emerald-600">
+                  <span className="inline-flex items-center gap-1 text-emerald-600 font-medium">
                     <CheckCircle2 className="w-3.5 h-3.5" /> 已连接
                   </span>
                 ) : (
@@ -1702,12 +1703,15 @@ export default function ContainerDetail() {
                     <span className="text-amber-600">未安装/未运行</span>
                     {!isSubUser && (
                       <button
-                        onClick={() => setShowVirtioModal(true)}
+                        onClick={() => {
+                          setAgentInstallTab(isWindows ? 'windows' : 'linux')
+                          setShowVirtioModal(true)
+                        }}
                         className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] text-blue-700 border border-blue-200 bg-blue-50 rounded hover:bg-blue-100"
-                        title={isWindows ? "挂载 VirtIO 驱动与 Guest Agent 光盘" : "查看 Linux Guest Agent 安装指南与脚本"}
+                        title="查看 QEMU Guest Agent 安装与驱动指南"
                       >
-                        {isWindows ? <Disc className="w-3 h-3" /> : <TerminalSquare className="w-3 h-3" />}
-                        {isWindows ? '挂载驱动盘' : '安装指南'}
+                        <TerminalSquare className="w-3 h-3" />
+                        安装指南
                       </button>
                     )}
                   </div>
@@ -1801,9 +1805,12 @@ export default function ContainerDetail() {
                         </span>
                         {!isSubUser && (
                           <button
-                            onClick={() => setShowVirtioModal(true)}
+                            onClick={() => {
+                              setAgentInstallTab(isWindows ? 'windows' : 'linux')
+                              setShowVirtioModal(true)
+                            }}
                             className="text-[9px] text-blue-600 underline hover:text-blue-800"
-                            title="挂载驱动盘安装 Guest Agent"
+                            title="查看安装指南以启用 Guest Agent"
                           >
                             安装Agent
                           </button>
@@ -3012,12 +3019,12 @@ export default function ContainerDetail() {
       {/* VirtIO & Guest Agent Modal */}
       {showVirtioModal && (
         <Modal
-          title={isWindows ? 'QEMU Guest Agent & VirtIO 驱动光盘 (Windows)' : 'QEMU Guest Agent 安装指南 (Linux)'}
+          title="QEMU Guest Agent & VirtIO 协同服务安装"
           onClose={() => setShowVirtioModal(false)}
         >
           <div className="space-y-4">
             <div className="flex items-start gap-3 p-3.5 bg-blue-50 border border-blue-100 rounded-lg text-xs text-blue-900 leading-relaxed">
-              {isWindows ? <Disc className="w-5 h-5 text-blue-600 shrink-0 mt-0.5" /> : <TerminalSquare className="w-5 h-5 text-blue-600 shrink-0 mt-0.5" />}
+              <TerminalSquare className="w-5 h-5 text-blue-600 shrink-0 mt-0.5" />
               <div>
                 <div className="font-semibold text-sm mb-1">关于 Guest Agent 协同能力</div>
                 <p>
@@ -3032,7 +3039,33 @@ export default function ContainerDetail() {
               </div>
             </div>
 
-            {isWindows ? (
+            {/* Operating System Tab Selection */}
+            <div className="flex border-b border-gray-200">
+              <button
+                type="button"
+                onClick={() => setAgentInstallTab('windows')}
+                className={`flex-1 py-2 text-xs font-medium border-b-2 transition-colors ${
+                  agentInstallTab === 'windows'
+                    ? 'border-black text-black'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                }`}
+              >
+                Windows 系统 (挂载光盘)
+              </button>
+              <button
+                type="button"
+                onClick={() => setAgentInstallTab('linux')}
+                className={`flex-1 py-2 text-xs font-medium border-b-2 transition-colors ${
+                  agentInstallTab === 'linux'
+                    ? 'border-black text-black'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                }`}
+              >
+                Linux 系统 (一键脚本)
+              </button>
+            </div>
+
+            {agentInstallTab === 'windows' ? (
               <div className="border border-gray-200 rounded-lg p-3 bg-gray-50 text-xs space-y-2">
                 <div className="font-medium text-gray-800">Windows 安装说明：</div>
                 <ol className="list-decimal pl-4 space-y-1 text-gray-600">
@@ -3077,7 +3110,7 @@ export default function ContainerDetail() {
             )}
 
             <div className="flex items-center justify-between pt-2">
-              {isWindows ? (
+              {agentInstallTab === 'windows' ? (
                 <button
                   onClick={() => handleMountVirtio(false)}
                   disabled={mountingVirtio}
@@ -3093,7 +3126,7 @@ export default function ContainerDetail() {
                 >
                   关闭
                 </button>
-                {isWindows && (
+                {agentInstallTab === 'windows' && (
                   <button
                     onClick={() => handleMountVirtio(true)}
                     disabled={mountingVirtio}
