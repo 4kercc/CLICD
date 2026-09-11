@@ -514,6 +514,25 @@ func restoreContainerBackup(w http.ResponseWriter, r *http.Request, containerID 
 		jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: fmt.Sprintf("已成功同步 %d 个备份至远程存储", count)})
 	}
 
+// HandleStorageSyncProgress returns active sync/restore progress by snapshot/backup ID
+func HandleStorageSyncProgress(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
+		return
+	}
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	if id == "" {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "id parameter is required"})
+		return
+	}
+	progress := remote.GetProgress(id)
+	if progress == nil {
+		jsonResponse(w, http.StatusOK, APIResponse{Success: true, Data: map[string]interface{}{"status": "idle"}})
+		return
+	}
+	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Data: progress})
+}
+
 func sortBackupsNewestFirst(backups []config.Backup) {
 	sort.SliceStable(backups, func(i, j int) bool {
 		ti, _ := time.Parse("2006-01-02 15:04:05", backups[i].CreatedAt)

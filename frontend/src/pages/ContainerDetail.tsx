@@ -90,6 +90,8 @@ import {
   restoreContainerSnapshot,
   syncContainerSnapshot,
   syncAllContainerSnapshots,
+  getStorageSyncProgress,
+  StorageSyncProgress,
   resetTraffic,
   updateTrafficLimit,
   updateResourceLimit,
@@ -253,6 +255,18 @@ export default function ContainerDetail() {
   const [editingTemplate, setEditingTemplate] = useState(false)
   const [templateDraft, setTemplateDraft] = useState('')
   const [savingTemplate, setSavingTemplate] = useState(false)
+  const [transferProgress, setTransferProgress] = useState<{
+    visible: boolean
+    title: string
+    subTitle?: string
+    percent: number
+    currentFile?: string
+    speedBps?: number
+    transferredBytes?: number
+    totalBytes?: number
+    status?: 'transferring' | 'completed' | 'failed'
+    error?: string
+  } | null>(null)
 
   const fetchContainer = useCallback(async () => {
     if (!containerIdentifier) return
@@ -1115,6 +1129,60 @@ export default function ContainerDetail() {
     }
   }
 
+  const pollTransferProgress = (targetId: string, initialTitle: string, initialSubTitle: string) => {
+    setTransferProgress({
+      visible: true,
+      title: initialTitle,
+      subTitle: initialSubTitle,
+      percent: 5,
+      status: 'transferring',
+    })
+    const timer = window.setInterval(async () => {
+      try {
+        const res = await getStorageSyncProgress(targetId)
+        if (res.data.success && res.data.data) {
+          const p = res.data.data
+          if (p.stage === 'transferring') {
+            setTransferProgress({
+              visible: true,
+              title: initialTitle,
+              subTitle: p.current_file ? `正在传输: ${p.current_file}` : initialSubTitle,
+              percent: Math.max(5, p.percent || 5),
+              currentFile: p.current_file,
+              speedBps: p.speed_bps,
+              transferredBytes: p.transferred_bytes,
+              totalBytes: p.total_bytes,
+              status: 'transferring',
+            })
+          } else if (p.stage === 'completed') {
+            setTransferProgress({
+              visible: true,
+              title: initialTitle,
+              subTitle: '传输完成！',
+              percent: 100,
+              status: 'completed',
+            })
+            window.clearInterval(timer)
+            setTimeout(() => setTransferProgress(null), 2500)
+          } else if (p.stage === 'failed') {
+            setTransferProgress({
+              visible: true,
+              title: initialTitle,
+              subTitle: '传输失败',
+              percent: 100,
+              status: 'failed',
+              error: p.error,
+            })
+            window.clearInterval(timer)
+          }
+        }
+      } catch {
+        // ignore poll errors
+      }
+    }, 1500)
+    return timer
+  }
+
   const handleRestoreSnapshot = async (snapshot: Snapshot, source: 'local' | 'remote' = 'local') => {
     if (!containerIdentifier) return
     if (!(await ensureSubUserCanOperate())) return
@@ -1126,14 +1194,32 @@ export default function ContainerDetail() {
     const sourceLabel = source === 'remote' ? '（从远程存储拉取）' : '（从本地存储）'
     if (!(await dialog.confirm('恢复快照', `确定恢复到 ${snapshot.created_at} 的快照${sourceLabel}吗？当前容器数据会被覆盖。`))) return
     setSnapshotBusy(snapshot.id)
+    let timer: number | null = null
+    if (source === 'remote') {
+      timer = pollTransferProgress(snapshot.id, '正在从远程存储拉取快照并恢复', `快照时间点: ${snapshot.created_at}`)
+    }
     try {
       await restoreContainerSnapshot(containerIdentifier, snapshot.id, { source })
       await Promise.all([fetchSnapshots(), fetchContainer()])
-      dialog.alert('恢复成功', `已成功从${source === 'remote' ? '远程存储' : '本地'}恢复快照。`)
+      if (source === 'remote') {
+        setTransferProgress({
+          visible: true,
+          title: '快照恢复完成',
+          subTitle: '数据已成功从远程存储同步并还原。',
+          percent: 100,
+          status: 'completed',
+        })
+        setTimeout(() => setTransferProgress(null), 2500)
+      } else {
+        dialog.alert('恢复成功', '已成功从本地存储恢复快照。')
+      }
     } catch (err: unknown) {
+      if (timer) window.clearInterval(timer)
+      setTransferProgress(null)
       const error = err as { response?: { data?: { message?: string } } }
       await dialog.alert('恢复快照失败', error.response?.data?.message || '请稍后重试。')
     } finally {
+      if (timer) window.clearInterval(timer)
       setSnapshotBusy('')
     }
   }
@@ -1142,14 +1228,25 @@ export default function ContainerDetail() {
     if (!containerIdentifier) return
     if (!(await ensureSubUserCanOperate())) return
     setSnapshotBusy(snapshot.id)
+    const timer = pollTransferProgress(snapshot.id, '正在同步快照到远程存储', `快照时间点: ${snapshot.created_at}`)
     try {
       await syncContainerSnapshot(containerIdentifier, snapshot.id)
       await fetchSnapshots()
-      dialog.alert('同步成功', `快照 ${snapshot.created_at} 已成功同步至远程存储。`)
+      setTransferProgress({
+        visible: true,
+        title: '快照同步成功',
+        subTitle: `快照 ${snapshot.created_at} 已安全存入异地存储。`,
+        percent: 100,
+        status: 'completed',
+      })
+      setTimeout(() => setTransferProgress(null), 2500)
     } catch (err: unknown) {
+      window.clearInterval(timer)
+      setTransferProgress(null)
       const error = err as { response?: { data?: { message?: string } } }
       await dialog.alert('同步失败', error.response?.data?.message || '同步到远程存储失败，请检查远程存储设置与连通性。')
     } finally {
+      window.clearInterval(timer)
       setSnapshotBusy('')
     }
   }
@@ -1162,11 +1259,26 @@ export default function ContainerDetail() {
       return
     }
     setSnapshotBusy('sync-all')
+    setTransferProgress({
+      visible: true,
+      title: '正在批量同步所有快照到远程存储',
+      subTitle: `共 ${snapshots.length} 个快照排队同步中...`,
+      percent: 20,
+      status: 'transferring',
+    })
     try {
       const res = await syncAllContainerSnapshots(containerIdentifier)
       await fetchSnapshots()
-      dialog.alert('同步完成', res.data.message || '所有快照已成功同步至远程存储。')
+      setTransferProgress({
+        visible: true,
+        title: '批量快照同步完成',
+        subTitle: res.data.message || '所有快照已成功同步至远程存储。',
+        percent: 100,
+        status: 'completed',
+      })
+      setTimeout(() => setTransferProgress(null), 2500)
     } catch (err: unknown) {
+      setTransferProgress(null)
       const error = err as { response?: { data?: { message?: string } } }
       await dialog.alert('同步失败', error.response?.data?.message || '同步到远程存储失败，请检查远程存储设置与连通性。')
     } finally {
@@ -1178,14 +1290,25 @@ export default function ContainerDetail() {
     if (!containerIdentifier) return
     if (!(await ensureSubUserCanOperate())) return
     setBackupBusy(backup.id)
+    const timer = pollTransferProgress(backup.id, '正在同步全量备份到远程存储', `备份时间点: ${backup.created_at}`)
     try {
       await syncContainerBackup(containerIdentifier, backup.id)
       await fetchBackups()
-      dialog.alert('同步成功', `备份 ${backup.created_at} 已成功同步至远程存储。`)
+      setTransferProgress({
+        visible: true,
+        title: '全量备份同步成功',
+        subTitle: `备份 ${backup.created_at} 已安全存入异地存储。`,
+        percent: 100,
+        status: 'completed',
+      })
+      setTimeout(() => setTransferProgress(null), 2500)
     } catch (err: unknown) {
+      window.clearInterval(timer)
+      setTransferProgress(null)
       const error = err as { response?: { data?: { message?: string } } }
       dialog.alert('同步失败', error.response?.data?.message || '同步到远程存储失败，请检查远程存储设置与连通性。')
     } finally {
+      window.clearInterval(timer)
       setBackupBusy('')
     }
   }
@@ -1198,11 +1321,26 @@ export default function ContainerDetail() {
       return
     }
     setBackupBusy('sync-all')
+    setTransferProgress({
+      visible: true,
+      title: '正在批量同步所有全量备份到远程存储',
+      subTitle: `共 ${backups.length} 个全量备份排队同步中...`,
+      percent: 20,
+      status: 'transferring',
+    })
     try {
       const res = await syncAllContainerBackups(containerIdentifier)
       await fetchBackups()
-      dialog.alert('同步完成', res.data.message || '所有全量备份已成功同步至远程存储。')
+      setTransferProgress({
+        visible: true,
+        title: '批量备份同步完成',
+        subTitle: res.data.message || '所有全量备份已成功同步至远程存储。',
+        percent: 100,
+        status: 'completed',
+      })
+      setTimeout(() => setTransferProgress(null), 2500)
     } catch (err: unknown) {
+      setTransferProgress(null)
       const error = err as { response?: { data?: { message?: string } } }
       dialog.alert('同步失败', error.response?.data?.message || '同步到远程存储失败，请检查远程存储设置与连通性。')
     } finally {
@@ -1261,14 +1399,32 @@ export default function ContainerDetail() {
     const sourceLabel = source === 'remote' ? '（从远程存储拉取）' : '（从本地存储）'
     if (!(await dialog.confirm('恢复备份', `确定要从 ${backup.created_at} 的全量备份覆盖还原虚拟机${sourceLabel}吗？当前所有未备份改动将丢失。`))) return
     setBackupBusy(backup.id)
+    let timer: number | null = null
+    if (source === 'remote') {
+      timer = pollTransferProgress(backup.id, '正在从远程存储拉取全量备份并覆盖还原', `备份时间点: ${backup.created_at}`)
+    }
     try {
       await restoreContainerBackup(containerIdentifier, backup.id, { source })
       await Promise.all([fetchBackups(), fetchContainer()])
-      dialog.alert('恢复成功', `虚拟机已从${source === 'remote' ? '远程存储' : '本地备份'}完全恢复。`)
+      if (source === 'remote') {
+        setTransferProgress({
+          visible: true,
+          title: '全量备份还原成功',
+          subTitle: '虚拟机已成功从远程存储下载并完全恢复。',
+          percent: 100,
+          status: 'completed',
+        })
+        setTimeout(() => setTransferProgress(null), 2500)
+      } else {
+        dialog.alert('恢复成功', `虚拟机已从本地备份完全恢复。`)
+      }
     } catch (err: unknown) {
+      if (timer) window.clearInterval(timer)
+      setTransferProgress(null)
       const error = err as { response?: { data?: { message?: string } } }
       dialog.alert('恢复备份失败', error.response?.data?.message || '请稍后重试。')
     } finally {
+      if (timer) window.clearInterval(timer)
       setBackupBusy('')
     }
   }
@@ -3299,6 +3455,78 @@ export default function ContainerDetail() {
                   </button>
                 )}
               </div>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* Live Sync / Restore Progress Modal */}
+      {transferProgress && transferProgress.visible && (
+        <Modal
+          title={transferProgress.title}
+          onClose={() => {
+            if (transferProgress.status !== 'transferring') {
+              setTransferProgress(null)
+            }
+          }}
+        >
+          <div className="space-y-4 py-1">
+            <div className="flex items-center justify-between text-xs text-gray-600">
+              <span className="font-medium text-gray-800">{transferProgress.subTitle || '正在传输...'}</span>
+              <span className="font-mono font-bold text-black">{transferProgress.percent}%</span>
+            </div>
+
+            {/* Progress Bar */}
+            <div className="w-full bg-gray-200 rounded-full h-2.5 overflow-hidden">
+              <div
+                className={`h-2.5 rounded-full transition-all duration-300 ${
+                  transferProgress.status === 'failed'
+                    ? 'bg-red-500'
+                    : transferProgress.status === 'completed'
+                    ? 'bg-emerald-500'
+                    : 'bg-blue-600'
+                }`}
+                style={{ width: `${Math.max(3, Math.min(100, transferProgress.percent))}%` }}
+              />
+            </div>
+
+            {/* Transfer Stats */}
+            <div className="rounded-lg bg-gray-50 border border-gray-100 p-3 space-y-1.5 text-[11px] text-gray-600">
+              {transferProgress.currentFile && (
+                <div className="flex items-center justify-between">
+                  <span className="text-gray-400">当前文件</span>
+                  <span className="font-mono text-gray-800 truncate max-w-[240px]">{transferProgress.currentFile}</span>
+                </div>
+              )}
+              {transferProgress.speedBps !== undefined && transferProgress.speedBps > 0 && (
+                <div className="flex items-center justify-between">
+                  <span className="text-gray-400">传输速度</span>
+                  <span className="font-mono text-blue-600 font-medium">{(transferProgress.speedBps / (1024 * 1024)).toFixed(2)} MB/s</span>
+                </div>
+              )}
+              {transferProgress.totalBytes !== undefined && transferProgress.totalBytes > 0 && (
+                <div className="flex items-center justify-between">
+                  <span className="text-gray-400">已传输大小</span>
+                  <span className="font-mono text-gray-700">
+                    {( (transferProgress.transferredBytes || 0) / (1024 * 1024) ).toFixed(2)} MB / {(transferProgress.totalBytes / (1024 * 1024)).toFixed(2)} MB
+                  </span>
+                </div>
+              )}
+              {transferProgress.status === 'failed' && transferProgress.error && (
+                <div className="pt-1 text-red-600 text-xs">
+                  ❌ 失败原因：{transferProgress.error}
+                </div>
+              )}
+            </div>
+
+            <div className="flex justify-end pt-2">
+              <button
+                onClick={() => setTransferProgress(null)}
+                disabled={transferProgress.status === 'transferring'}
+                className="px-4 py-2 text-sm text-gray-700 border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50"
+              >
+                {transferProgress.status === 'transferring' ? '后台传输中...' : '关闭'}
+              </button>
             </div>
           </div>
         </Modal>
