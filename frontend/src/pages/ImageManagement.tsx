@@ -325,12 +325,12 @@ function CustomKVMImageModal({
     return () => window.removeEventListener('keydown', closeOnEscape)
   }, [onClose, submitting])
 
-  const updateProvisioner = (provisioner: 'linux-cloud-init' | 'windows-10' | 'windows-11') => {
+  const updateProvisioner = (provisioner: 'linux-cloud-init' | 'windows-10' | 'windows-11' | 'windows-pe') => {
     setForm((current) => ({
       ...current,
       provisioner,
-      distro: provisioner === 'linux-cloud-init' ? (current.distro === 'windows' ? '' : current.distro) : 'windows',
-      release: provisioner === 'windows-10' ? '10' : provisioner === 'windows-11' ? '11' : (current.distro === 'windows' ? '' : current.release),
+      distro: provisioner === 'linux-cloud-init' ? (current.distro === 'windows' || current.distro === 'wepe' ? '' : current.distro) : (provisioner === 'windows-pe' ? 'wepe' : 'windows'),
+      release: provisioner === 'windows-10' ? '10' : provisioner === 'windows-11' ? '11' : provisioner === 'windows-pe' ? 'pe' : (current.distro === 'windows' ? '' : current.release),
     }))
   }
 
@@ -383,11 +383,12 @@ function CustomKVMImageModal({
         <div className="max-h-[72vh] space-y-5 overflow-y-auto px-5 py-4">
           {virtualization === 'kvm' && <div>
             <label className="text-sm font-medium text-gray-700 dark:text-gray-200">{t('无人值守安装模板')}</label>
-            <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-3">
+            <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-4">
               {([
                 ['linux-cloud-init', 'Linux cloud-init', 'QCOW2 / IMG'],
-                ['windows-10', 'Windows 10', '安装 ISO'],
-                ['windows-11', 'Windows 11', '安装 ISO'],
+                ['windows-10', 'Windows 10', '官方安装 ISO'],
+                ['windows-11', 'Windows 11', '官方安装 ISO'],
+                ['windows-pe', 'WinPE / WePE', 'PE 维护 ISO'],
               ] as const).map(([value, label, hint]) => (
                 <button
                   key={value}

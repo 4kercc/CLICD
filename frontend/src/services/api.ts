@@ -816,7 +816,7 @@ export interface CustomKVMImageInput {
   release: string
   arch: string
   url: string
-  provisioner?: 'linux-cloud-init' | 'windows-10' | 'windows-11' | 'lxc-rootfs'
+  provisioner?: 'linux-cloud-init' | 'windows-10' | 'windows-11' | 'windows-pe' | 'lxc-rootfs'
   sha256?: string
 }
 
