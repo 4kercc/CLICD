@@ -309,7 +309,7 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
           <div className={`px-3 py-2 text-xs text-gray-400 dark:text-gray-500 ${collapsed ? 'text-center' : ''}`}>
             {collapsed ? (
               <a
-                href="https://github.com/MengMengCode/CLICD"
+                href="https://github.com/4kercc/CLICD"
                 target="_blank"
                 rel="noreferrer"
                 title={`CLICD v${version}`}
@@ -320,7 +320,7 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
             ) : (
               <div className="flex min-w-0 items-center gap-2">
                 <a
-                  href="https://github.com/MengMengCode/CLICD"
+                  href="https://github.com/4kercc/CLICD"
                   target="_blank"
                   rel="noreferrer"
                   title="CLICD"
