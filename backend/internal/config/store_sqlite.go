@@ -1073,6 +1073,7 @@ func loadContainers() ([]Container, error) {
 		ipv6, ipv6_prefix_len, ipv6_interface, vnc_port, ssh_port, ssh_password,
 		ssh_host_key, port_mapping_limit, snapshot_limit, created_at, expires_at,
 		snapshot_schedule_enabled, snapshot_schedule_interval_hours, snapshot_schedule_time,
+		snapshot_schedule_max_copies,
 		snapshot_schedule_last_run, snapshot_schedule_next_run, snapshot_schedule_created_by,
 			policy_blocked, policy_blocked_reason, policy_blocked_at,
 			firewall_enabled, firewall_default_action, firewall_rules, allowed_image_ids, image_limit_configured,
