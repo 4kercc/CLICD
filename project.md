@@ -1,12 +1,12 @@
 # CLICD 项目架构、功能设计与演进记录全景文档 (Project Documentation)
 
-本文档记录了 **CLICD (LXC/KVM 虚拟化管理面板)** 的系统全景架构、模块代码分工、关键技术设计、历史演进记录（涵盖 v1.20 与 v1.20.1 核心特性）以及常用运维与部署指令。
+本文档记录了 **CLICD (LXC/KVM 虚拟化管理面板)** 的系统全景架构、模块代码分工、关键技术设计、历史演进记录（涵盖 v1.20、v1.20.1 与 v1.20.2 核心特性）以及常用运维与部署指令。
 
 ---
 
 ## 📌 项目基本信息
 - **项目名称**：CLICD (Container & KVM Lifecycle Controller Daemon)
-- **当前版本**：`v1.20.1`
+- **当前版本**：`v1.20.2`
 - **代码仓库**：[https://github.com/4kercc/CLICD](https://github.com/4kercc/CLICD)
 - **后端技术栈**：Go 1.24+ (原生标准库 + SkyLight / Libvirt / LXC / Conntrack 深度调用，无重型第三方框架)
 - **前端技术栈**：React 18 + TypeScript + Vite + Tailwind CSS + Lucide Icons
@@ -97,6 +97,15 @@
    - 在「存储管理」页面提供 **「一键同步所有快照与备份」** 与单个存储池同步按钮。
 3. **多源灾备恢复**：恢复快照/备份时，支持自由选择 **「从本地极速还原」** 或 **「从远程存储拉取还原」**。
 
+### 八、 实时传输进度跟踪与面板体验全面打磨 (v1.20.2)
+1. **传输进度实时可视化**：
+   - 远程同步快照/备份或从远程存储拉取恢复时，提供毫秒级进度轮询（`/storage/progress`），动态展示当前传输文件、实时传输速率（MB/s）、已传输量与完成百分比。
+2. **Guest Agent 模块与安装引导优化**：
+   - 状态栏显示绿色连接徽标与黄色待安装提示，弹窗集成 Windows（光盘挂载）与 Linux（一键脚本）双模式自主切换 Tab。
+3. **控制台交互与安全防护升级**：
+   - **双击重命名**：主机名和系统标签支持双击行内快速编辑，便于管理多台同配置虚拟机。
+   - **红色高亮删除与二次防误触**：危险操作独立红色展示，并引入两次弹窗确认，彻底杜绝误删风险。
+
 ---
 
 ## 🛠️ 运维与部署常用指令
@@ -132,6 +141,6 @@ cp -r frontend/dist/* backend/internal/server/web/
 
 # 3. 交叉编译 Linux 二进制
 cd backend
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w -X clicd/internal/version.Version=1.20.1" -o ../build/clicd-linux-amd64 .
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w -X clicd/internal/version.Version=1.20.1" -o ../build/clicd-linux-arm64 .
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w -X clicd/internal/version.Version=1.20.2" -o ../build/clicd-linux-amd64 .
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w -X clicd/internal/version.Version=1.20.2" -o ../build/clicd-linux-arm64 .
 ```
