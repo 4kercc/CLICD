@@ -7,6 +7,8 @@ import {
   Clock,
   Copy,
   Cpu,
+  CheckCircle2,
+  Disc,
   HardDrive,
   HelpCircle,
   Key,
@@ -50,6 +52,8 @@ import {
   resizeContainerDisk,
   importContainerDisk,
   updateHardwareConfig,
+  mountVirtioISO,
+  getGuestAgentStatus,
   Backup,
   getContainerUsage,
   getHostInfo,
@@ -223,6 +227,11 @@ export default function ContainerDetail() {
   const [importDiskPath, setImportDiskPath] = useState('')
   const [importAsOverlay, setImportAsOverlay] = useState(true)
   const [savingImportDisk, setSavingImportDisk] = useState(false)
+  const [guestAgentConnected, setGuestAgentConnected] = useState<boolean | null>(null)
+  const [guestAgentFS, setGuestAgentFS] = useState<any[] | null>(null)
+  const [checkingGuestAgent, setCheckingGuestAgent] = useState(false)
+  const [showVirtioModal, setShowVirtioModal] = useState(false)
+  const [mountingVirtio, setMountingVirtio] = useState(false)
 
   const fetchContainer = useCallback(async () => {
     if (!containerIdentifier) return
@@ -332,11 +341,34 @@ export default function ContainerDetail() {
     }
   }
 
+  const fetchGuestAgent = useCallback(async () => {
+    if (!containerIdentifier || container?.virtualization !== 'kvm' || container?.status !== 'running') {
+      setGuestAgentConnected(null)
+      return
+    }
+    setCheckingGuestAgent(true)
+    try {
+      const res = await getGuestAgentStatus(containerIdentifier)
+      if (res.data.success && res.data.data) {
+        setGuestAgentConnected(res.data.data.connected)
+        if (res.data.data.fs_info && Array.isArray(res.data.data.fs_info)) {
+          setGuestAgentFS(res.data.data.fs_info)
+        }
+      }
+    } catch {
+      setGuestAgentConnected(false)
+    } finally {
+      setCheckingGuestAgent(false)
+    }
+  }, [containerIdentifier, container?.virtualization, container?.status])
+
   useEffect(() => {
-    fetchUsage()
-    const timer = window.setInterval(fetchUsage, 5000)
-    return () => window.clearInterval(timer)
-  }, [fetchUsage])
+    if (container?.virtualization === 'kvm' && container?.status === 'running') {
+      fetchGuestAgent()
+      const timer = window.setInterval(fetchGuestAgent, 15000)
+      return () => window.clearInterval(timer)
+    }
+  }, [container?.virtualization, container?.status, fetchGuestAgent])
 
   useEffect(() => {
     fetchMetricHistory()
@@ -1131,6 +1163,22 @@ export default function ContainerDetail() {
     }
   }
 
+  const handleMountVirtio = async (mount: boolean) => {
+    if (!containerIdentifier) return
+    setMountingVirtio(true)
+    try {
+      const res = await mountVirtioISO(containerIdentifier, mount)
+      dialog.alert(mount ? '光盘挂载成功' : '光盘已弹出', res.data.message || (mount ? 'VirtIO 驱动盘已放入光驱' : '已弹出光盘'))
+      setShowVirtioModal(false)
+      fetchGuestAgent()
+    } catch (err: unknown) {
+      const error = err as { response?: { data?: { message?: string } } }
+      dialog.alert('操作失败', error.response?.data?.message || '无法挂载光盘，请检查虚拟机配置')
+    } finally {
+      setMountingVirtio(false)
+    }
+  }
+
   const copyText = async (text: string) => {
     await copyToClipboard(text)
   }
@@ -1536,6 +1584,29 @@ export default function ContainerDetail() {
               <PlainRow label="引导顺序" value={container.boot_order === 'cdrom' ? '光盘优先' : container.boot_order === 'network' ? 'PXE网络优先' : '硬盘优先'} />
               <PlainRow label="网卡驱动" value={(container.nic_model || (isWindows ? 'e1000e' : 'virtio')).toUpperCase()} />
               <PlainRow label="磁盘总线" value={(container.disk_bus || (isWindows ? 'sata' : 'virtio')).toUpperCase()} />
+              <PlainRow label="Guest Agent" value={
+                checkingGuestAgent && guestAgentConnected === null ? (
+                  '检测中...'
+                ) : guestAgentConnected ? (
+                  <span className="inline-flex items-center gap-1 text-emerald-600">
+                    <CheckCircle2 className="w-3.5 h-3.5" /> 已连接
+                  </span>
+                ) : (
+                  <div className="inline-flex items-center gap-1.5">
+                    <span className="text-amber-600">未安装/未运行</span>
+                    {!isSubUser && (
+                      <button
+                        onClick={() => setShowVirtioModal(true)}
+                        className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] text-blue-700 border border-blue-200 bg-blue-50 rounded hover:bg-blue-100"
+                        title="挂载 VirtIO 驱动与 Guest Agent 光盘"
+                      >
+                        <Disc className="w-3 h-3" />
+                        挂载驱动盘
+                      </button>
+                    )}
+                  </div>
+                )
+              } />
             </>
           )}
         </Panel>
@@ -1613,9 +1684,26 @@ export default function ContainerDetail() {
                 isKVM ? (
                   <div className="flex flex-col items-center">
                     <span>{`${formatGB(usage?.disk_usage_bytes || 0)} / ${container.disk_gb} GB`}</span>
-                    <span className="text-[10px] text-amber-600 dark:text-amber-400 mt-0.5" title="KVM架构受虚拟化隔离保护，此处为宿主机物理层占用，内部实际占用请进系统或通过Guest Agent查看">
-                      (KVM物理占用)
-                    </span>
+                    {guestAgentConnected && guestAgentFS && guestAgentFS.length > 0 ? (
+                      <span className="text-[10px] text-emerald-600 dark:text-emerald-400 mt-0.5" title={guestAgentFS.map(f => `${f.mountpoint || f.name}: 已用 ${formatBytes(f.used_bytes || (f.total_bytes - f.free_bytes) || 0)} / ${formatBytes(f.total_bytes || 0)}`).join('\n')}>
+                        (GuestAgent 已就绪)
+                      </span>
+                    ) : (
+                      <div className="flex items-center gap-1 mt-0.5">
+                        <span className="text-[10px] text-amber-600 dark:text-amber-400" title="KVM架构受虚拟化隔离保护，此处为宿主机物理层占用，内部实际占用请安装并运行Guest Agent">
+                          (KVM物理占用)
+                        </span>
+                        {!isSubUser && (
+                          <button
+                            onClick={() => setShowVirtioModal(true)}
+                            className="text-[9px] text-blue-600 underline hover:text-blue-800"
+                            title="挂载驱动盘安装 Guest Agent"
+                          >
+                            安装Agent
+                          </button>
+                        )}
+                      </div>
+                    )}
                   </div>
                 ) : (
                   `${formatGB(usage?.disk_usage_bytes || 0)} / ${container.disk_gb} GB`
@@ -2740,6 +2828,65 @@ export default function ContainerDetail() {
           </div>
         </Modal>
       )}
+
+      {/* VirtIO & Guest Agent Modal */}
+      {showVirtioModal && (
+        <Modal title="QEMU Guest Agent & VirtIO 驱动光盘" onClose={() => setShowVirtioModal(false)}>
+          <div className="space-y-4">
+            <div className="flex items-start gap-3 p-3.5 bg-blue-50 border border-blue-100 rounded-lg text-xs text-blue-900 leading-relaxed">
+              <Disc className="w-5 h-5 text-blue-600 shrink-0 mt-0.5" />
+              <div>
+                <div className="font-semibold text-sm mb-1">关于 Guest Agent 与 VirtIO 驱动</div>
+                <p>
+                  安装 QEMU Guest Agent 与 VirtIO 驱动后，宿主机与虚拟机之间将实现深度协同：
+                </p>
+                <ul className="list-disc pl-4 mt-1.5 space-y-0.5 text-blue-800">
+                  <li><strong>磁盘内部容量读取</strong>：在面板实时显示 Windows C 盘与分区真实使用率。</li>
+                  <li><strong>磁盘在线热扩容</strong>：无需关机，后台调大容量时内部自动扩展分区。</li>
+                  <li><strong>安全优雅关机与冻结</strong>：打快照/备份时自动冻结文件系统（VSS），保证数据一致性。</li>
+                  <li><strong>网卡与内存气球优化</strong>：大幅提升虚拟机网络吞吐量并降低宿主机资源消耗。</li>
+                </ul>
+              </div>
+            </div>
+
+            <div className="border border-gray-200 rounded-lg p-3 bg-gray-50 text-xs space-y-2">
+              <div className="font-medium text-gray-800">Windows 安装说明：</div>
+              <ol className="list-decimal pl-4 space-y-1 text-gray-600">
+                <li>点击下方「一键挂载驱动光盘」，系统将把 <code className="font-mono bg-white px-1 py-0.5 border rounded">virtio-win.iso</code> 插入虚拟机光驱。</li>
+                <li>通过 <strong>RDP 远程桌面</strong> 或 <strong>WebVNC</strong> 进入虚拟机，打开 <strong>此电脑 (This PC)</strong>。</li>
+                <li>双击光驱盘符进入，找到 <code className="font-mono bg-white px-1 py-0.5 border rounded">virtio-win-gt-x64.msi</code>（或 <code className="font-mono bg-white px-1 py-0.5 border rounded">qemu-ga-x86_64.msi</code>）双击运行安装。</li>
+                <li>驱动安装完成后，点击「弹出驱动光盘」即可。</li>
+              </ol>
+            </div>
+
+            <div className="flex items-center justify-between pt-2">
+              <button
+                onClick={() => handleMountVirtio(false)}
+                disabled={mountingVirtio}
+                className="px-3 py-2 text-xs text-gray-700 border border-gray-300 rounded-md hover:bg-gray-100 disabled:opacity-50"
+              >
+                {mountingVirtio ? '处理中...' : '弹出驱动光盘 (Eject)'}
+              </button>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setShowVirtioModal(false)}
+                  className="px-4 py-2 text-sm text-gray-600 border border-gray-200 rounded-md hover:bg-gray-50"
+                >
+                  关闭
+                </button>
+                <button
+                  onClick={() => handleMountVirtio(true)}
+                  disabled={mountingVirtio}
+                  className="px-4 py-2 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 font-medium flex items-center gap-1.5"
+                >
+                  <Disc className="w-4 h-4" />
+                  {mountingVirtio ? '正在挂载...' : '一键挂载驱动光盘'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </Modal>
+      )}
     </div>
   )
 }
@@ -2867,7 +3014,7 @@ function Panel({ title, children, extra }: { title: string; children: ReactNode;
   )
 }
 
-function PlainRow({ label, value, mono = false, copyValue, onCopy, children }: { label: string; value: string; mono?: boolean; copyValue?: string; onCopy?: (value: string) => void; children?: ReactNode }) {
+function PlainRow({ label, value, mono = false, copyValue, onCopy, children }: { label: string; value: ReactNode; mono?: boolean; copyValue?: string; onCopy?: (value: string) => void; children?: ReactNode }) {
   return (
     <div className="flex items-center justify-between gap-3">
       <span className="text-gray-500">{label}</span>

@@ -974,6 +974,12 @@ export const updateHardwareConfig = (id: ContainerIdentifier, data: {
 }) =>
   api.put<APIResponse<Container>>(`/containers/${id}/hardware-config`, data)
 
+export const mountVirtioISO = (id: ContainerIdentifier, mount: boolean = true) =>
+  api.post<APIResponse>(`/containers/${id}/mount-virtio`, { mount })
+
+export const getGuestAgentStatus = (id: ContainerIdentifier) =>
+  api.get<APIResponse<{ connected: boolean; fs_info?: any }>>(`/containers/${id}/guest-agent`)
+
 // WebSSH URL generator
 export const getWebSSHUrl = (containerName: string) => {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'

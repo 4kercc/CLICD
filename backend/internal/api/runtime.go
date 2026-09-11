@@ -221,6 +221,22 @@ func resizeDiskByRuntime(id int, newSizeGB int) error {
 	return fmt.Errorf("online disk resize is currently supported for KVM instances")
 }
 
+func mountVirtioISOByRuntime(id int, mount bool) error {
+	c := config.FindContainer(id)
+	if c != nil && c.IsKVM() {
+		return kvmManager.MountVirtioISO(id, mount)
+	}
+	return fmt.Errorf("mount VirtIO ISO is only supported for KVM instances")
+}
+
+func getGuestAgentStatusByRuntime(id int) (bool, map[string]interface{}, error) {
+	c := config.FindContainer(id)
+	if c != nil && c.IsKVM() {
+		return kvmManager.GetGuestAgentStatus(id)
+	}
+	return false, nil, fmt.Errorf("guest agent status is only supported for KVM instances")
+}
+
 func importDiskImageByRuntime(id int, srcPath string, asOverlayBase bool) error {
 	c := config.FindContainer(id)
 	if c != nil && c.IsKVM() {
