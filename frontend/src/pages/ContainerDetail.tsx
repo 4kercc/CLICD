@@ -351,8 +351,13 @@ export default function ContainerDetail() {
       const res = await getGuestAgentStatus(containerIdentifier)
       if (res.data.success && res.data.data) {
         setGuestAgentConnected(res.data.data.connected)
-        if (res.data.data.fs_info && Array.isArray(res.data.data.fs_info)) {
-          setGuestAgentFS(res.data.data.fs_info)
+        const fsData = res.data.data.fs_info
+        if (fsData) {
+          if (Array.isArray(fsData)) {
+            setGuestAgentFS(fsData)
+          } else if (Array.isArray(fsData.return)) {
+            setGuestAgentFS(fsData.return)
+          }
         }
       }
     } catch {
