@@ -1,16 +1,16 @@
 module clicd
 
-go 1.25.0
+go 1.24
 
 require (
 	github.com/golang-jwt/jwt/v5 v5.2.2
 	github.com/gorilla/websocket v1.5.3
-	golang.org/x/crypto v0.52.0
-	golang.org/x/term v0.43.0
+	golang.org/x/crypto v0.35.0
+	golang.org/x/term v0.29.0
 )
 
 require (
-	golang.org/x/sys v0.45.0
+	golang.org/x/sys v0.30.0
 	modernc.org/sqlite v1.29.10
 )
 

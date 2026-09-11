@@ -977,13 +977,34 @@ func (m *Manager) ApplyContainerLimits(c *config.Container) error {
 		return nil
 	}
 	var xml string
+	bootOrder := strings.ToLower(strings.TrimSpace(c.BootOrder))
+	nicModel := strings.ToLower(strings.TrimSpace(c.NICModel))
+	if nicModel == "" {
+		if IsWindowsImage(c.Template) {
+			nicModel = "e1000e"
+		} else {
+			nicModel = "virtio"
+		}
+	}
+	diskBus := strings.ToLower(strings.TrimSpace(c.DiskBus))
+	if diskBus == "" {
+		if IsWindowsImage(c.Template) {
+			diskBus = "sata"
+		} else {
+			diskBus = "virtio"
+		}
+	}
+
 	if IsWindowsImage(c.Template) {
 		winISO := ImagePath(c.Template)
+		if c.BootMedia != "" {
+			winISO = c.BootMedia
+		}
 		unattendISO := existingWindowsUnattendISO(m.instanceDir(c.VirshName()))
-		xml = windowsDomainXML(c.VirshName(), int(c.VCPU), c.RAMMB, c.DiskImage, winISO, unattendISO, c.MACAddress, c.IOReadMBps, c.IOWriteMBps, c.NetworkDownMbps, c.NetworkUpMbps)
+		xml = generateWindowsDomainXML(c.VirshName(), int(c.VCPU), c.RAMMB, c.DiskImage, winISO, unattendISO, c.MACAddress, c.IOReadMBps, c.IOWriteMBps, c.NetworkDownMbps, c.NetworkUpMbps, bootOrder, nicModel, diskBus)
 	} else {
 		seedPath := filepath.Join(m.instanceDir(c.VirshName()), "seed.iso")
-		xml = domainXML(c.VirshName(), int(c.VCPU), c.RAMMB, c.DiskImage, seedPath, c.MACAddress, c.IOReadMBps, c.IOWriteMBps, c.NetworkDownMbps, c.NetworkUpMbps, isKVMDesktopTemplate(c.Template))
+		xml = generateLinuxDomainXML(c.VirshName(), int(c.VCPU), c.RAMMB, c.DiskImage, seedPath, c.MACAddress, c.IOReadMBps, c.IOWriteMBps, c.NetworkDownMbps, c.NetworkUpMbps, isKVMDesktopTemplate(c.Template), bootOrder, nicModel, diskBus)
 	}
 	xmlPath := filepath.Join(m.instanceDir(c.VirshName()), "domain.xml")
 	if err := os.WriteFile(xmlPath, []byte(xml), 0644); err != nil {
@@ -1003,13 +1024,34 @@ func (m *Manager) ensureDomainDefinition(c *config.Container) error {
 	config.NormalizeContainerResourceAliases(c)
 	var xml string
 	xmlPath := filepath.Join(m.instanceDir(c.VirshName()), "domain.xml")
+	bootOrder := strings.ToLower(strings.TrimSpace(c.BootOrder))
+	nicModel := strings.ToLower(strings.TrimSpace(c.NICModel))
+	if nicModel == "" {
+		if IsWindowsImage(c.Template) {
+			nicModel = "e1000e"
+		} else {
+			nicModel = "virtio"
+		}
+	}
+	diskBus := strings.ToLower(strings.TrimSpace(c.DiskBus))
+	if diskBus == "" {
+		if IsWindowsImage(c.Template) {
+			diskBus = "sata"
+		} else {
+			diskBus = "virtio"
+		}
+	}
+
 	if IsWindowsImage(c.Template) {
 		winISO := ImagePath(c.Template)
+		if c.BootMedia != "" {
+			winISO = c.BootMedia
+		}
 		unattendISO := existingWindowsUnattendISO(m.instanceDir(c.VirshName()))
-		xml = windowsDomainXML(c.VirshName(), int(c.VCPU), c.RAMMB, c.DiskImage, winISO, unattendISO, c.MACAddress, c.IOReadMBps, c.IOWriteMBps, c.NetworkDownMbps, c.NetworkUpMbps)
+		xml = generateWindowsDomainXML(c.VirshName(), int(c.VCPU), c.RAMMB, c.DiskImage, winISO, unattendISO, c.MACAddress, c.IOReadMBps, c.IOWriteMBps, c.NetworkDownMbps, c.NetworkUpMbps, bootOrder, nicModel, diskBus)
 	} else {
 		seedPath := filepath.Join(m.instanceDir(c.VirshName()), "seed.iso")
-		xml = domainXML(c.VirshName(), int(c.VCPU), c.RAMMB, c.DiskImage, seedPath, c.MACAddress, c.IOReadMBps, c.IOWriteMBps, c.NetworkDownMbps, c.NetworkUpMbps, isKVMDesktopTemplate(c.Template))
+		xml = generateLinuxDomainXML(c.VirshName(), int(c.VCPU), c.RAMMB, c.DiskImage, seedPath, c.MACAddress, c.IOReadMBps, c.IOWriteMBps, c.NetworkDownMbps, c.NetworkUpMbps, isKVMDesktopTemplate(c.Template), bootOrder, nicModel, diskBus)
 	}
 	if err := os.WriteFile(xmlPath, []byte(xml), 0644); err != nil {
 		return err
@@ -1084,6 +1126,14 @@ func (m *Manager) CreateSnapshot(id int, createdBy string, scheduled bool, rotat
 				fmt.Printf("Warning: failed to restart %s after snapshot: %v\n", name, err)
 			}
 		}()
+	}
+
+	// Optimize standalone large QCOW2 disks into Base (read-only) + Overlay before taking snapshot
+	diskPath := filepath.Join(instanceDir, "disk.qcow2")
+	if isStandaloneQcow2(diskPath) {
+		if err := m.convertDiskToOverlay(c, diskPath); err != nil {
+			fmt.Printf("Warning: failed to convert standalone disk to overlay for %s: %v\n", name, err)
+		}
 	}
 
 	if err := copyTree(instanceDir, snapshotDir); err != nil {
@@ -1400,6 +1450,314 @@ func sortSnapshotsOldestFirst(snapshots []config.Snapshot) {
 		tj, _ := time.Parse("2006-01-02 15:04:05", snapshots[j].CreatedAt)
 		return ti.Before(tj)
 	})
+}
+
+func isStandaloneQcow2(diskPath string) bool {
+	if _, err := os.Stat(diskPath); err != nil {
+		return false
+	}
+	out, err := exec.Command("qemu-img", "info", "-U", diskPath).Output()
+	if err != nil {
+		return false
+	}
+	info := string(out)
+	// If it already has a backing file, it is already an overlay
+	if strings.Contains(info, "backing file:") {
+		return false
+	}
+	return true
+}
+
+func (m *Manager) convertDiskToOverlay(c *config.Container, diskPath string) error {
+	baseDir := filepath.Join(config.StoragePathForContent(config.StorageContentImages, "/var/lib/clicd"), "images", "kvm")
+	_ = os.MkdirAll(baseDir, 0755)
+	baseImageName := fmt.Sprintf("base-%s-%s.qcow2", c.VirshName(), time.Now().Format("20060102150405"))
+	baseImagePath := filepath.Join(baseDir, baseImageName)
+
+	if err := os.Rename(diskPath, baseImagePath); err != nil {
+		return fmt.Errorf("failed to move standalone disk to base image: %w", err)
+	}
+	_ = os.Chmod(baseImagePath, 0444)
+	_ = exec.Command("chown", "libvirt-qemu:libvirt-qemu", baseImagePath).Run()
+
+	cmd := exec.Command("qemu-img", "create", "-f", "qcow2", "-F", "qcow2", "-b", baseImagePath, diskPath)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		// Rollback
+		_ = os.Rename(baseImagePath, diskPath)
+		return fmt.Errorf("failed to create overlay disk: %v, output: %s", err, string(out))
+	}
+	_ = exec.Command("chown", "libvirt-qemu:libvirt-qemu", diskPath).Run()
+	_ = os.Chmod(diskPath, 0644)
+	return nil
+}
+
+// CreateBackup creates a full compressed independent backup archive of a KVM instance
+func (m *Manager) CreateBackup(id int, createdBy string, storagePoolID ...string) (config.Backup, error) {
+	kvmSnapshotMu.Lock()
+	defer kvmSnapshotMu.Unlock()
+
+	c := config.FindContainer(id)
+	if c == nil {
+		return config.Backup{}, fmt.Errorf("container not found: %d", id)
+	}
+	if !c.IsKVM() {
+		return config.Backup{}, fmt.Errorf("container is not a KVM VM: %d", id)
+	}
+
+	name := c.VirshName()
+	instanceDir := m.instanceDir(name)
+	if err := safePathUnder(instanceDir, filepath.Dir(instanceDir)); err != nil {
+		return config.Backup{}, err
+	}
+	if _, err := os.Stat(instanceDir); err != nil {
+		return config.Backup{}, fmt.Errorf("VM storage not found: %v", err)
+	}
+
+	pool, err := config.SelectStoragePoolForContent(
+		config.StorageContentBackups,
+		firstString(storagePoolID),
+		dirSizeBytes(instanceDir),
+	)
+	if err != nil {
+		return config.Backup{}, err
+	}
+
+	now := time.Now()
+	backupID := fmt.Sprintf("backup-%d-%s", id, now.Format("20060102150405"))
+	baseDir := filepath.Join(pool.Path, "backups")
+	backupDir := filepath.Join(baseDir, "kvm", strconv.Itoa(id), backupID)
+	if err := os.MkdirAll(backupDir, 0700); err != nil {
+		return config.Backup{}, err
+	}
+
+	wasRunning, err := m.prepareVMForColdCopy(id, name)
+	if err != nil {
+		_ = os.RemoveAll(backupDir)
+		return config.Backup{}, err
+	}
+	if wasRunning {
+		defer func() {
+			if err := m.StartContainer(id); err != nil {
+				fmt.Printf("Warning: failed to restart %s after backup: %v\n", name, err)
+			}
+		}()
+	}
+
+	// Copy config & domain.xml
+	if err := copyTree(instanceDir, backupDir); err != nil {
+		_ = os.RemoveAll(backupDir)
+		return config.Backup{}, err
+	}
+
+	// Flatten and compress disk into backupDir/disk.qcow2
+	srcDisk := filepath.Join(instanceDir, "disk.qcow2")
+	dstDisk := filepath.Join(backupDir, "disk.qcow2")
+	_ = os.Remove(dstDisk)
+	cmd := exec.Command("qemu-img", "convert", "-c", "-p", "-O", "qcow2", srcDisk, dstDisk)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		_ = os.RemoveAll(backupDir)
+		return config.Backup{}, fmt.Errorf("failed to create compressed backup disk: %v, output: %s", err, string(out))
+	}
+
+	backup := config.Backup{
+		ID:            backupID,
+		ContainerID:   c.ID,
+		ContainerName: c.Name,
+		LXCName:       name,
+		CreatedAt:     now.Format("2006-01-02 15:04:05"),
+		CreatedBy:     createdBy,
+		Path:          backupDir,
+		SizeBytes:     dirSizeBytes(backupDir),
+		Format:        "qcow2",
+		Compressed:    true,
+	}
+	config.AddBackup(backup)
+	return backup, nil
+}
+
+// RestoreBackup restores a KVM instance from a full backup
+func (m *Manager) RestoreBackup(id string) error {
+	kvmSnapshotMu.Lock()
+	defer kvmSnapshotMu.Unlock()
+
+	backup := config.FindBackup(id)
+	if backup == nil {
+		return fmt.Errorf("backup not found: %s", id)
+	}
+	if backup.Path == "" {
+		return fmt.Errorf("backup path is empty")
+	}
+	if _, err := os.Stat(backup.Path); err != nil {
+		return fmt.Errorf("backup files not found: %v", err)
+	}
+
+	c := config.FindContainer(backup.ContainerID)
+	if c == nil {
+		return fmt.Errorf("container not found: %d", backup.ContainerID)
+	}
+	if !c.IsKVM() {
+		return fmt.Errorf("container is not a KVM VM: %d", c.ID)
+	}
+	name := c.VirshName()
+	instanceDir := m.instanceDir(name)
+	instanceParent := filepath.Dir(instanceDir)
+
+	wasRunning, err := m.prepareVMForColdCopy(c.ID, name)
+	if err != nil {
+		return err
+	}
+	tmpBackupDir := filepath.Join(instanceParent, fmt.Sprintf(".%s-restore-tmp-%d", name, time.Now().UnixNano()))
+	if err := os.Rename(instanceDir, tmpBackupDir); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to move current VM aside: %v", err)
+	}
+	if err := copyTree(backup.Path, instanceDir); err != nil {
+		_ = os.RemoveAll(instanceDir)
+		_ = os.Rename(tmpBackupDir, instanceDir)
+		return fmt.Errorf("failed to restore backup: %v", err)
+	}
+	_ = os.RemoveAll(tmpBackupDir)
+	_ = undefineDomain(name)
+	xmlPath := filepath.Join(instanceDir, "domain.xml")
+	if out, err := exec.Command("virsh", "define", xmlPath).CombinedOutput(); err != nil {
+		return fmt.Errorf("virsh define failed after backup restore: %v, output: %s", err, string(out))
+	}
+	c.DiskImage = filepath.Join(instanceDir, "disk.qcow2")
+	c.StoragePath = instanceDir
+	c.Status = "stopped"
+	c.IP = ""
+	config.SaveConfig()
+	if wasRunning {
+		return m.StartContainer(c.ID)
+	}
+	return nil
+}
+
+// DeleteBackup removes a backup record and files
+func (m *Manager) DeleteBackup(id string) error {
+	kvmSnapshotMu.Lock()
+	defer kvmSnapshotMu.Unlock()
+
+	backup := config.FindBackup(id)
+	if backup == nil {
+		return fmt.Errorf("backup not found: %s", id)
+	}
+	if backup.Path != "" {
+		_ = os.RemoveAll(backup.Path)
+	}
+	config.RemoveBackup(backup.ID)
+	return nil
+}
+
+// ResizeDisk resizes the KVM disk offline or online (via virsh blockresize + guest agent)
+func (m *Manager) ResizeDisk(id int, newSizeGB int) error {
+	c := config.FindContainer(id)
+	if c == nil {
+		return fmt.Errorf("container not found: %d", id)
+	}
+	if !c.IsKVM() {
+		return fmt.Errorf("container is not a KVM VM: %d", id)
+	}
+	if newSizeGB <= c.DiskGB {
+		return fmt.Errorf("new disk size (%d GB) must be greater than current size (%d GB)", newSizeGB, c.DiskGB)
+	}
+
+	diskPath := c.DiskImage
+	if diskPath == "" {
+		diskPath = filepath.Join(m.instanceDir(c.VirshName()), "disk.qcow2")
+	}
+	if _, err := os.Stat(diskPath); err != nil {
+		return fmt.Errorf("disk file not found: %v", err)
+	}
+
+	status, _ := m.GetContainerStatus(c.VirshName())
+	if status == "running" {
+		// Online resize via virsh blockresize
+		dev := "vda"
+		if c.DiskBus == "sata" || c.DiskBus == "scsi" || IsWindowsImage(c.Template) {
+			dev = "sda"
+		}
+		cmd := exec.Command("virsh", "blockresize", c.VirshName(), dev, fmt.Sprintf("%dG", newSizeGB))
+		if out, err := cmd.CombinedOutput(); err != nil {
+			// Fallback: try resizing image directly with -U
+			cmd2 := exec.Command("qemu-img", "resize", diskPath, fmt.Sprintf("%dG", newSizeGB))
+			if out2, err2 := cmd2.CombinedOutput(); err2 != nil {
+				return fmt.Errorf("online blockresize failed: %v (%s); qemu-img resize fallback failed: %v (%s)", err, string(out), err2, string(out2))
+			}
+		}
+		// Try auto expanding inside guest OS via guest agent
+		if qemuGuestPing(c.VirshName()) == nil {
+			if IsWindowsImage(c.Template) {
+				// Windows diskpart extend script
+				extendScript := "$drive = (Get-Partition -DriveLetter C).DiskNumber; (Get-PartitionSupportedSize -DriveLetter C).SizeMax | Out-Null; Resize-Partition -DriveLetter C -Size (Get-PartitionSupportedSize -DriveLetter C).SizeMax -ErrorAction SilentlyContinue"
+				_ = qemuGuestExec(c.VirshName(), extendScript, 30*time.Second)
+			} else {
+				// Linux growpart & resize2fs
+				extendScript := "growpart /dev/vda 1 2>/dev/null || growpart /dev/sda 1 2>/dev/null; resize2fs /dev/vda1 2>/dev/null || resize2fs /dev/sda1 2>/dev/null || xfs_growfs / 2>/dev/null || true"
+				_ = qemuGuestExec(c.VirshName(), extendScript, 30*time.Second)
+			}
+		}
+	} else {
+		// Offline resize via qemu-img resize
+		cmd := exec.Command("qemu-img", "resize", diskPath, fmt.Sprintf("%dG", newSizeGB))
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("qemu-img resize failed: %v, output: %s", err, string(out))
+		}
+	}
+
+	c.DiskGB = newSizeGB
+	return config.SaveConfig()
+}
+
+// ImportDiskImage imports an external QCOW2/RAW/VMDK image into a KVM instance
+func (m *Manager) ImportDiskImage(id int, srcPath string, asOverlayBase bool) error {
+	c := config.FindContainer(id)
+	if c == nil {
+		return fmt.Errorf("container not found: %d", id)
+	}
+	if !c.IsKVM() {
+		return fmt.Errorf("container is not a KVM VM: %d", id)
+	}
+	if _, err := os.Stat(srcPath); err != nil {
+		return fmt.Errorf("source disk image not found: %v", err)
+	}
+
+	instanceDir := m.instanceDir(c.VirshName())
+	_ = os.MkdirAll(instanceDir, 0755)
+	dstDisk := filepath.Join(instanceDir, "disk.qcow2")
+
+	if asOverlayBase {
+		baseDir := filepath.Join(config.StoragePathForContent(config.StorageContentImages, "/var/lib/clicd"), "images", "kvm")
+		_ = os.MkdirAll(baseDir, 0755)
+		baseImagePath := filepath.Join(baseDir, fmt.Sprintf("imported-base-%s-%s.qcow2", c.VirshName(), time.Now().Format("20060102150405")))
+
+		// Convert or copy srcPath to baseImagePath
+		cmd := exec.Command("qemu-img", "convert", "-p", "-O", "qcow2", srcPath, baseImagePath)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("failed to convert imported image to base: %v, output: %s", err, string(out))
+		}
+		_ = os.Chmod(baseImagePath, 0444)
+		_ = exec.Command("chown", "libvirt-qemu:libvirt-qemu", baseImagePath).Run()
+
+		// Create overlay
+		_ = os.Remove(dstDisk)
+		cmd2 := exec.Command("qemu-img", "create", "-f", "qcow2", "-F", "qcow2", "-b", baseImagePath, dstDisk)
+		if out, err := cmd2.CombinedOutput(); err != nil {
+			return fmt.Errorf("failed to create overlay disk from imported base: %v, output: %s", err, string(out))
+		}
+	} else {
+		// Direct copy / convert
+		_ = os.Remove(dstDisk)
+		cmd := exec.Command("qemu-img", "convert", "-p", "-O", "qcow2", srcPath, dstDisk)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("failed to convert/copy imported image: %v, output: %s", err, string(out))
+		}
+	}
+
+	_ = exec.Command("chown", "libvirt-qemu:libvirt-qemu", dstDisk).Run()
+	_ = os.Chmod(dstDisk, 0644)
+	c.DiskImage = dstDisk
+	c.StoragePath = instanceDir
+	return config.SaveConfig()
 }
 
 func (m *Manager) GetResourceUsage(id int) (map[string]interface{}, error) {
@@ -2322,12 +2680,29 @@ func isKVMDesktopTemplate(templateID string) bool {
 }
 
 func domainXML(name string, vcpu int, ramMB int, diskPath, seedPath, mac string, ioReadMBps int, ioWriteMBps int, networkDownMbps int, networkUpMbps int, desktop bool) string {
+	return generateLinuxDomainXML(name, vcpu, ramMB, diskPath, seedPath, mac, ioReadMBps, ioWriteMBps, networkDownMbps, networkUpMbps, desktop, "disk", "virtio", "virtio")
+}
+
+func generateLinuxDomainXML(name string, vcpu int, ramMB int, diskPath, seedPath, mac string, ioReadMBps int, ioWriteMBps int, networkDownMbps int, networkUpMbps int, desktop bool, bootOrder, nicModel, diskBus string) string {
 	if vcpu < 1 {
 		vcpu = 1
 	}
 	if ramMB < 512 {
 		ramMB = 512
 	}
+	if nicModel == "" {
+		nicModel = "virtio"
+	}
+	if diskBus == "" {
+		diskBus = "virtio"
+	}
+	diskDev := "vda"
+	if diskBus == "sata" || diskBus == "scsi" {
+		diskDev = "sda"
+	} else if diskBus == "ide" {
+		diskDev = "hda"
+	}
+
 	iotune := ""
 	if ioReadMBps > 0 || ioWriteMBps > 0 {
 		var parts []string
@@ -2368,19 +2743,30 @@ func domainXML(name string, vcpu int, ramMB int, diskPath, seedPath, mac string,
 		osAttrs = " firmware='efi'"
 		features = "<features><acpi/><gic version='3'/></features>"
 	}
-	seedDisk := fmt.Sprintf(`<disk type='file' device='cdrom'>
+
+	bootTag := "<boot dev='hd'/>"
+	if bootOrder == "cdrom" {
+		bootTag = "<boot dev='cdrom'/>\n    <boot dev='hd'/>"
+	} else if bootOrder == "network" {
+		bootTag = "<boot dev='network'/>\n    <boot dev='hd'/>"
+	}
+
+	seedDisk := ""
+	if seedPath != "" {
+		seedDisk = fmt.Sprintf(`<disk type='file' device='cdrom'>
       <driver name='qemu' type='raw'/>
       <source file='%s'/>
       <target dev='hdb' bus='ide'/>
       <readonly/>
     </disk>`, xmlEscape(seedPath))
-	if runtime.GOARCH == "arm64" {
-		seedDisk = fmt.Sprintf(`<disk type='file' device='disk'>
+		if runtime.GOARCH == "arm64" {
+			seedDisk = fmt.Sprintf(`<disk type='file' device='disk'>
       <driver name='qemu' type='raw'/>
       <source file='%s'/>
       <target dev='vdb' bus='virtio'/>
       <readonly/>
     </disk>`, xmlEscape(seedPath))
+		}
 	}
 	return fmt.Sprintf(`<domain type='kvm'>
   <name>%s</name>
@@ -2391,7 +2777,7 @@ func domainXML(name string, vcpu int, ramMB int, diskPath, seedPath, mac string,
   <cputune><shares>2048</shares></cputune>
   <os%s>
     <type arch='%s' machine='%s'>hvm</type>
-    <boot dev='hd'/>
+    %s
   </os>
   %s
   <cpu mode='host-passthrough' check='none'/>
@@ -2404,13 +2790,13 @@ func domainXML(name string, vcpu int, ramMB int, diskPath, seedPath, mac string,
     <disk type='file' device='disk'>
       <driver name='qemu' type='qcow2' cache='none'/>
       <source file='%s'/>
-      <target dev='vda' bus='virtio'/>%s
+      <target dev='%s' bus='%s'/>%s
     </disk>
     %s
     <interface type='network'>
       <mac address='%s'/>
       <source network='default'/>
-      <model type='virtio'/>%s
+      <model type='%s'/>%s
     </interface>
     <serial type='pty'><target port='0'/></serial>
     <console type='pty'><target type='serial' port='0'/></console>
@@ -2423,16 +2809,33 @@ func domainXML(name string, vcpu int, ramMB int, diskPath, seedPath, mac string,
     <graphics type='vnc' port='-1' autoport='yes' listen='127.0.0.1'/>%s
     %s
   </devices>
-</domain>`, xmlEscape(name), domainUUIDXML(name), ramMB, ramMB, vcpu, vcpu, osAttrs, kvmLibvirtArch(), kvmMachineType(), features, xmlEscape(kvmEmulatorPath()), xmlEscape(diskPath), iotune, seedDisk, xmlEscape(mac), bandwidth, input, video)
+</domain>`, xmlEscape(name), domainUUIDXML(name), ramMB, ramMB, vcpu, vcpu, osAttrs, kvmLibvirtArch(), kvmMachineType(), bootTag, features, xmlEscape(kvmEmulatorPath()), xmlEscape(diskPath), diskDev, diskBus, iotune, seedDisk, xmlEscape(mac), nicModel, bandwidth, input, video)
 }
 
 func windowsDomainXML(name string, vcpu int, ramMB int, diskPath, winISOPath, unattendISOPath, mac string, ioReadMBps int, ioWriteMBps int, networkDownMbps int, networkUpMbps int) string {
+	return generateWindowsDomainXML(name, vcpu, ramMB, diskPath, winISOPath, unattendISOPath, mac, ioReadMBps, ioWriteMBps, networkDownMbps, networkUpMbps, "disk", "e1000e", "sata")
+}
+
+func generateWindowsDomainXML(name string, vcpu int, ramMB int, diskPath, winISOPath, unattendISOPath, mac string, ioReadMBps int, ioWriteMBps int, networkDownMbps int, networkUpMbps int, bootOrder, nicModel, diskBus string) string {
 	if vcpu < 1 {
 		vcpu = 1
 	}
 	if ramMB < 2048 {
 		ramMB = 2048
 	}
+	if nicModel == "" {
+		nicModel = "e1000e"
+	}
+	if diskBus == "" {
+		diskBus = "sata"
+	}
+	diskDev := "sda"
+	if diskBus == "virtio" {
+		diskDev = "vda"
+	} else if diskBus == "ide" {
+		diskDev = "hda"
+	}
+
 	iotune := ""
 	if ioReadMBps > 0 || ioWriteMBps > 0 {
 		var parts []string
@@ -2461,10 +2864,29 @@ func windowsDomainXML(name string, vcpu int, ramMB int, diskPath, winISOPath, un
 %s
       </bandwidth>`, strings.Join(parts, "\n"))
 	}
+
+	cdromDisks := ""
+	if strings.TrimSpace(winISOPath) != "" {
+		cdromDisks += fmt.Sprintf(`
+    <disk type='file' device='cdrom'>
+      <driver name='qemu' type='raw'/>
+      <source file='%s'/>
+      <target dev='hdb' bus='ide'/>
+      <readonly/>
+    </disk>`, xmlEscape(winISOPath))
+	}
 	virtioWinISO := virtioWinISOPath()
-	unattendDisk := ""
+	if strings.TrimSpace(virtioWinISO) != "" {
+		cdromDisks += fmt.Sprintf(`
+    <disk type='file' device='cdrom'>
+      <driver name='qemu' type='raw'/>
+      <source file='%s'/>
+      <target dev='hdc' bus='ide'/>
+      <readonly/>
+    </disk>`, xmlEscape(virtioWinISO))
+	}
 	if strings.TrimSpace(unattendISOPath) != "" {
-		unattendDisk = fmt.Sprintf(`
+		cdromDisks += fmt.Sprintf(`
     <disk type='file' device='cdrom'>
       <driver name='qemu' type='raw'/>
       <source file='%s'/>
@@ -2472,6 +2894,14 @@ func windowsDomainXML(name string, vcpu int, ramMB int, diskPath, winISOPath, un
       <readonly/>
     </disk>`, xmlEscape(unattendISOPath))
 	}
+
+	bootTag := "<boot dev='hd'/>"
+	if bootOrder == "cdrom" {
+		bootTag = "<boot dev='cdrom'/>\n    <boot dev='hd'/>"
+	} else if bootOrder == "network" {
+		bootTag = "<boot dev='network'/>\n    <boot dev='hd'/>"
+	}
+
 	return fmt.Sprintf(`<domain type='kvm'>
   <name>%s</name>
   %s
@@ -2481,6 +2911,7 @@ func windowsDomainXML(name string, vcpu int, ramMB int, diskPath, winISOPath, un
   <cputune><shares>2048</shares></cputune>
   <os>
     <type arch='x86_64' machine='pc'>hvm</type>
+    %s
   </os>
   <features>
     <acpi/>
@@ -2505,26 +2936,12 @@ func windowsDomainXML(name string, vcpu int, ramMB int, diskPath, winISOPath, un
     <disk type='file' device='disk'>
       <driver name='qemu' type='qcow2' cache='none'/>
       <source file='%s'/>
-      <target dev='sda' bus='sata'/>
-      <boot order='2'/>%s
-    </disk>
-    <disk type='file' device='cdrom'>
-      <driver name='qemu' type='raw'/>
-      <source file='%s'/>
-      <target dev='hdb' bus='ide'/>
-      <readonly/>
-      <boot order='1'/>
-    </disk>
-    <disk type='file' device='cdrom'>
-      <driver name='qemu' type='raw'/>
-      <source file='%s'/>
-      <target dev='hdc' bus='ide'/>
-      <readonly/>
+      <target dev='%s' bus='%s'/>%s
     </disk>%s
     <interface type='network'>
       <mac address='%s'/>
       <source network='default'/>
-      <model type='e1000e'/>%s
+      <model type='%s'/>%s
     </interface>
     <channel type='unix'>
       <target type='virtio' name='org.qemu.guest_agent.0'/>
@@ -2533,9 +2950,9 @@ func windowsDomainXML(name string, vcpu int, ramMB int, diskPath, winISOPath, un
     <graphics type='vnc' port='-1' autoport='yes' listen='127.0.0.1'/>
     <video><model type='qxl'/></video>
   </devices>
-</domain>`, xmlEscape(name), domainUUIDXML(name), ramMB, ramMB, vcpu, vcpu, vcpu,
-		xmlEscape(diskPath), iotune,
-		xmlEscape(winISOPath), xmlEscape(virtioWinISO), unattendDisk, xmlEscape(mac), bandwidth)
+</domain>`, xmlEscape(name), domainUUIDXML(name), ramMB, ramMB, vcpu, vcpu, bootTag, vcpu,
+		xmlEscape(diskPath), diskDev, diskBus, iotune,
+		cdromDisks, xmlEscape(mac), nicModel, bandwidth)
 }
 
 func xmlEscape(value string) string {

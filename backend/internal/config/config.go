@@ -164,11 +164,16 @@ type Container struct {
 	SnapshotScheduleTime          string                 `json:"snapshot_schedule_time"`
 	SnapshotScheduleLastRun       string                 `json:"snapshot_schedule_last_run"`
 	SnapshotScheduleNextRun       string                 `json:"snapshot_schedule_next_run"`
-	SnapshotScheduleCreatedBy     string                 `json:"snapshot_schedule_created_by"`
-	PolicyBlocked                 bool                   `json:"policy_blocked"`
-	PolicyBlockedReason           string                 `json:"policy_blocked_reason,omitempty"`
-	PolicyBlockedAt               string                 `json:"policy_blocked_at,omitempty"`
-}
+		SnapshotScheduleCreatedBy     string                 `json:"snapshot_schedule_created_by"`
+		PolicyBlocked                 bool                   `json:"policy_blocked"`
+		PolicyBlockedReason           string                 `json:"policy_blocked_reason,omitempty"`
+		PolicyBlockedAt               string                 `json:"policy_blocked_at,omitempty"`
+		BootOrder                     string                 `json:"boot_order,omitempty"`   // "disk", "cdrom", "network"
+		BootMedia                     string                 `json:"boot_media,omitempty"`   // Custom ISO path/ID or ""
+		Firmware                      string                 `json:"firmware,omitempty"`     // "bios", "uefi"
+		NICModel                      string                 `json:"nic_model,omitempty"`    // "virtio", "e1000e", "rtl8139"
+		DiskBus                       string                 `json:"disk_bus,omitempty"`     // "virtio", "sata", "ide", "scsi"
+	}
 
 const (
 	VirtualizationLXC = "lxc"
@@ -714,6 +719,21 @@ type SubUser struct {
 	TokenVersion         int      `json:"token_version"`
 }
 
+// Backup represents a full offline/online backup archive
+type Backup struct {
+	ID            string `json:"id"`
+	ContainerID   int    `json:"container_id"`
+	ContainerName string `json:"container_name"`
+	LXCName       string `json:"lxc_name"`
+	CreatedAt     string `json:"created_at"`
+	CreatedBy     string `json:"created_by"`
+	Path          string `json:"path"`
+	SizeBytes     int64  `json:"size_bytes"`
+	Format        string `json:"format"` // "qcow2", "tar.gz"
+	Compressed    bool   `json:"compressed"`
+}
+
+// Snapshot represents a lightweight COW snapshot
 type Snapshot struct {
 	ID            string `json:"id"`
 	ContainerID   int    `json:"container_id"`
@@ -803,10 +823,11 @@ type ClicdConfig struct {
 	Tasks                []SavedTask            `json:"tasks"`
 	LoginLogs            []SavedLoginLog        `json:"login_logs"`
 	EnabledImages        []string               `json:"enabled_images"`
-	CustomKVMImages      []CustomKVMImage       `json:"custom_kvm_images"`
-	CustomLXCImages      []CustomLXCImage       `json:"custom_lxc_images"`
-	Snapshots            []Snapshot             `json:"snapshots"`
-	PublicIPv4Pool       []PublicIPv4Assignment `json:"public_ipv4_pool"`
+		CustomKVMImages      []CustomKVMImage       `json:"custom_kvm_images"`
+		CustomLXCImages      []CustomLXCImage       `json:"custom_lxc_images"`
+		Snapshots            []Snapshot             `json:"snapshots"`
+		Backups              []Backup               `json:"backups"`
+		PublicIPv4Pool       []PublicIPv4Assignment `json:"public_ipv4_pool"`
 	PublicIPv6Prefixes   []PublicIPv6Prefix     `json:"public_ipv6_prefixes"`
 	WebSSHAllowedOrigins []string               `json:"webssh_allowed_origins"`
 	PanelAccessPolicy    PanelAccessPolicy      `json:"panel_access_policy"`
@@ -990,9 +1011,10 @@ func InitConfig() (*ClicdConfig, error) {
 		SubUsers:             []SubUser{},
 		AuditLogs:            []AuditLog{},
 		Tasks:                []SavedTask{},
-		LoginLogs:            []SavedLoginLog{},
-		Snapshots:            []Snapshot{},
-		PublicIPv4Pool:       []PublicIPv4Assignment{},
+			LoginLogs:            []SavedLoginLog{},
+			Snapshots:            []Snapshot{},
+			Backups:              []Backup{},
+			PublicIPv4Pool:       []PublicIPv4Assignment{},
 		PublicIPv6Prefixes:   []PublicIPv6Prefix{},
 		WebSSHAllowedOrigins: []string{},
 		PanelAccessPolicy: PanelAccessPolicy{
@@ -1057,10 +1079,14 @@ func normalizeConfigDefaults(dataDir string) bool {
 		AppConfig.Containers = make([]Container, 0)
 		changed = true
 	}
-	if AppConfig.Snapshots == nil {
-		AppConfig.Snapshots = make([]Snapshot, 0)
-		changed = true
-	}
+		if AppConfig.Snapshots == nil {
+			AppConfig.Snapshots = make([]Snapshot, 0)
+			changed = true
+		}
+		if AppConfig.Backups == nil {
+			AppConfig.Backups = make([]Backup, 0)
+			changed = true
+		}
 	if AppConfig.PublicIPv4Pool == nil {
 		AppConfig.PublicIPv4Pool = make([]PublicIPv4Assignment, 0)
 		changed = true
@@ -1678,6 +1704,41 @@ func ContainerSnapshots(containerID int) []Snapshot {
 	for _, snapshot := range AppConfig.Snapshots {
 		if snapshot.ContainerID == containerID {
 			result = append(result, snapshot)
+		}
+	}
+	return result
+}
+
+func AddBackup(backup Backup) {
+	AppConfig.Backups = append(AppConfig.Backups, backup)
+	SaveConfig()
+}
+
+func FindBackup(id string) *Backup {
+	for i := range AppConfig.Backups {
+		if AppConfig.Backups[i].ID == id {
+			return &AppConfig.Backups[i]
+		}
+	}
+	return nil
+}
+
+func RemoveBackup(id string) bool {
+	for i := range AppConfig.Backups {
+		if AppConfig.Backups[i].ID == id {
+			AppConfig.Backups = append(AppConfig.Backups[:i], AppConfig.Backups[i+1:]...)
+			SaveConfig()
+			return true
+		}
+	}
+	return false
+}
+
+func ContainerBackups(containerID int) []Backup {
+	result := make([]Backup, 0)
+	for _, backup := range AppConfig.Backups {
+		if backup.ContainerID == containerID {
+			result = append(result, backup)
 		}
 	}
 	return result

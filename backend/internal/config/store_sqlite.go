@@ -239,11 +239,16 @@ func ensureSchema() error {
 			snapshot_schedule_next_run TEXT,
 			snapshot_schedule_created_by TEXT,
 			policy_blocked INTEGER,
-			policy_blocked_reason TEXT,
-			policy_blocked_at TEXT,
-			allowed_image_ids TEXT,
-			image_limit_configured INTEGER NOT NULL DEFAULT 0
-		)`,
+				policy_blocked_reason TEXT,
+				policy_blocked_at TEXT,
+				allowed_image_ids TEXT,
+				image_limit_configured INTEGER NOT NULL DEFAULT 0,
+				boot_order TEXT NOT NULL DEFAULT '',
+				boot_media TEXT NOT NULL DEFAULT '',
+				firmware TEXT NOT NULL DEFAULT '',
+				nic_model TEXT NOT NULL DEFAULT '',
+				disk_bus TEXT NOT NULL DEFAULT ''
+			)`,
 		`CREATE TABLE IF NOT EXISTS port_mappings (
 			container_id INTEGER NOT NULL,
 			position INTEGER NOT NULL,
@@ -407,17 +412,29 @@ func ensureSchema() error {
 			position INTEGER PRIMARY KEY,
 			image_id TEXT NOT NULL
 		)`,
-		`CREATE TABLE IF NOT EXISTS snapshots (
-			id TEXT PRIMARY KEY,
-			container_id INTEGER,
-			container_name TEXT,
-			lxc_name TEXT,
-			created_at TEXT,
-			created_by TEXT,
-			scheduled INTEGER,
-			path TEXT,
-			size_bytes INTEGER
-		)`,
+			`CREATE TABLE IF NOT EXISTS snapshots (
+				id TEXT PRIMARY KEY,
+				container_id INTEGER,
+				container_name TEXT,
+				lxc_name TEXT,
+				created_at TEXT,
+				created_by TEXT,
+				scheduled INTEGER,
+				path TEXT,
+				size_bytes INTEGER
+			)`,
+			`CREATE TABLE IF NOT EXISTS backups (
+				id TEXT PRIMARY KEY,
+				container_id INTEGER,
+				container_name TEXT,
+				lxc_name TEXT,
+				created_at TEXT,
+				created_by TEXT,
+				path TEXT,
+				size_bytes INTEGER,
+				format TEXT,
+				compressed INTEGER
+			)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := db.Exec(stmt); err != nil {
@@ -481,10 +498,15 @@ func ensureSchemaMigrations() error {
 		{"containers", "storage_path", "TEXT"},
 		{"containers", "lan_ipv4_mode", "TEXT"},
 		{"containers", "lan_interface", "TEXT"},
-		{"containers", "lan_ipv4_address", "TEXT NOT NULL DEFAULT ''"},
-		{"containers", "lan_ipv4_prefix_len", "INTEGER NOT NULL DEFAULT 0"},
-		{"containers", "lan_ipv4_gateway", "TEXT NOT NULL DEFAULT ''"},
-	} {
+			{"containers", "lan_ipv4_address", "TEXT NOT NULL DEFAULT ''"},
+			{"containers", "lan_ipv4_prefix_len", "INTEGER NOT NULL DEFAULT 0"},
+			{"containers", "lan_ipv4_gateway", "TEXT NOT NULL DEFAULT ''"},
+			{"containers", "boot_order", "TEXT NOT NULL DEFAULT ''"},
+			{"containers", "boot_media", "TEXT NOT NULL DEFAULT ''"},
+			{"containers", "firmware", "TEXT NOT NULL DEFAULT ''"},
+			{"containers", "nic_model", "TEXT NOT NULL DEFAULT ''"},
+			{"containers", "disk_bus", "TEXT NOT NULL DEFAULT ''"},
+		} {
 		wasAdded, err := ensureColumn(column.table, column.name, column.def)
 		if err != nil {
 			return err
@@ -662,9 +684,12 @@ func loadConfigFromDB() (*ClicdConfig, bool, error) {
 	if cfg.EnabledImages, err = loadEnabledImages(); err != nil {
 		return nil, false, err
 	}
-	if cfg.Snapshots, err = loadSnapshots(); err != nil {
-		return nil, false, err
-	}
+		if cfg.Snapshots, err = loadSnapshots(); err != nil {
+			return nil, false, err
+		}
+		if cfg.Backups, err = loadBackups(); err != nil {
+			return nil, false, err
+		}
 	return cfg, true, nil
 }
 
@@ -695,9 +720,10 @@ func saveConfigToDB() error {
 		"task_nat_port_mappings",
 		"tasks",
 		"login_logs",
-		"enabled_images",
-		"snapshots",
-		"app_meta",
+			"enabled_images",
+			"snapshots",
+			"backups",
+			"app_meta",
 	} {
 		if _, err := tx.Exec("DELETE FROM " + table); err != nil {
 			return err
@@ -728,10 +754,13 @@ func saveConfigToDB() error {
 	if err := saveEnabledImages(tx); err != nil {
 		return err
 	}
-	if err := saveSnapshots(tx); err != nil {
-		return err
-	}
-	return tx.Commit()
+		if err := saveSnapshots(tx); err != nil {
+			return err
+		}
+		if err := saveBackups(tx); err != nil {
+			return err
+		}
+		return tx.Commit()
 }
 
 func saveMeta(tx *sql.Tx) error {
@@ -796,22 +825,24 @@ func saveContainers(tx *sql.Tx) error {
 			ssh_host_key, port_mapping_limit, snapshot_limit, created_at, expires_at,
 			snapshot_schedule_enabled, snapshot_schedule_interval_hours, snapshot_schedule_time,
 			snapshot_schedule_last_run, snapshot_schedule_next_run, snapshot_schedule_created_by,
-			policy_blocked, policy_blocked_reason, policy_blocked_at,
-			firewall_enabled, firewall_default_action, firewall_rules, allowed_image_ids, image_limit_configured
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			c.ID, c.UUID, c.Name, c.Virtualization, c.LXCName, c.KVMName, c.DiskImage, c.StoragePoolID, c.StoragePath, c.MACAddress, c.Template,
-			c.VCPU, c.RAMMB, c.DiskGB, c.NetworkBWMbps, c.NetworkDownMbps, c.NetworkUpMbps,
-			c.MonthlyTrafficGB, c.TrafficMode, c.TrafficInGB,
-			c.TrafficOutGB, c.TrafficUsedRX, c.TrafficUsedTX, c.TrafficResetDate,
-			c.IOSpeedMBps, c.IOReadMBps, c.IOWriteMBps,
-			c.Status, boolInt(c.RestoreOnHostBoot), c.IP, c.LANIPv4Mode, c.LANInterface, c.LANIPv4Address, c.LANIPv4PrefixLen, c.LANIPv4Gateway,
-			c.IPv6, c.IPv6PrefixLen, c.IPv6Interface, c.VNCPort, c.SSHPort, c.SSHPassword,
-			c.SSHHostKey, c.PortMappingLimit, c.SnapshotLimit, c.CreatedAt, c.ExpiresAt,
-			boolInt(c.SnapshotScheduleEnabled), c.SnapshotScheduleIntervalHours, c.SnapshotScheduleTime,
-			c.SnapshotScheduleLastRun, c.SnapshotScheduleNextRun, c.SnapshotScheduleCreatedBy,
-			boolInt(c.PolicyBlocked), c.PolicyBlockedReason, c.PolicyBlockedAt,
-			boolInt(c.FirewallEnabled), normalizeFirewallDefaultAction(c.FirewallDefaultAction), marshalFirewallRules(c.FirewallRules), allowedImageIDs, boolInt(c.ImageLimitConfigured),
-		); err != nil {
+				policy_blocked, policy_blocked_reason, policy_blocked_at,
+				firewall_enabled, firewall_default_action, firewall_rules, allowed_image_ids, image_limit_configured,
+				boot_order, boot_media, firmware, nic_model, disk_bus
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				c.ID, c.UUID, c.Name, c.Virtualization, c.LXCName, c.KVMName, c.DiskImage, c.StoragePoolID, c.StoragePath, c.MACAddress, c.Template,
+				c.VCPU, c.RAMMB, c.DiskGB, c.NetworkBWMbps, c.NetworkDownMbps, c.NetworkUpMbps,
+				c.MonthlyTrafficGB, c.TrafficMode, c.TrafficInGB,
+				c.TrafficOutGB, c.TrafficUsedRX, c.TrafficUsedTX, c.TrafficResetDate,
+				c.IOSpeedMBps, c.IOReadMBps, c.IOWriteMBps,
+				c.Status, boolInt(c.RestoreOnHostBoot), c.IP, c.LANIPv4Mode, c.LANInterface, c.LANIPv4Address, c.LANIPv4PrefixLen, c.LANIPv4Gateway,
+				c.IPv6, c.IPv6PrefixLen, c.IPv6Interface, c.VNCPort, c.SSHPort, c.SSHPassword,
+				c.SSHHostKey, c.PortMappingLimit, c.SnapshotLimit, c.CreatedAt, c.ExpiresAt,
+				boolInt(c.SnapshotScheduleEnabled), c.SnapshotScheduleIntervalHours, c.SnapshotScheduleTime,
+				c.SnapshotScheduleLastRun, c.SnapshotScheduleNextRun, c.SnapshotScheduleCreatedBy,
+				boolInt(c.PolicyBlocked), c.PolicyBlockedReason, c.PolicyBlockedAt,
+				boolInt(c.FirewallEnabled), normalizeFirewallDefaultAction(c.FirewallDefaultAction), marshalFirewallRules(c.FirewallRules), allowedImageIDs, boolInt(c.ImageLimitConfigured),
+				c.BootOrder, c.BootMedia, c.Firmware, c.NICModel, c.DiskBus,
+			); err != nil {
 			return err
 		}
 		for i, pm := range c.PortMappings {
@@ -1013,6 +1044,16 @@ func saveSnapshots(tx *sql.Tx) error {
 	return nil
 }
 
+func saveBackups(tx *sql.Tx) error {
+	for _, backup := range AppConfig.Backups {
+		if _, err := tx.Exec(`INSERT INTO backups(id, container_id, container_name, lxc_name, created_at, created_by, path, size_bytes, format, compressed)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, backup.ID, backup.ContainerID, backup.ContainerName, backup.LXCName, backup.CreatedAt, backup.CreatedBy, backup.Path, backup.SizeBytes, backup.Format, boolInt(backup.Compressed)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func loadContainers() ([]Container, error) {
 	rows, err := db.Query(`SELECT
 		id, uuid, name, virtualization, lxc_name, kvm_name, disk_image, storage_pool_id, storage_path, mac_address, template,
@@ -1025,55 +1066,63 @@ func loadContainers() ([]Container, error) {
 		ssh_host_key, port_mapping_limit, snapshot_limit, created_at, expires_at,
 		snapshot_schedule_enabled, snapshot_schedule_interval_hours, snapshot_schedule_time,
 		snapshot_schedule_last_run, snapshot_schedule_next_run, snapshot_schedule_created_by,
-		policy_blocked, policy_blocked_reason, policy_blocked_at,
-		firewall_enabled, firewall_default_action, firewall_rules, allowed_image_ids, image_limit_configured
-		FROM containers ORDER BY id`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	result := []Container{}
-	for rows.Next() {
-		var c Container
-		var scheduleEnabled, policyBlocked, firewallEnabled, imageLimitConfigured, restoreOnHostBoot int
-		var firewallDefaultAction string
-		var firewallRulesJSON, allowedImageIDs sql.NullString
-		var storagePoolID, storagePath sql.NullString
-		var lanIPv4Mode, lanInterface sql.NullString
-		var lanIPv4Address, lanIPv4Gateway sql.NullString
-		var lanIPv4PrefixLen sql.NullInt64
-		if err := rows.Scan(
-			&c.ID, &c.UUID, &c.Name, &c.Virtualization, &c.LXCName, &c.KVMName, &c.DiskImage, &storagePoolID, &storagePath, &c.MACAddress, &c.Template,
-			&c.VCPU, &c.RAMMB, &c.DiskGB, &c.NetworkBWMbps, &c.NetworkDownMbps, &c.NetworkUpMbps,
-			&c.MonthlyTrafficGB, &c.TrafficMode, &c.TrafficInGB,
-			&c.TrafficOutGB, &c.TrafficUsedRX, &c.TrafficUsedTX, &c.TrafficResetDate,
-			&c.IOSpeedMBps, &c.IOReadMBps, &c.IOWriteMBps,
-			&c.Status, &restoreOnHostBoot, &c.IP, &lanIPv4Mode, &lanInterface, &lanIPv4Address, &lanIPv4PrefixLen, &lanIPv4Gateway,
-			&c.IPv6, &c.IPv6PrefixLen, &c.IPv6Interface, &c.VNCPort, &c.SSHPort, &c.SSHPassword,
-			&c.SSHHostKey, &c.PortMappingLimit, &c.SnapshotLimit, &c.CreatedAt, &c.ExpiresAt,
-			&scheduleEnabled, &c.SnapshotScheduleIntervalHours, &c.SnapshotScheduleTime,
-			&c.SnapshotScheduleLastRun, &c.SnapshotScheduleNextRun, &c.SnapshotScheduleCreatedBy,
-			&policyBlocked, &c.PolicyBlockedReason, &c.PolicyBlockedAt,
-			&firewallEnabled, &firewallDefaultAction, &firewallRulesJSON, &allowedImageIDs, &imageLimitConfigured,
-		); err != nil {
+			policy_blocked, policy_blocked_reason, policy_blocked_at,
+			firewall_enabled, firewall_default_action, firewall_rules, allowed_image_ids, image_limit_configured,
+			boot_order, boot_media, firmware, nic_model, disk_bus
+			FROM containers ORDER BY id`)
+		if err != nil {
 			return nil, err
 		}
-		c.StoragePoolID = storagePoolID.String
-		c.StoragePath = storagePath.String
-		c.LANIPv4Mode = lanIPv4Mode.String
-		c.LANInterface = lanInterface.String
-		c.LANIPv4Address = lanIPv4Address.String
-		if lanIPv4PrefixLen.Valid {
-			c.LANIPv4PrefixLen = int(lanIPv4PrefixLen.Int64)
-		}
-		c.LANIPv4Gateway = lanIPv4Gateway.String
-		c.SnapshotScheduleEnabled = scheduleEnabled != 0
-		c.RestoreOnHostBoot = restoreOnHostBoot != 0
-		c.PolicyBlocked = policyBlocked != 0
-		c.FirewallEnabled = firewallEnabled != 0
-		c.FirewallDefaultAction = normalizeFirewallDefaultAction(firewallDefaultAction)
-		c.ImageLimitConfigured = imageLimitConfigured != 0
+		defer rows.Close()
+
+		result := []Container{}
+		for rows.Next() {
+			var c Container
+			var scheduleEnabled, policyBlocked, firewallEnabled, imageLimitConfigured, restoreOnHostBoot int
+			var firewallDefaultAction string
+			var firewallRulesJSON, allowedImageIDs sql.NullString
+			var storagePoolID, storagePath sql.NullString
+			var lanIPv4Mode, lanInterface sql.NullString
+			var lanIPv4Address, lanIPv4Gateway sql.NullString
+			var lanIPv4PrefixLen sql.NullInt64
+			var bootOrder, bootMedia, firmware, nicModel, diskBus sql.NullString
+			if err := rows.Scan(
+				&c.ID, &c.UUID, &c.Name, &c.Virtualization, &c.LXCName, &c.KVMName, &c.DiskImage, &storagePoolID, &storagePath, &c.MACAddress, &c.Template,
+				&c.VCPU, &c.RAMMB, &c.DiskGB, &c.NetworkBWMbps, &c.NetworkDownMbps, &c.NetworkUpMbps,
+				&c.MonthlyTrafficGB, &c.TrafficMode, &c.TrafficInGB,
+				&c.TrafficOutGB, &c.TrafficUsedRX, &c.TrafficUsedTX, &c.TrafficResetDate,
+				&c.IOSpeedMBps, &c.IOReadMBps, &c.IOWriteMBps,
+				&c.Status, &restoreOnHostBoot, &c.IP, &lanIPv4Mode, &lanInterface, &lanIPv4Address, &lanIPv4PrefixLen, &lanIPv4Gateway,
+				&c.IPv6, &c.IPv6PrefixLen, &c.IPv6Interface, &c.VNCPort, &c.SSHPort, &c.SSHPassword,
+				&c.SSHHostKey, &c.PortMappingLimit, &c.SnapshotLimit, &c.CreatedAt, &c.ExpiresAt,
+				&scheduleEnabled, &c.SnapshotScheduleIntervalHours, &c.SnapshotScheduleTime,
+				&c.SnapshotScheduleLastRun, &c.SnapshotScheduleNextRun, &c.SnapshotScheduleCreatedBy,
+				&policyBlocked, &c.PolicyBlockedReason, &c.PolicyBlockedAt,
+				&firewallEnabled, &firewallDefaultAction, &firewallRulesJSON, &allowedImageIDs, &imageLimitConfigured,
+				&bootOrder, &bootMedia, &firmware, &nicModel, &diskBus,
+			); err != nil {
+				return nil, err
+			}
+			c.StoragePoolID = storagePoolID.String
+			c.StoragePath = storagePath.String
+			c.LANIPv4Mode = lanIPv4Mode.String
+			c.LANInterface = lanInterface.String
+			c.LANIPv4Address = lanIPv4Address.String
+			if lanIPv4PrefixLen.Valid {
+				c.LANIPv4PrefixLen = int(lanIPv4PrefixLen.Int64)
+			}
+			c.LANIPv4Gateway = lanIPv4Gateway.String
+			c.SnapshotScheduleEnabled = scheduleEnabled != 0
+			c.RestoreOnHostBoot = restoreOnHostBoot != 0
+			c.PolicyBlocked = policyBlocked != 0
+			c.FirewallEnabled = firewallEnabled != 0
+			c.FirewallDefaultAction = normalizeFirewallDefaultAction(firewallDefaultAction)
+			c.ImageLimitConfigured = imageLimitConfigured != 0
+			c.BootOrder = bootOrder.String
+			c.BootMedia = bootMedia.String
+			c.Firmware = firmware.String
+			c.NICModel = nicModel.String
+			c.DiskBus = diskBus.String
 		if firewallRulesJSON.Valid && strings.TrimSpace(firewallRulesJSON.String) != "" {
 			_ = json.Unmarshal([]byte(firewallRulesJSON.String), &c.FirewallRules)
 		}
@@ -1448,6 +1497,27 @@ func loadSnapshots() ([]Snapshot, error) {
 		}
 		snapshot.Scheduled = scheduled != 0
 		result = append(result, snapshot)
+	}
+	return result, rows.Err()
+}
+
+func loadBackups() ([]Backup, error) {
+	rows, err := db.Query(`SELECT id, container_id, container_name, lxc_name, created_at, created_by, path, size_bytes, format, compressed FROM backups ORDER BY created_at, id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []Backup{}
+	for rows.Next() {
+		var backup Backup
+		var compressed int
+		var format sql.NullString
+		if err := rows.Scan(&backup.ID, &backup.ContainerID, &backup.ContainerName, &backup.LXCName, &backup.CreatedAt, &backup.CreatedBy, &backup.Path, &backup.SizeBytes, &format, &compressed); err != nil {
+			return nil, err
+		}
+		backup.Format = format.String
+		backup.Compressed = compressed != 0
+		result = append(result, backup)
 	}
 	return result, rows.Err()
 }

@@ -182,8 +182,25 @@ func HandleSingleContainer(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		updateIPv6Addresses(w, r, id)
-	case action == "snapshots" || strings.HasPrefix(action, "snapshots/"):
-		handleContainerSnapshots(w, r, id, action)
+		case action == "snapshots" || strings.HasPrefix(action, "snapshots/"):
+			handleContainerSnapshots(w, r, id, action)
+		case action == "backups" || strings.HasPrefix(action, "backups/"):
+			handleContainerBackups(w, r, id, action)
+		case action == "resize-disk" && r.Method == http.MethodPost:
+			if !requireScope(w, r, "container:resize") {
+				return
+			}
+			handleResizeDisk(w, r, id)
+		case action == "import-disk" && r.Method == http.MethodPost:
+			if !requireScope(w, r, "container:reinstall") {
+				return
+			}
+			handleImportDisk(w, r, id)
+		case action == "hardware-config" && r.Method == http.MethodPut:
+			if !requireScope(w, r, "container:resize") {
+				return
+			}
+			handleUpdateHardwareConfig(w, r, id)
 	case action == "port-mappings" && r.Method == http.MethodPost:
 		if !requireScope(w, r, "container:network") {
 			return
@@ -599,6 +616,92 @@ func applyIOLimitPatch(c *config.Container, legacy *int, read *int, write *int) 
 	c.IOReadMBps = nextRead
 	c.IOWriteMBps = nextWrite
 	c.IOSpeedMBps = config.LegacySymmetricLimit(nextRead, nextWrite)
+}
+
+func handleResizeDisk(w http.ResponseWriter, r *http.Request, id int) {
+	var req struct {
+		DiskGB int `json:"disk_gb"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Invalid request body"})
+		return
+	}
+	if req.DiskGB <= 0 {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Disk size must be greater than 0"})
+		return
+	}
+	if err := resizeDiskByRuntime(id, req.DiskGB); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: err.Error()})
+		return
+	}
+	c := config.FindContainer(id)
+	user := requestUser(r)
+	config.AddAuditLog("container.resize_disk", c.Name, fmt.Sprintf("%d GB", req.DiskGB), user)
+	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: "Disk resized successfully", Data: c})
+}
+
+func handleImportDisk(w http.ResponseWriter, r *http.Request, id int) {
+	var req struct {
+		SourcePath    string `json:"source_path"`
+		AsOverlayBase bool   `json:"as_overlay_base"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Invalid request body"})
+		return
+	}
+	req.SourcePath = strings.TrimSpace(req.SourcePath)
+	if req.SourcePath == "" {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "source_path is required"})
+		return
+	}
+	if err := importDiskImageByRuntime(id, req.SourcePath, req.AsOverlayBase); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: err.Error()})
+		return
+	}
+	c := config.FindContainer(id)
+	user := requestUser(r)
+	config.AddAuditLog("container.import_disk", c.Name, req.SourcePath, user)
+	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: "Disk imported successfully", Data: c})
+}
+
+func handleUpdateHardwareConfig(w http.ResponseWriter, r *http.Request, id int) {
+	var req struct {
+		BootOrder string `json:"boot_order"`
+		BootMedia string `json:"boot_media"`
+		Firmware  string `json:"firmware"`
+		NICModel  string `json:"nic_model"`
+		DiskBus   string `json:"disk_bus"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Invalid request body"})
+		return
+	}
+	c := config.FindContainer(id)
+	if c == nil {
+		jsonResponse(w, http.StatusNotFound, APIResponse{Success: false, Message: "Container not found"})
+		return
+	}
+	if req.BootOrder != "" {
+		c.BootOrder = strings.ToLower(strings.TrimSpace(req.BootOrder))
+	}
+	c.BootMedia = strings.TrimSpace(req.BootMedia)
+	if req.Firmware != "" {
+		c.Firmware = strings.ToLower(strings.TrimSpace(req.Firmware))
+	}
+	if req.NICModel != "" {
+		c.NICModel = strings.ToLower(strings.TrimSpace(req.NICModel))
+	}
+	if req.DiskBus != "" {
+		c.DiskBus = strings.ToLower(strings.TrimSpace(req.DiskBus))
+	}
+	if err := config.SaveConfig(); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: err.Error()})
+		return
+	}
+	_ = applyLimitsByRuntime(c)
+	user := requestUser(r)
+	config.AddAuditLog("container.hardware_update", c.Name, fmt.Sprintf("boot=%s, nic=%s, bus=%s", c.BootOrder, c.NICModel, c.DiskBus), user)
+	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: "Hardware settings updated", Data: c})
 }
 
 func getRandomPort(w http.ResponseWriter, r *http.Request, id int) {

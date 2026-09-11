@@ -189,6 +189,46 @@ func setSnapshotScheduleByRuntime(id int, enabled bool, intervalHours int, sched
 	return lxcManager.SetSnapshotSchedule(id, enabled, intervalHours, scheduleTime, createdBy)
 }
 
+func createBackupByRuntime(id int, createdBy string, storagePoolID ...string) (config.Backup, error) {
+	c := config.FindContainer(id)
+	if c != nil && c.IsKVM() {
+		return kvmManager.CreateBackup(id, createdBy, storagePoolID...)
+	}
+	return config.Backup{}, fmt.Errorf("backup is currently supported for KVM instances")
+}
+
+func deleteBackupByRuntime(backupID string) error {
+	backup := config.FindBackup(backupID)
+	if backup != nil {
+		return kvmManager.DeleteBackup(backupID)
+	}
+	return fmt.Errorf("backup not found: %s", backupID)
+}
+
+func restoreBackupByRuntime(backupID string) error {
+	backup := config.FindBackup(backupID)
+	if backup != nil {
+		return kvmManager.RestoreBackup(backupID)
+	}
+	return fmt.Errorf("backup not found: %s", backupID)
+}
+
+func resizeDiskByRuntime(id int, newSizeGB int) error {
+	c := config.FindContainer(id)
+	if c != nil && c.IsKVM() {
+		return kvmManager.ResizeDisk(id, newSizeGB)
+	}
+	return fmt.Errorf("online disk resize is currently supported for KVM instances")
+}
+
+func importDiskImageByRuntime(id int, srcPath string, asOverlayBase bool) error {
+	c := config.FindContainer(id)
+	if c != nil && c.IsKVM() {
+		return kvmManager.ImportDiskImage(id, srcPath, asOverlayBase)
+	}
+	return fmt.Errorf("disk import is currently supported for KVM instances")
+}
+
 func applyLimitsByRuntime(c *config.Container) error {
 	if c != nil && c.IsKVM() {
 		return kvmManager.ApplyContainerLimits(c)
