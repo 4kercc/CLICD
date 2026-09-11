@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"clicd/internal/config"
+	"clicd/internal/storage/remote"
 )
 
 func HandleSnapshots(w http.ResponseWriter, r *http.Request) {
@@ -111,13 +112,15 @@ func createContainerSnapshot(w http.ResponseWriter, r *http.Request, containerID
 			return
 		}
 	}
-	snapshot, err := createSnapshotByRuntime(containerID, user, false, 0, req.StoragePoolID)
-	if err != nil {
-		jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: err.Error()})
-		return
-	}
-	config.AddAuditLog("snapshot.create", snapshot.ContainerName, snapshot.ID, user)
-	jsonResponse(w, http.StatusCreated, APIResponse{Success: true, Data: snapshot})
+		snapshot, err := createSnapshotByRuntime(containerID, user, false, 0, req.StoragePoolID)
+		if err != nil {
+			jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: err.Error()})
+			return
+		}
+		// Auto sync snapshot to remote storage if enabled
+		remote.SyncSnapshotToRemoteStorage(&snapshot)
+		config.AddAuditLog("snapshot.create", snapshot.ContainerName, snapshot.ID, user)
+		jsonResponse(w, http.StatusCreated, APIResponse{Success: true, Data: snapshot})
 }
 
 func updateSnapshotQuota(w http.ResponseWriter, r *http.Request, containerID int) {
@@ -332,6 +335,8 @@ func createContainerBackup(w http.ResponseWriter, r *http.Request, containerID i
 		jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: err.Error()})
 		return
 	}
+	// Auto sync backup to remote storage if enabled
+	remote.SyncBackupToRemoteStorage(&backup)
 	config.AddAuditLog("backup.create", backup.ContainerName, backup.ID, user)
 	jsonResponse(w, http.StatusCreated, APIResponse{Success: true, Data: backup})
 }

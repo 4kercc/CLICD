@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Camera, HardDrive, RefreshCw, Server, Trash2 } from 'lucide-react'
+import { Camera, Cloud, HardDrive, RefreshCw, Server, Trash2 } from 'lucide-react'
 import { useNavigate } from 'react-router'
 import { deleteContainerSnapshot, deleteContainerBackup, getSnapshots, getBackups, Snapshot, Backup } from '../services/api'
 import { useDialog } from '../components/Dialog'
@@ -156,9 +156,16 @@ export default function Snapshots() {
                     <td className="px-4 py-3 font-mono text-xs text-gray-600">{snapshot.lxc_name}</td>
                     <td className="px-4 py-3 text-gray-700">{snapshot.created_at}</td>
                     <td className="px-4 py-3">
-                      <span className={`rounded px-2 py-1 text-xs ${snapshot.scheduled ? 'bg-blue-50 text-blue-700' : 'bg-gray-100 text-gray-700'}`}>
-                        {snapshot.scheduled ? '定时' : '手动'}
-                      </span>
+                      <div className="inline-flex items-center gap-1">
+                        <span className={`rounded px-2 py-0.5 text-xs ${snapshot.scheduled ? 'bg-blue-50 text-blue-700' : 'bg-gray-100 text-gray-700'}`}>
+                          {snapshot.scheduled ? '定时' : '手动'}
+                        </span>
+                        {snapshot.remote_synced && (
+                          <span className="inline-flex items-center gap-0.5 rounded bg-blue-50 px-1.5 py-0.5 text-[10px] text-blue-600 border border-blue-200" title="已同步到远程存储">
+                            <Cloud className="w-2.5 h-2.5" /> 异地副本
+                          </span>
+                        )}
+                      </div>
                     </td>
                     <td className="px-4 py-3 text-gray-600">{snapshot.created_by || '-'}</td>
                     <td className="px-4 py-3 text-right font-mono text-xs text-gray-600">{formatBytes(snapshot.size_bytes || 0)}</td>
@@ -213,9 +220,16 @@ export default function Snapshots() {
                     <td className="px-4 py-3 font-mono text-xs text-gray-600">{backup.id}</td>
                     <td className="px-4 py-3 text-gray-700">{backup.created_at}</td>
                     <td className="px-4 py-3">
-                      <span className="rounded px-2 py-1 text-xs bg-emerald-50 text-emerald-700 uppercase font-mono">
-                        {backup.format || 'qcow2'}
-                      </span>
+                      <div className="inline-flex items-center gap-1">
+                        <span className="rounded px-2 py-0.5 text-xs bg-emerald-50 text-emerald-700 uppercase font-mono">
+                          {backup.format || 'qcow2'}
+                        </span>
+                        {backup.remote_synced && (
+                          <span className="inline-flex items-center gap-0.5 rounded bg-blue-50 px-1.5 py-0.5 text-[10px] text-blue-600 border border-blue-200" title="已同步到远程存储">
+                            <Cloud className="w-2.5 h-2.5" /> 异地副本
+                          </span>
+                        )}
+                      </div>
                     </td>
                     <td className="px-4 py-3 text-gray-600">{backup.created_by || '-'}</td>
                     <td className="px-4 py-3 text-right font-mono text-xs text-gray-600">{formatBytes(backup.size_bytes || 0)}</td>

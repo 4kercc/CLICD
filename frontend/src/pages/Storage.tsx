@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { AlertCircle, CheckCircle2, HardDrive, RefreshCw, Save } from 'lucide-react'
-import { getStorageInfo, updateStoragePools, StorageDisk, StorageInfo, StoragePool } from '../services/api'
+import { AlertCircle, CheckCircle2, Cloud, HardDrive, Plus, RefreshCw, Save, Trash2 } from 'lucide-react'
+import { getStorageInfo, updateStoragePools, testRemoteStorage, StorageDisk, StorageInfo, StoragePool } from '../services/api'
 import { useLanguage } from '../contexts/LanguageContext'
 
 const contentOptions = [
@@ -29,6 +29,40 @@ export default function Storage() {
   const [saving, setSaving] = useState(false)
   const [saveMessage, setSaveMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
 
+  // Remote storage modal state
+  const [showRemoteModal, setShowRemoteModal] = useState(false)
+  const [testingRemote, setTestingRemote] = useState(false)
+  const [remoteTestMessage, setRemoteTestMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
+  const [remoteDraft, setRemoteDraft] = useState<{
+    id: string
+    name: string
+    type: 'sftp' | 'webdav' | 'minio'
+    sync_snapshots: boolean
+    sync_backups: boolean
+    config: Record<string, string>
+  }>({
+    id: '',
+    name: '',
+    type: 'sftp',
+    sync_snapshots: true,
+    sync_backups: true,
+    config: {
+      host: '',
+      port: '22',
+      user: 'root',
+      password: '',
+      key: '',
+      base_path: '/clicd-backups',
+      url: '',
+      endpoint: '',
+      bucket: 'clicd',
+      access_key: '',
+      secret_key: '',
+      region: 'us-east-1',
+      use_ssl: 'true',
+    },
+  })
+
   const fetchData = useCallback(async () => {
     setLoading(true)
     try {
@@ -50,20 +84,26 @@ export default function Storage() {
   }, [saveMessage])
 
   const mountedDisks = useMemo(() => (info?.disks || []).filter((disk) => !!disk.mount_point), [info?.disks])
+  const remotePools = useMemo(() => (pools || []).filter((p) => p.type && p.type !== 'local'), [pools])
 
-  const save = async () => {
+  const save = async (customPools?: StoragePool[]) => {
     setSaveMessage(null)
     setSaving(true)
     try {
-      const normalized = pools
+      const targetPools = customPools || pools
+      const normalized = targetPools
         .map((pool) => ({
           ...pool,
           id: (pool.id || pool.name || '').trim(),
           name: (pool.name || '').trim(),
+          type: pool.type || 'local',
           path: (pool.path || '').trim(),
           content_types: pool.content_types || [],
           default_contents: (pool.default_contents || []).filter((item) => (pool.content_types || []).includes(item)),
           enabled: pool.enabled !== false,
+          sync_snapshots: !!pool.sync_snapshots,
+          sync_backups: !!pool.sync_backups,
+          config: pool.config || {},
         }))
       const res = await updateStoragePools(normalized)
       const data = res.data.data
@@ -77,6 +117,48 @@ export default function Storage() {
     } finally {
       setSaving(false)
     }
+  }
+
+  const handleTestRemote = async () => {
+    setRemoteTestMessage(null)
+    setTestingRemote(true)
+    try {
+      const res = await testRemoteStorage(remoteDraft.type, remoteDraft.config)
+      setRemoteTestMessage({ type: 'success', text: res.data.message || '连接测试成功' })
+    } catch (err: any) {
+      setRemoteTestMessage({ type: 'error', text: err?.response?.data?.message || '连接失败，请检查配置' })
+    } finally {
+      setTestingRemote(false)
+    }
+  }
+
+  const handleAddRemotePool = () => {
+    if (!remoteDraft.name.trim()) {
+      alert('请输入存储名称')
+      return
+    }
+    const newPool: StoragePool = {
+      id: remoteDraft.id || `remote-${remoteDraft.type}-${Date.now()}`,
+      name: remoteDraft.name.trim(),
+      type: remoteDraft.type,
+      enabled: true,
+      sync_snapshots: remoteDraft.sync_snapshots,
+      sync_backups: remoteDraft.sync_backups,
+      config: { ...remoteDraft.config },
+      content_types: ['snapshots', 'backups'],
+      default_contents: [],
+    }
+    const updated = [...pools.filter((p) => p.id !== newPool.id), newPool]
+    setPools(updated)
+    setShowRemoteModal(false)
+    save(updated)
+  }
+
+  const handleDeletePool = (poolId: string) => {
+    if (!confirm('确认删除该远程存储配置吗？')) return
+    const updated = pools.filter((p) => p.id !== poolId)
+    setPools(updated)
+    save(updated)
   }
 
   const updateDiskPool = (disk: StorageDisk, updater: (pool: StoragePool) => StoragePool) => {
@@ -136,17 +218,49 @@ export default function Storage() {
   }
 
   return (
-    <div className="min-w-0 space-y-5">
+    <div className="min-w-0 space-y-6">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-2xl font-bold text-black dark:text-white">{t('存储管理')}</h1>
-          <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">{t('只显示已挂载磁盘；勾选后，对应功能可以选择该磁盘保存数据。')}</p>
+          <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">{t('支持管理宿主机本地挂载磁盘与远程对象存储/文件系统（SFTP / WebDAV / MinIO S3），支持快照/备份异地双写同步。')}</p>
         </div>
         <div className="flex shrink-0 gap-2">
+          <button
+            onClick={() => {
+              setRemoteTestMessage(null)
+              setRemoteDraft({
+                id: '',
+                name: '远端存储备份',
+                type: 'sftp',
+                sync_snapshots: true,
+                sync_backups: true,
+                config: {
+                  host: '',
+                  port: '22',
+                  user: 'root',
+                  password: '',
+                  key: '',
+                  base_path: '/clicd-backups',
+                  url: '',
+                  endpoint: '',
+                  bucket: 'clicd',
+                  access_key: '',
+                  secret_key: '',
+                  region: 'us-east-1',
+                  use_ssl: 'true',
+                },
+              })
+              setShowRemoteModal(true)
+            }}
+            className="inline-flex items-center gap-1.5 rounded-md border border-blue-600 bg-blue-50 px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-100"
+          >
+            <Plus className="h-4 w-4" />
+            {t('添加远程存储')}
+          </button>
           <button onClick={fetchData} className="inline-flex items-center gap-2 rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50">
             <RefreshCw className="h-4 w-4" />{t('刷新')}
           </button>
-          <button onClick={save} disabled={saving} className="inline-flex items-center gap-2 rounded-md bg-black px-3 py-2 text-sm text-white hover:bg-gray-800 disabled:opacity-50">
+          <button onClick={() => save()} disabled={saving} className="inline-flex items-center gap-2 rounded-md bg-black px-3 py-2 text-sm text-white hover:bg-gray-800 disabled:opacity-50">
             <Save className="h-4 w-4" />{t(saving ? '保存中...' : '保存')}
           </button>
         </div>
@@ -169,14 +283,87 @@ export default function Storage() {
         </div>
       )}
 
-      <div className="overflow-hidden rounded-lg border border-gray-200 bg-white text-sm">
-        <div className="hidden grid-cols-[minmax(170px,0.65fr)_minmax(320px,1.2fr)_minmax(480px,1.8fr)] gap-4 border-b border-gray-200 bg-gray-50 px-4 py-3 text-xs text-gray-500 2xl:grid">
-          <div className="font-medium">{t('磁盘')}</div>
-          <div className="font-medium">{t('空间分布')}</div>
-          <div className="font-medium">{t('用于存储')}</div>
+      {/* Remote Storage Pools */}
+      {remotePools.length > 0 && (
+        <div className="overflow-hidden rounded-lg border border-blue-200 bg-white shadow-sm">
+          <div className="flex items-center justify-between border-b border-blue-100 bg-blue-50/70 px-4 py-3">
+            <div className="flex items-center gap-2 font-semibold text-blue-900 text-sm">
+              <Cloud className="h-4 w-4 text-blue-600" />
+              <span>远程异地存储 (SFTP / WebDAV / MinIO S3)</span>
+            </div>
+          </div>
+          <div className="divide-y divide-gray-100">
+            {remotePools.map((rp) => (
+              <div key={rp.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between hover:bg-gray-50">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="font-semibold text-gray-900 text-sm">{rp.name}</span>
+                    <span className="rounded bg-blue-100 px-2 py-0.5 text-[11px] font-mono uppercase text-blue-800 font-semibold">{rp.type}</span>
+                    {rp.enabled ? (
+                      <span className="rounded bg-emerald-50 px-2 py-0.5 text-[11px] text-emerald-700 border border-emerald-200">已启用</span>
+                    ) : (
+                      <span className="rounded bg-gray-100 px-2 py-0.5 text-[11px] text-gray-500">已停用</span>
+                    )}
+                  </div>
+                  <div className="mt-1 text-xs text-gray-500 flex flex-wrap gap-x-4 gap-y-1">
+                    {rp.type === 'sftp' && <span>服务器: {rp.config?.host}:{rp.config?.port || '22'} · 用户: {rp.config?.user} · 路径: {rp.config?.base_path || '/'}</span>}
+                    {rp.type === 'webdav' && <span>WebDAV 地址: {rp.config?.url} · 用户: {rp.config?.user || '-'}</span>}
+                    {(rp.type === 'minio' || rp.type === 's3') && <span>Endpoint: {rp.config?.endpoint} · Bucket: {rp.config?.bucket}</span>}
+                  </div>
+                  <div className="mt-2 flex items-center gap-3 text-xs text-gray-600">
+                    <label className="inline-flex items-center gap-1.5 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={!!rp.sync_snapshots}
+                        onChange={(e) => {
+                          const updated = pools.map((p) => (p.id === rp.id ? { ...p, sync_snapshots: e.target.checked } : p))
+                          setPools(updated)
+                          save(updated)
+                        }}
+                        className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                      />
+                      <span>自动同步快照 (Auto-sync Snapshots)</span>
+                    </label>
+                    <label className="inline-flex items-center gap-1.5 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={!!rp.sync_backups}
+                        onChange={(e) => {
+                          const updated = pools.map((p) => (p.id === rp.id ? { ...p, sync_backups: e.target.checked } : p))
+                          setPools(updated)
+                          save(updated)
+                        }}
+                        className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                      />
+                      <span>自动同步备份 (Auto-sync Backups)</span>
+                    </label>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    onClick={() => handleDeletePool(rp.id)}
+                    className="inline-flex items-center gap-1 rounded border border-red-200 bg-red-50 px-2.5 py-1.5 text-xs text-red-600 hover:bg-red-100"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                    删除
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
+      )}
+
+      {/* Local Mounted Storage Disks */}
+      <div className="overflow-hidden rounded-lg border border-gray-200 bg-white shadow-sm">
+        <div className="hidden border-b border-gray-200 bg-gray-50 px-4 py-3 text-xs font-semibold text-gray-500 2xl:grid 2xl:grid-cols-[minmax(170px,0.65fr)_minmax(320px,1.2fr)_minmax(480px,1.8fr)] 2xl:gap-4">
+          <div>{t('磁盘')}</div>
+          <div>{t('空间分布')}</div>
+          <div>{t('用于存储')}</div>
+        </div>
+
         {mountedDisks.length === 0 ? (
-          <div className="px-4 py-10 text-center text-gray-400">{t('未检测到已挂载磁盘')}</div>
+          <div className="px-4 py-8 text-center text-sm text-gray-500">{t('未检测到已挂载的磁盘')}</div>
         ) : (
           <div className="divide-y divide-gray-100">
             {mountedDisks.map((disk) => {
@@ -243,6 +430,235 @@ export default function Storage() {
           </div>
         )}
       </div>
+
+      {/* Add Remote Storage Modal */}
+      {showRemoteModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="w-full max-w-lg rounded-xl bg-white p-6 shadow-xl space-y-4 max-h-[90vh] overflow-y-auto">
+            <h2 className="text-lg font-bold text-gray-900">添加外部远程存储 (异地灾备)</h2>
+
+            <div>
+              <label className="block text-xs font-medium text-gray-700 mb-1">存储名称</label>
+              <input
+                type="text"
+                value={remoteDraft.name}
+                onChange={(e) => setRemoteDraft({ ...remoteDraft, name: e.target.value })}
+                placeholder="例如: AWS-S3备份 / 异地SFTP主机"
+                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-black focus:outline-none"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-gray-700 mb-1">协议类型</label>
+              <div className="grid grid-cols-3 gap-2">
+                {(['sftp', 'webdav', 'minio'] as const).map((t) => (
+                  <button
+                    key={t}
+                    type="button"
+                    onClick={() => setRemoteDraft({ ...remoteDraft, type: t })}
+                    className={`rounded-lg border px-3 py-2 text-xs font-semibold uppercase ${
+                      remoteDraft.type === t ? 'border-blue-600 bg-blue-50 text-blue-700' : 'border-gray-200 text-gray-600 hover:bg-gray-50'
+                    }`}
+                  >
+                    {t === 'minio' ? 'MinIO / S3' : t}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {remoteDraft.type === 'sftp' && (
+              <div className="space-y-3 rounded-lg border border-gray-200 bg-gray-50/50 p-3 text-xs">
+                <div className="grid grid-cols-3 gap-2">
+                  <div className="col-span-2">
+                    <label className="block text-gray-600 mb-1">主机 IP / 域名</label>
+                    <input
+                      value={remoteDraft.config.host}
+                      onChange={(e) => setRemoteDraft({ ...remoteDraft, config: { ...remoteDraft.config, host: e.target.value } })}
+                      placeholder="1.2.3.4"
+                      className="w-full rounded border border-gray-300 px-2.5 py-1.5 bg-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-gray-600 mb-1">端口</label>
+                    <input
+                      value={remoteDraft.config.port}
+                      onChange={(e) => setRemoteDraft({ ...remoteDraft, config: { ...remoteDraft.config, port: e.target.value } })}
+                      placeholder="22"
+                      className="w-full rounded border border-gray-300 px-2.5 py-1.5 bg-white"
+                    />
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-gray-600 mb-1">用户名</label>
+                    <input
+                      value={remoteDraft.config.user}
+                      onChange={(e) => setRemoteDraft({ ...remoteDraft, config: { ...remoteDraft.config, user: e.target.value } })}
+                      placeholder="root"
+                      className="w-full rounded border border-gray-300 px-2.5 py-1.5 bg-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-gray-600 mb-1">密码</label>
+                    <input
+                      type="password"
+                      value={remoteDraft.config.password}
+                      onChange={(e) => setRemoteDraft({ ...remoteDraft, config: { ...remoteDraft.config, password: e.target.value } })}
+                      placeholder="密码"
+                      className="w-full rounded border border-gray-300 px-2.5 py-1.5 bg-white"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-gray-600 mb-1">远端根目录路径</label>
+                  <input
+                    value={remoteDraft.config.base_path}
+                    onChange={(e) => setRemoteDraft({ ...remoteDraft, config: { ...remoteDraft.config, base_path: e.target.value } })}
+                    placeholder="/clicd-backups"
+                    className="w-full rounded border border-gray-300 px-2.5 py-1.5 bg-white"
+                  />
+                </div>
+              </div>
+            )}
+
+            {remoteDraft.type === 'webdav' && (
+              <div className="space-y-3 rounded-lg border border-gray-200 bg-gray-50/50 p-3 text-xs">
+                <div>
+                  <label className="block text-gray-600 mb-1">WebDAV URL</label>
+                  <input
+                    value={remoteDraft.config.url}
+                    onChange={(e) => setRemoteDraft({ ...remoteDraft, config: { ...remoteDraft.config, url: e.target.value } })}
+                    placeholder="https://dav.jianguoyun.com/dav/ 或 http://nas:5005/dav"
+                    className="w-full rounded border border-gray-300 px-2.5 py-1.5 bg-white"
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-gray-600 mb-1">用户名</label>
+                    <input
+                      value={remoteDraft.config.user}
+                      onChange={(e) => setRemoteDraft({ ...remoteDraft, config: { ...remoteDraft.config, user: e.target.value } })}
+                      placeholder="username"
+                      className="w-full rounded border border-gray-300 px-2.5 py-1.5 bg-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-gray-600 mb-1">密码 / 应用凭证</label>
+                    <input
+                      type="password"
+                      value={remoteDraft.config.password}
+                      onChange={(e) => setRemoteDraft({ ...remoteDraft, config: { ...remoteDraft.config, password: e.target.value } })}
+                      placeholder="password"
+                      className="w-full rounded border border-gray-300 px-2.5 py-1.5 bg-white"
+                    />
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {remoteDraft.type === 'minio' && (
+              <div className="space-y-3 rounded-lg border border-gray-200 bg-gray-50/50 p-3 text-xs">
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-gray-600 mb-1">Endpoint 地址</label>
+                    <input
+                      value={remoteDraft.config.endpoint}
+                      onChange={(e) => setRemoteDraft({ ...remoteDraft, config: { ...remoteDraft.config, endpoint: e.target.value } })}
+                      placeholder="s3.amazonaws.com 或 1.2.3.4:9000"
+                      className="w-full rounded border border-gray-300 px-2.5 py-1.5 bg-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-gray-600 mb-1">Bucket 名称</label>
+                    <input
+                      value={remoteDraft.config.bucket}
+                      onChange={(e) => setRemoteDraft({ ...remoteDraft, config: { ...remoteDraft.config, bucket: e.target.value } })}
+                      placeholder="clicd-backups"
+                      className="w-full rounded border border-gray-300 px-2.5 py-1.5 bg-white"
+                    />
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-gray-600 mb-1">Access Key</label>
+                    <input
+                      value={remoteDraft.config.access_key}
+                      onChange={(e) => setRemoteDraft({ ...remoteDraft, config: { ...remoteDraft.config, access_key: e.target.value } })}
+                      placeholder="AKIA..."
+                      className="w-full rounded border border-gray-300 px-2.5 py-1.5 bg-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-gray-600 mb-1">Secret Key</label>
+                    <input
+                      type="password"
+                      value={remoteDraft.config.secret_key}
+                      onChange={(e) => setRemoteDraft({ ...remoteDraft, config: { ...remoteDraft.config, secret_key: e.target.value } })}
+                      placeholder="Secret Key"
+                      className="w-full rounded border border-gray-300 px-2.5 py-1.5 bg-white"
+                    />
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <div className="rounded-lg border border-blue-100 bg-blue-50/60 p-3 text-xs space-y-1.5">
+              <div className="font-semibold text-blue-900">灾备自动同步选项：</div>
+              <label className="flex items-center gap-2 text-gray-700 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={remoteDraft.sync_snapshots}
+                  onChange={(e) => setRemoteDraft({ ...remoteDraft, sync_snapshots: e.target.checked })}
+                  className="rounded border-gray-300 text-blue-600"
+                />
+                <span>创建快照时自动双写上传一份到此远程存储</span>
+              </label>
+              <label className="flex items-center gap-2 text-gray-700 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={remoteDraft.sync_backups}
+                  onChange={(e) => setRemoteDraft({ ...remoteDraft, sync_backups: e.target.checked })}
+                  className="rounded border-gray-300 text-blue-600"
+                />
+                <span>创建全量备份时自动双写上传一份到此远程存储</span>
+              </label>
+            </div>
+
+            {remoteTestMessage && (
+              <div className={`rounded p-2.5 text-xs font-medium ${remoteTestMessage.type === 'success' ? 'bg-emerald-50 text-emerald-800 border border-emerald-200' : 'bg-red-50 text-red-700 border border-red-200'}`}>
+                {remoteTestMessage.text}
+              </div>
+            )}
+
+            <div className="flex items-center justify-between pt-2 border-t">
+              <button
+                type="button"
+                onClick={handleTestRemote}
+                disabled={testingRemote}
+                className="rounded border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-50"
+              >
+                {testingRemote ? '测试中...' : '测试连通性'}
+              </button>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowRemoteModal(false)}
+                  className="rounded border border-gray-300 px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-50"
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  onClick={handleAddRemotePool}
+                  className="rounded bg-black px-4 py-1.5 text-xs font-medium text-white hover:bg-gray-800"
+                >
+                  保存并启用
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -369,5 +785,5 @@ function formatBytes(bytes: number) {
     value /= 1024
     index++
   }
-  return `${value.toFixed(index === 0 ? 0 : 1)} ${units[index]}`
+  return `${value.toFixed(1)} ${units[index]}`
 }

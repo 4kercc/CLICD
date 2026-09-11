@@ -9,6 +9,7 @@ import (
 	"clicd/internal/config"
 	"clicd/internal/kvm"
 	"clicd/internal/lxc"
+	"clicd/internal/storage/remote"
 )
 
 var kvmManager = kvm.NewManager()
@@ -171,6 +172,9 @@ func deleteSnapshotByRuntime(snapshotID string) error {
 func restoreSnapshotByRuntime(snapshotID string) error {
 	snapshot := config.FindSnapshot(snapshotID)
 	if snapshot != nil {
+		if snapshot.RemoteSynced && snapshot.RemotePath != "" {
+			_ = remote.EnsureLocalSnapshotFromRemote(snapshot)
+		}
 		if c := config.FindContainer(snapshot.ContainerID); c != nil && c.IsKVM() {
 			return kvmManager.RestoreSnapshot(snapshotID)
 		}
@@ -208,6 +212,9 @@ func deleteBackupByRuntime(backupID string) error {
 func restoreBackupByRuntime(backupID string) error {
 	backup := config.FindBackup(backupID)
 	if backup != nil {
+		if backup.RemoteSynced && backup.RemotePath != "" {
+			_ = remote.EnsureLocalBackupFromRemote(backup)
+		}
 		return kvmManager.RestoreBackup(backupID)
 	}
 	return fmt.Errorf("backup not found: %s", backupID)

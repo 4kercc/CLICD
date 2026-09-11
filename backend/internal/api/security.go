@@ -55,6 +55,7 @@ type trafficStats struct {
 	destPorts             map[string]map[int]int
 	portDestCounts        map[int]map[string]int
 	portTotalCounts       map[int]int
+	establishedConns      map[string]map[int]int // dstIP -> port -> count
 	udpDestCounts         map[int]map[string]int
 	udpTotalCounts        map[int]int
 	udpDestTotalCounts    map[string]int
@@ -234,12 +235,24 @@ func (ss *SecurityScanner) checkContainer(name, ip string) {
 	}
 }
 
+type miningConnRecord struct {
+	firstSeen time.Time
+	lastSeen  time.Time
+	hits      int
+}
+
+var (
+	miningTrackerMu sync.Mutex
+	miningTracker   = make(map[string]*miningConnRecord) // key: containerName + ":" + dstIP + ":" + port
+)
+
 func newTrafficStats() *trafficStats {
 	return &trafficStats{
 		destCounts:            make(map[string]int),
 		destPorts:             make(map[string]map[int]int),
 		portDestCounts:        make(map[int]map[string]int),
 		portTotalCounts:       make(map[int]int),
+		establishedConns:      make(map[string]map[int]int),
 		udpDestCounts:         make(map[int]map[string]int),
 		udpTotalCounts:        make(map[int]int),
 		synSentByDst:          make(map[string]int),
@@ -265,6 +278,13 @@ func (ts *trafficStats) add(conn connEntry) {
 		}
 		ts.portDestCounts[conn.dstPort][conn.dstIP]++
 		ts.portTotalCounts[conn.dstPort]++
+
+		if conn.state == "ESTABLISHED" {
+			if ts.establishedConns[conn.dstIP] == nil {
+				ts.establishedConns[conn.dstIP] = make(map[int]int)
+			}
+			ts.establishedConns[conn.dstIP][conn.dstPort]++
+		}
 
 		if conn.proto == "udp" {
 			if ts.udpDestCounts[conn.dstPort] == nil {
@@ -467,19 +487,74 @@ func (ss *SecurityScanner) detectReflectionAbuse(name, ip string, stats *traffic
 }
 
 func (ss *SecurityScanner) detectMining(name, ip string, stats *trafficStats) {
+	miningTrackerMu.Lock()
+	defer miningTrackerMu.Unlock()
+
+	now := time.Now()
+	// Prune dead connection records older than 10 minutes
+	for k, record := range miningTracker {
+		if now.Sub(record.lastSeen) > 10*time.Minute {
+			delete(miningTracker, k)
+		}
+	}
+
 	for port, service := range miningPorts {
 		total := stats.portTotalCounts[port]
 		if total == 0 {
 			continue
 		}
 
-		severity := "high"
-		if total >= 5 {
-			severity = "critical"
+		// Iterate through destinations targeting this mining port
+		for dstIP, count := range stats.portDestCounts[port] {
+			key := fmt.Sprintf("%s:%s:%d", name, dstIP, port)
+			record, exists := miningTracker[key]
+			if !exists {
+				miningTracker[key] = &miningConnRecord{
+					firstSeen: now,
+					lastSeen:  now,
+					hits:      1,
+				}
+				continue
+			}
+
+			record.lastSeen = now
+			record.hits++
+
+			// Deep heuristic detection rules:
+			// 1. Transient connections (< 2 consecutive scan cycles, duration < 45s) are ignored to prevent false alarms on web/dev servers.
+			duration := now.Sub(record.firstSeen)
+			if record.hits < 2 || duration < 45*time.Second {
+				continue
+			}
+
+			// 2. Check established state: real Stratum mining keeps persistent ESTABLISHED TCP socket
+			establishedCount := 0
+			if stats.establishedConns[dstIP] != nil {
+				establishedCount = stats.establishedConns[dstIP][port]
+			}
+
+			score := 0
+			if establishedCount > 0 {
+				score += 40 // Persistent TCP session
+			}
+			if duration >= 90*time.Second {
+				score += 30 // Long-lived socket (Stratum heartbeat)
+			}
+			if count >= 3 || total >= 5 {
+				score += 30 // Multiple parallel mining workers
+			}
+
+			// Only trigger when confidence score exceeds threshold (avoid false positives on dev port 8888/9999/etc.)
+			if score >= 60 {
+				severity := "high"
+				if score >= 90 || total >= 5 {
+					severity = "critical"
+				}
+				ss.addAlert(name, "mining", severity, ip, dstIP, port,
+					fmt.Sprintf("深度识别挖矿连接: %s/%d 持续通信 %s (已连通 %d 轮, ESTABLISHED=%d)", service, port, duration.Round(time.Second), record.hits, establishedCount),
+					"")
+			}
 		}
-		ss.addAlert(name, "mining", severity, ip, "*", port,
-			fmt.Sprintf("疑似挖矿连接: %s/%d 当前连接 %d 条", service, port, total),
-			"")
 	}
 }
 

@@ -85,6 +85,15 @@ curl -fsSL https://raw.githubusercontent.com/4kercc/CLICD/main/install.sh | sudo
 - 统一 NAT 规则卡片体系，创建/编辑 IPv4 NAT 端口映射时支持一键自动同步生成/放行同端口 IPv6 入站防火墙规则。
 - 默认开启一键双栈放行，也可关闭后在防火墙面板中进行独立精细化管理。
 
+### 8. 🔍 挖矿智能深度识别与降误报机制 (Intelligent Cryptomining Detection - v1.20.1)
+- 摒弃以往基于 Stratum/常见端口单次命中的简单规则，引入**多周期长连接生命周期追踪（Longevity & Heartbeat Tracking）**。
+- 结合 TCP `ESTABLISHED` 持续状态、并发模式、矿池威胁情报与置信度评分（Confidence Score），彻底杜绝 Node.js/开发测试环境/通用代理服务的误报。
+
+### 9. ☁️ 多协议远程存储支持与异地双写灾备 (Remote Storage Pools & Offsite Disaster Recovery - v1.20.1)
+- **多协议外部存储驱动**：原生支持添加 **SFTP**、**WebDAV**、**MinIO / AWS S3** 外部存储池，支持面板一键连通性测试。
+- **快照/备份自动异地双写**：在存储池中勾选“启用快照/备份同步”后，创建快照或全量备份时后台自动异步双写上传至远端存储。
+- **本地 / 远程多源灵活恢复**：恢复快照或全量备份时，若存在远端副本，支持一键选择“从本地极速还原”或“从远程存储拉取还原”，保障极端情况下的数据安全性。
+
 
 
 ## Features / 功能介绍

@@ -220,34 +220,49 @@ func normalizeStoragePools() bool {
 	result := make([]StoragePool, 0, len(AppConfig.StoragePools))
 	seen := map[string]bool{}
 	defaultSeen := map[string]bool{}
-	for _, pool := range AppConfig.StoragePools {
-		pool.ID = strings.TrimSpace(pool.ID)
-		pool.Name = strings.TrimSpace(pool.Name)
-		pool.Path = filepath.Clean(strings.TrimSpace(pool.Path))
-		pool.MountPoint = filepath.Clean(strings.TrimSpace(pool.MountPoint))
-		if pool.MountPoint == "." {
-			pool.MountPoint = ""
-		}
-		if pool.MountPoint != "" {
-			managedPath := managedStoragePoolPath(pool.MountPoint)
-			if pool.Path != managedPath {
-				pool.Path = managedPath
+		for _, pool := range AppConfig.StoragePools {
+			pool.ID = strings.TrimSpace(pool.ID)
+			pool.Name = strings.TrimSpace(pool.Name)
+			pool.Type = strings.ToLower(strings.TrimSpace(pool.Type))
+			if pool.Type == "" {
+				pool.Type = "local"
+			}
+			if pool.Type == "local" {
+				pool.Path = filepath.Clean(strings.TrimSpace(pool.Path))
+				pool.MountPoint = filepath.Clean(strings.TrimSpace(pool.MountPoint))
+				if pool.MountPoint == "." {
+					pool.MountPoint = ""
+				}
+				if pool.MountPoint != "" {
+					managedPath := managedStoragePoolPath(pool.MountPoint)
+					if pool.Path != managedPath {
+						pool.Path = managedPath
+						changed = true
+					}
+				}
+				if pool.Path == "." || !filepath.IsAbs(pool.Path) || seen[pool.ID] {
+					changed = true
+					continue
+				}
+			} else {
+				if pool.ID == "" {
+					pool.ID = fmt.Sprintf("remote-%s-%d", pool.Type, time.Now().Unix())
+					changed = true
+				}
+				if seen[pool.ID] {
+					changed = true
+					continue
+				}
+			}
+			if pool.ID == "" {
+				pool.ID = storagePoolIDFromName(pool.Name, pool.Path)
 				changed = true
 			}
-		}
-		if pool.ID == "" {
-			pool.ID = storagePoolIDFromName(pool.Name, pool.Path)
-			changed = true
-		}
-		if pool.Name == "" {
-			pool.Name = pool.ID
-			changed = true
-		}
-		if pool.Path == "." || !filepath.IsAbs(pool.Path) || seen[pool.ID] {
-			changed = true
-			continue
-		}
-		seen[pool.ID] = true
+			if pool.Name == "" {
+				pool.Name = pool.ID
+				changed = true
+			}
+			seen[pool.ID] = true
 		pool.ContentTypes = normalizeStorageContentTypes(pool.ContentTypes)
 		pool.DefaultContents = normalizeStorageContentTypes(pool.DefaultContents)
 		allowed := map[string]bool{}
@@ -721,29 +736,35 @@ type SubUser struct {
 
 // Backup represents a full offline/online backup archive
 type Backup struct {
-	ID            string `json:"id"`
-	ContainerID   int    `json:"container_id"`
-	ContainerName string `json:"container_name"`
-	LXCName       string `json:"lxc_name"`
-	CreatedAt     string `json:"created_at"`
-	CreatedBy     string `json:"created_by"`
-	Path          string `json:"path"`
-	SizeBytes     int64  `json:"size_bytes"`
-	Format        string `json:"format"` // "qcow2", "tar.gz"
-	Compressed    bool   `json:"compressed"`
+	ID                  string `json:"id"`
+	ContainerID         int    `json:"container_id"`
+	ContainerName       string `json:"container_name"`
+	LXCName             string `json:"lxc_name"`
+	CreatedAt           string `json:"created_at"`
+	CreatedBy           string `json:"created_by"`
+	Path                string `json:"path"`
+	SizeBytes           int64  `json:"size_bytes"`
+	Format              string `json:"format"` // "qcow2", "tar.gz"
+	Compressed          bool   `json:"compressed"`
+	RemoteSynced        bool   `json:"remote_synced,omitempty"`
+	RemoteStoragePoolID string `json:"remote_storage_pool_id,omitempty"`
+	RemotePath          string `json:"remote_path,omitempty"`
 }
 
 // Snapshot represents a lightweight COW snapshot
 type Snapshot struct {
-	ID            string `json:"id"`
-	ContainerID   int    `json:"container_id"`
-	ContainerName string `json:"container_name"`
-	LXCName       string `json:"lxc_name"`
-	CreatedAt     string `json:"created_at"`
-	CreatedBy     string `json:"created_by"`
-	Scheduled     bool   `json:"scheduled"`
-	Path          string `json:"path"`
-	SizeBytes     int64  `json:"size_bytes"`
+	ID                  string `json:"id"`
+	ContainerID         int    `json:"container_id"`
+	ContainerName       string `json:"container_name"`
+	LXCName             string `json:"lxc_name"`
+	CreatedAt           string `json:"created_at"`
+	CreatedBy           string `json:"created_by"`
+	Scheduled           bool   `json:"scheduled"`
+	Path                string `json:"path"`
+	SizeBytes           int64  `json:"size_bytes"`
+	RemoteSynced        bool   `json:"remote_synced,omitempty"`
+	RemoteStoragePoolID string `json:"remote_storage_pool_id,omitempty"`
+	RemotePath          string `json:"remote_path,omitempty"`
 }
 
 const (
@@ -773,13 +794,17 @@ const (
 )
 
 type StoragePool struct {
-	ID              string   `json:"id"`
-	Name            string   `json:"name"`
-	Path            string   `json:"path"`
-	MountPoint      string   `json:"mount_point,omitempty"`
-	ContentTypes    []string `json:"content_types"`
-	DefaultContents []string `json:"default_contents,omitempty"`
-	Enabled         bool     `json:"enabled"`
+	ID              string            `json:"id"`
+	Name            string            `json:"name"`
+	Type            string            `json:"type,omitempty"` // "local" (default), "sftp", "webdav", "minio"
+	Path            string            `json:"path"`
+	MountPoint      string            `json:"mount_point,omitempty"`
+	ContentTypes    []string          `json:"content_types"`
+	DefaultContents []string          `json:"default_contents,omitempty"`
+	Enabled         bool              `json:"enabled"`
+	SyncSnapshots   bool              `json:"sync_snapshots,omitempty"`
+	SyncBackups     bool              `json:"sync_backups,omitempty"`
+	Config          map[string]string `json:"config,omitempty"` // remote storage connection parameters
 }
 
 func defaultPrimaryStoragePool() StoragePool {
