@@ -8,6 +8,7 @@ import {
   Copy,
   Cpu,
   HardDrive,
+  HelpCircle,
   Key,
   Maximize2,
   MemoryStick,
@@ -1598,8 +1599,28 @@ export default function ContainerDetail() {
             />
             <RingStat
               value={diskPct}
-              label="磁盘"
-              subLabel={`${formatGB(usage?.disk_usage_bytes || 0)} / ${container.disk_gb} GB`}
+              label={
+                isKVM ? (
+                  <span className="inline-flex items-center gap-1 justify-center cursor-help" title="KVM 架构全虚拟化受底层强隔离保护，此处统计宿主机端物理镜像/增量层占用。若需内部实时 C 盘/根目录占用需配合 Guest Agent。">
+                    磁盘
+                    <HelpCircle className="w-3.5 h-3.5 text-gray-400" />
+                  </span>
+                ) : (
+                  '磁盘'
+                )
+              }
+              subLabel={
+                isKVM ? (
+                  <div className="flex flex-col items-center">
+                    <span>{`${formatGB(usage?.disk_usage_bytes || 0)} / ${container.disk_gb} GB`}</span>
+                    <span className="text-[10px] text-amber-600 dark:text-amber-400 mt-0.5" title="KVM架构受虚拟化隔离保护，此处为宿主机物理层占用，内部实际占用请进系统或通过Guest Agent查看">
+                      (KVM物理占用)
+                    </span>
+                  </div>
+                ) : (
+                  `${formatGB(usage?.disk_usage_bytes || 0)} / ${container.disk_gb} GB`
+                )
+              }
             />
           </div>
         </div>

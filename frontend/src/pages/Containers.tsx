@@ -6,6 +6,7 @@ import {
   Cpu,
   Eye,
   HardDrive,
+  HelpCircle,
   MemoryStick,
   Network,
   Play,
@@ -381,7 +382,13 @@ export default function Containers() {
                   <TableHead>类型</TableHead>
                   <TableHead icon><Cpu className="w-3.5 h-3.5" />CPU</TableHead>
                   <TableHead icon><MemoryStick className="w-3.5 h-3.5" />MEMORY</TableHead>
-                  <TableHead icon><HardDrive className="w-3.5 h-3.5" />DISK</TableHead>
+                  <TableHead icon title="LXC显示系统内部实际占用；KVM受强隔离保护显示宿主机物理镜像占用，内部占用需安装Guest Agent">
+                    <span className="inline-flex items-center gap-1 cursor-help">
+                      <HardDrive className="w-3.5 h-3.5" />
+                      DISK
+                      <HelpCircle className="w-3 h-3 text-gray-400" />
+                    </span>
+                  </TableHead>
                   <TableHead icon><Network className="w-3.5 h-3.5" />NET</TableHead>
                   <TableHead>配置</TableHead>
                   <TableHead>剩余时间</TableHead>
@@ -568,9 +575,9 @@ export default function Containers() {
   )
 }
 
-function TableHead({ children, right, icon }: { children: ReactNode; right?: boolean; icon?: boolean }) {
+function TableHead({ children, right, icon, title }: { children: ReactNode; right?: boolean; icon?: boolean; title?: string }) {
   return (
-    <th className={`${right ? 'text-right' : 'text-left'} px-2.5 py-2 text-[11px] font-medium text-gray-500 uppercase whitespace-nowrap`}>
+    <th title={title} className={`${right ? 'text-right' : 'text-left'} px-2.5 py-2 text-[11px] font-medium text-gray-500 uppercase whitespace-nowrap`}>
       <span className={icon ? 'inline-flex items-center gap-1' : ''}>{children}</span>
     </th>
   )

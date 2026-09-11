@@ -4,7 +4,7 @@ import { useTheme } from '../contexts/ThemeContext'
 interface RingStatProps {
   value: number
   max?: number
-  label: string
+  label: ReactNode
   subLabel?: ReactNode
   size?: number
   strokeWidth?: number
