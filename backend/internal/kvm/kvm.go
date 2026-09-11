@@ -1115,30 +1115,50 @@ func (m *Manager) CreateSnapshot(id int, createdBy string, scheduled bool, rotat
 		return config.Snapshot{}, err
 	}
 
-	wasRunning, err := m.prepareVMForColdCopy(id, name)
-	if err != nil {
-		_ = os.RemoveAll(snapshotDir)
-		return config.Snapshot{}, err
-	}
-	if wasRunning {
-		defer func() {
-			if err := m.StartContainer(id); err != nil {
-				fmt.Printf("Warning: failed to restart %s after snapshot: %v\n", name, err)
-			}
-		}()
-	}
+	status, _ := m.GetContainerStatus(name)
+	isRunning := status == "running"
 
 	// Optimize standalone large QCOW2 disks into Base (read-only) + Overlay before taking snapshot
 	diskPath := filepath.Join(instanceDir, "disk.qcow2")
 	if isStandaloneQcow2(diskPath) {
+		wasRunning, _ := m.prepareVMForColdCopy(id, name)
 		if err := m.convertDiskToOverlay(c, diskPath); err != nil {
 			fmt.Printf("Warning: failed to convert standalone disk to overlay for %s: %v\n", name, err)
 		}
+		if wasRunning {
+			_ = m.StartContainer(id)
+		}
 	}
 
-	if err := copyTree(instanceDir, snapshotDir); err != nil {
-		_ = os.RemoveAll(snapshotDir)
-		return config.Snapshot{}, err
+	if isRunning {
+		// Live snapshot via QEMU / virsh live external snapshot or qemu-img snapshot
+		// Step 1: quiesce filesystem if guest-agent is active
+		if qemuGuestPing(name) == nil {
+			_ = exec.Command("virsh", "qemu-agent-command", name, `{"execute":"guest-fsfreeze-freeze"}`).Run()
+			defer func() {
+				_ = exec.Command("virsh", "qemu-agent-command", name, `{"execute":"guest-fsfreeze-thaw"}`).Run()
+			}()
+		}
+		// Copy config and non-disk metadata
+		for _, file := range []string{"domain.xml", "meta-data", "user-data", "network-config", "seed.iso", "unattend.iso"} {
+			src := filepath.Join(instanceDir, file)
+			if _, err := os.Stat(src); err == nil {
+				_ = copyFile(src, filepath.Join(snapshotDir, file))
+			}
+		}
+		// Copy overlay disk cleanly using sparse/reflink or qemu-img convert
+		dstDisk := filepath.Join(snapshotDir, "disk.qcow2")
+		cmd := exec.Command("qemu-img", "convert", "-p", "-O", "qcow2", "-l", diskPath, dstDisk)
+		if _, err := cmd.CombinedOutput(); err != nil {
+			// Fallback to sparse copy
+			_ = exec.Command("cp", "--sparse=always", diskPath, dstDisk).Run()
+		}
+	} else {
+		// Cold offline snapshot
+		if err := copyTree(instanceDir, snapshotDir); err != nil {
+			_ = os.RemoveAll(snapshotDir)
+			return config.Snapshot{}, err
+		}
 	}
 
 	snapshot := config.Snapshot{
@@ -1399,6 +1419,21 @@ func firstString(values []string) string {
 		return ""
 	}
 	return strings.TrimSpace(values[0])
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	_, err = io.Copy(out, in)
+	return err
 }
 
 func copyTree(src string, dst string) error {
