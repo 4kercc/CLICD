@@ -119,6 +119,69 @@ func HandleStorageTest(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: "远程存储连接测试成功！"})
 }
 
+// HandleStorageSyncAll triggers a full scan and sync of all snapshots and backups to remote storage pools.
+func HandleStorageSyncAll(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
+		return
+	}
+	var req struct {
+		PoolID string `json:"pool_id"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&req)
+	}
+
+	var targetPools []config.StoragePool
+	for _, p := range config.AppConfig.StoragePools {
+		if !p.Enabled || p.Type == "local" || p.Type == "" {
+			continue
+		}
+		if req.PoolID != "" && p.ID != req.PoolID {
+			continue
+		}
+		targetPools = append(targetPools, p)
+	}
+
+	if len(targetPools) == 0 {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "未找到已启用的远程存储池，请先添加并启用 SFTP/WebDAV/MinIO 存储"})
+		return
+	}
+
+	snapCount := 0
+	backupCount := 0
+	for _, pool := range targetPools {
+		pCopy := pool
+		if pool.SyncSnapshots {
+			for _, snap := range config.AppConfig.Snapshots {
+				sCopy := snap
+				if err := remote.SyncSingleSnapshotToPool(&sCopy, &pCopy); err == nil {
+					snapCount++
+				}
+			}
+		}
+		if pool.SyncBackups {
+			for _, bkp := range config.AppConfig.Backups {
+				bCopy := bkp
+				if err := remote.SyncSingleBackupToPool(&bCopy, &pCopy); err == nil {
+					backupCount++
+				}
+			}
+		}
+	}
+
+	user := requestUser(r)
+	config.AddAuditLog("storage.sync_all", fmt.Sprintf("pools=%d", len(targetPools)), fmt.Sprintf("synced %d snapshots, %d backups", snapCount, backupCount), user)
+	jsonResponse(w, http.StatusOK, APIResponse{
+		Success: true,
+		Message: fmt.Sprintf("一键同步完成！已成功同步 %d 个快照和 %d 个全量备份至远程存储。", snapCount, backupCount),
+		Data: map[string]interface{}{
+			"snapshots_synced": snapCount,
+			"backups_synced":   backupCount,
+		},
+	})
+}
+
 func buildStorageInfo() storageInfoResponse {
 	disks := detectStorageDisks()
 	pools := make([]storagePoolInfo, 0, len(config.AppConfig.StoragePools))
