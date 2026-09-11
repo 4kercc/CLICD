@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"sort"
@@ -44,12 +45,23 @@ func handleContainerSnapshots(w http.ResponseWriter, r *http.Request, containerI
 			return
 		}
 		updateSnapshotSchedule(w, r, containerID)
-	case action == "snapshots/quota" && r.Method == http.MethodPut:
-		if !requireScope(w, r, "snapshot:schedule") {
-			return
-		}
-		updateSnapshotQuota(w, r, containerID)
-	case strings.HasPrefix(action, "snapshots/") && strings.HasSuffix(action, "/restore") && r.Method == http.MethodPost:
+		case action == "snapshots/quota" && r.Method == http.MethodPut:
+			if !requireScope(w, r, "snapshot:schedule") {
+				return
+			}
+			updateSnapshotQuota(w, r, containerID)
+		case action == "snapshots/sync-all" && r.Method == http.MethodPost:
+			if !requireScope(w, r, "snapshot:create") {
+				return
+			}
+			syncAllContainerSnapshots(w, r, containerID)
+		case strings.HasPrefix(action, "snapshots/") && strings.HasSuffix(action, "/sync") && r.Method == http.MethodPost:
+			if !requireScope(w, r, "snapshot:create") {
+				return
+			}
+			snapshotID := strings.TrimSuffix(strings.TrimPrefix(action, "snapshots/"), "/sync")
+			syncContainerSnapshot(w, r, containerID, snapshotID)
+		case strings.HasPrefix(action, "snapshots/") && strings.HasSuffix(action, "/restore") && r.Method == http.MethodPost:
 		if !requireScope(w, r, "snapshot:restore") {
 			return
 		}
@@ -227,9 +239,69 @@ func restoreContainerSnapshot(w http.ResponseWriter, r *http.Request, containerI
 		jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: err.Error()})
 		return
 	}
-	config.AddAuditLog("snapshot.restore", snapshot.ContainerName, snapshot.ID, user)
-	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: "Snapshot restored"})
-}
+		config.AddAuditLog("snapshot.restore", snapshot.ContainerName, snapshot.ID, user)
+		jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: "Snapshot restored"})
+	}
+
+	func syncContainerSnapshot(w http.ResponseWriter, r *http.Request, containerID int, snapshotID string) {
+		snapshot := config.FindSnapshot(snapshotID)
+		if snapshot == nil || snapshot.ContainerID != containerID {
+			jsonResponse(w, http.StatusNotFound, APIResponse{Success: false, Message: "Snapshot not found"})
+			return
+		}
+		var pool *config.StoragePool
+		for _, p := range config.AppConfig.StoragePools {
+			if p.Enabled && p.SyncSnapshots && p.Type != "local" && p.Type != "" {
+				pool = &p
+				break
+			}
+		}
+		if pool == nil {
+			jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "未找到已启用「同步快照」的远程存储池，请先在存储设置中添加并开启"})
+			return
+		}
+		if err := remote.SyncSingleSnapshotToPool(snapshot, pool); err != nil {
+			jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: "同步快照到远程存储失败: " + err.Error()})
+			return
+		}
+		user := requestUser(r)
+		config.AddAuditLog("snapshot.sync", snapshot.ContainerName, snapshot.ID, user)
+		jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: "快照已成功同步至远程存储", Data: snapshot})
+	}
+
+	func syncAllContainerSnapshots(w http.ResponseWriter, r *http.Request, containerID int) {
+		snapshots := config.ContainerSnapshots(containerID)
+		if len(snapshots) == 0 {
+			jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "当前容器暂无快照"})
+			return
+		}
+		var pool *config.StoragePool
+		for _, p := range config.AppConfig.StoragePools {
+			if p.Enabled && p.SyncSnapshots && p.Type != "local" && p.Type != "" {
+				pool = &p
+				break
+			}
+		}
+		if pool == nil {
+			jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "未找到已启用「同步快照」的远程存储池，请先在存储设置中添加并开启"})
+			return
+		}
+		count := 0
+		for _, s := range snapshots {
+			snapCopy := s
+			if err := remote.SyncSingleSnapshotToPool(&snapCopy, pool); err == nil {
+				count++
+			}
+		}
+		user := requestUser(r)
+		c := config.FindContainer(containerID)
+		cName := ""
+		if c != nil {
+			cName = c.Name
+		}
+		config.AddAuditLog("snapshot.sync_all", cName, strconv.Itoa(count)+" snapshots synced", user)
+		jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: fmt.Sprintf("已成功同步 %d 个快照至远程存储", count)})
+	}
 
 func requestUser(r *http.Request) string {
 	return requestActor(r)
@@ -279,12 +351,23 @@ func handleContainerBackups(w http.ResponseWriter, r *http.Request, containerID 
 			return
 		}
 		listContainerBackups(w, r, containerID)
-	case action == "backups" && r.Method == http.MethodPost:
-		if !requireScope(w, r, "snapshot:create") {
-			return
-		}
-		createContainerBackup(w, r, containerID)
-	case strings.HasPrefix(action, "backups/") && strings.HasSuffix(action, "/restore") && r.Method == http.MethodPost:
+		case action == "backups" && r.Method == http.MethodPost:
+			if !requireScope(w, r, "snapshot:create") {
+				return
+			}
+			createContainerBackup(w, r, containerID)
+		case action == "backups/sync-all" && r.Method == http.MethodPost:
+			if !requireScope(w, r, "snapshot:create") {
+				return
+			}
+			syncAllContainerBackups(w, r, containerID)
+		case strings.HasPrefix(action, "backups/") && strings.HasSuffix(action, "/sync") && r.Method == http.MethodPost:
+			if !requireScope(w, r, "snapshot:create") {
+				return
+			}
+			backupID := strings.TrimSuffix(strings.TrimPrefix(action, "backups/"), "/sync")
+			syncContainerBackup(w, r, containerID, backupID)
+		case strings.HasPrefix(action, "backups/") && strings.HasSuffix(action, "/restore") && r.Method == http.MethodPost:
 		if !requireScope(w, r, "snapshot:restore") {
 			return
 		}
@@ -367,9 +450,69 @@ func restoreContainerBackup(w http.ResponseWriter, r *http.Request, containerID 
 		jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: err.Error()})
 		return
 	}
-	config.AddAuditLog("backup.restore", backup.ContainerName, backup.ID, user)
-	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: "Backup restored"})
-}
+		config.AddAuditLog("backup.restore", backup.ContainerName, backup.ID, user)
+		jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: "Backup restored"})
+	}
+
+	func syncContainerBackup(w http.ResponseWriter, r *http.Request, containerID int, backupID string) {
+		backup := config.FindBackup(backupID)
+		if backup == nil || backup.ContainerID != containerID {
+			jsonResponse(w, http.StatusNotFound, APIResponse{Success: false, Message: "Backup not found"})
+			return
+		}
+		var pool *config.StoragePool
+		for _, p := range config.AppConfig.StoragePools {
+			if p.Enabled && p.SyncBackups && p.Type != "local" && p.Type != "" {
+				pool = &p
+				break
+			}
+		}
+		if pool == nil {
+			jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "未找到已启用「同步备份」的远程存储池，请先在存储设置中添加并开启"})
+			return
+		}
+		if err := remote.SyncSingleBackupToPool(backup, pool); err != nil {
+			jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: "同步备份到远程存储失败: " + err.Error()})
+			return
+		}
+		user := requestUser(r)
+		config.AddAuditLog("backup.sync", backup.ContainerName, backup.ID, user)
+		jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: "备份已成功同步至远程存储", Data: backup})
+	}
+
+	func syncAllContainerBackups(w http.ResponseWriter, r *http.Request, containerID int) {
+		backups := config.ContainerBackups(containerID)
+		if len(backups) == 0 {
+			jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "当前容器暂无全量备份"})
+			return
+		}
+		var pool *config.StoragePool
+		for _, p := range config.AppConfig.StoragePools {
+			if p.Enabled && p.SyncBackups && p.Type != "local" && p.Type != "" {
+				pool = &p
+				break
+			}
+		}
+		if pool == nil {
+			jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "未找到已启用「同步备份」的远程存储池，请先在存储设置中添加并开启"})
+			return
+		}
+		count := 0
+		for _, b := range backups {
+			bkpCopy := b
+			if err := remote.SyncSingleBackupToPool(&bkpCopy, pool); err == nil {
+				count++
+			}
+		}
+		user := requestUser(r)
+		c := config.FindContainer(containerID)
+		cName := ""
+		if c != nil {
+			cName = c.Name
+		}
+		config.AddAuditLog("backup.sync_all", cName, strconv.Itoa(count)+" backups synced", user)
+		jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: fmt.Sprintf("已成功同步 %d 个备份至远程存储", count)})
+	}
 
 func sortBackupsNewestFirst(backups []config.Backup) {
 	sort.SliceStable(backups, func(i, j int) bool {

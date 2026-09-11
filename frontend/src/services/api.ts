@@ -922,6 +922,12 @@ export const deleteContainerSnapshot = (id: ContainerIdentifier, snapshotId: str
 export const restoreContainerSnapshot = (id: ContainerIdentifier, snapshotId: string, options?: { source?: 'local' | 'remote' }) =>
   api.post<APIResponse>(`/containers/${id}/snapshots/${snapshotId}/restore`, options || {}, { timeout: 600000 })
 
+export const syncContainerSnapshot = (id: ContainerIdentifier, snapshotId: string) =>
+  api.post<APIResponse<Snapshot>>(`/containers/${id}/snapshots/${snapshotId}/sync`, {}, { timeout: 1800000 })
+
+export const syncAllContainerSnapshots = (id: ContainerIdentifier) =>
+  api.post<APIResponse>(`/containers/${id}/snapshots/sync-all`, {}, { timeout: 3600000 })
+
 export const updateSnapshotSchedule = (id: ContainerIdentifier, enabled: boolean, intervalHours: number, time: string) =>
   api.post<APIResponse<{ container: Container; snapshot?: Snapshot }>>(
     `/containers/${id}/snapshots/schedule`,
@@ -970,6 +976,12 @@ export const deleteContainerBackup = (id: ContainerIdentifier, backupId: string)
 
 export const restoreContainerBackup = (id: ContainerIdentifier, backupId: string, options?: { source?: 'local' | 'remote' }) =>
   api.post<APIResponse>(`/containers/${id}/backups/${backupId}/restore`, options || {}, { timeout: 1800000 })
+
+export const syncContainerBackup = (id: ContainerIdentifier, backupId: string) =>
+  api.post<APIResponse<Backup>>(`/containers/${id}/backups/${backupId}/sync`, {}, { timeout: 1800000 })
+
+export const syncAllContainerBackups = (id: ContainerIdentifier) =>
+  api.post<APIResponse>(`/containers/${id}/backups/sync-all`, {}, { timeout: 3600000 })
 
 // Disk Resize & Import
 export const resizeContainerDisk = (id: ContainerIdentifier, diskGb: number) =>
