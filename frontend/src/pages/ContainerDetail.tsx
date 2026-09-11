@@ -314,10 +314,14 @@ export default function ContainerDetail() {
 
   useEffect(() => {
     fetchContainer()
+    fetchUsage()
     // Auto-refresh container status every 5s (silent, no spinner)
-    const timer = window.setInterval(fetchContainer, 5000)
+    const timer = window.setInterval(() => {
+      fetchContainer()
+      fetchUsage()
+    }, 5000)
     return () => window.clearInterval(timer)
-  }, [fetchContainer])
+  }, [fetchContainer, fetchUsage])
 
   useEffect(() => {
     const handleFullscreenChange = () => {
@@ -1690,7 +1694,7 @@ export default function ContainerDetail() {
                   <div className="flex flex-col items-center">
                     <span>{`${formatGB(usage?.disk_usage_bytes || 0)} / ${container.disk_gb} GB`}</span>
                     {guestAgentConnected && guestAgentFS && guestAgentFS.length > 0 ? (
-                      <span className="text-[10px] text-emerald-600 dark:text-emerald-400 mt-0.5" title={guestAgentFS.map(f => `${f.mountpoint || f.name}: 已用 ${formatBytes(f.used_bytes || (f.total_bytes - f.free_bytes) || 0)} / ${formatBytes(f.total_bytes || 0)}`).join('\n')}>
+                      <span className="text-[10px] text-emerald-600 dark:text-emerald-400 mt-0.5" title={guestAgentFS.map(f => `${f.mountpoint || f.name}: 已用 ${formatBytes(f['used-bytes'] || f.used_bytes || ((f['total-bytes'] || f.total_bytes || 0) - (f['free-bytes'] || f.free_bytes || 0)) || 0)} / ${formatBytes(f['total-bytes'] || f.total_bytes || 0)}`).join('\n')}>
                         (GuestAgent 已就绪)
                       </span>
                     ) : (
