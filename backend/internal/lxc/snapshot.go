@@ -14,9 +14,24 @@ import (
 	"clicd/internal/config"
 )
 
-var snapshotMu sync.Mutex
+var (
+	snapshotMu sync.Mutex
+	lxcOpLocks sync.Map
+)
+
+func acquireLXCLock(id int) func() {
+	raw, _ := lxcOpLocks.LoadOrStore(id, &sync.Mutex{})
+	mu := raw.(*sync.Mutex)
+	mu.Lock()
+	return func() {
+		mu.Unlock()
+	}
+}
 
 func (m *Manager) CreateSnapshot(id int, createdBy string, scheduled bool, rotateLimit int, storagePoolID ...string) (config.Snapshot, error) {
+	releaseLock := acquireLXCLock(id)
+	defer releaseLock()
+
 	snapshotMu.Lock()
 	defer snapshotMu.Unlock()
 
@@ -121,13 +136,16 @@ func (m *Manager) deleteSnapshotLocked(snapshot config.Snapshot) error {
 }
 
 func (m *Manager) RestoreSnapshot(id string) error {
-	snapshotMu.Lock()
-	defer snapshotMu.Unlock()
-
 	snapshot := config.FindSnapshot(id)
 	if snapshot == nil {
 		return fmt.Errorf("snapshot not found: %s", id)
 	}
+
+	releaseLock := acquireLXCLock(snapshot.ContainerID)
+	defer releaseLock()
+
+	snapshotMu.Lock()
+	defer snapshotMu.Unlock()
 	if snapshot.Path == "" {
 		return fmt.Errorf("snapshot path is empty")
 	}

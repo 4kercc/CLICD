@@ -93,7 +93,17 @@ var (
 	windowsMetricsCache = map[string]windowsGuestMetricsSnapshot{}
 	ipv6WarnMu          sync.Mutex
 	lastIPv6GuestWarn   = map[int]time.Time{}
+	vmDiskOpLocks       sync.Map // Per-VM mutual exclusion for snapshots, backups and disk mutations
 )
+
+func acquireVMLock(id int) func() {
+	raw, _ := vmDiskOpLocks.LoadOrStore(id, &sync.Mutex{})
+	mu := raw.(*sync.Mutex)
+	mu.Lock()
+	return func() {
+		mu.Unlock()
+	}
+}
 
 func BaseDir() string {
 	if pool := config.PreferredStoragePoolForContent(config.StorageContentKVM); pool != nil {
@@ -115,6 +125,22 @@ func NewManagerForStoragePool(poolID string) *Manager {
 		}
 	}
 	return NewManager()
+}
+
+func (m *Manager) ThawAllRunningVMs() {
+	if config.AppConfig == nil {
+		return
+	}
+	for _, c := range config.AppConfig.Containers {
+		if c.IsKVM() && c.Status == "running" {
+			name := c.VirshName()
+			if qemuGuestPing(name) == nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				_ = exec.CommandContext(ctx, "virsh", "qemu-agent-command", name, `{"execute":"guest-fsfreeze-thaw"}`).Run()
+				cancel()
+			}
+		}
+	}
 }
 
 func (m *Manager) instancesDir() string {
@@ -802,16 +828,26 @@ func (m *Manager) StopContainer(id int) error {
 		config.UpdateContainerStatusAndRestore(id, "stopped", false)
 		return nil
 	}
+
+	// 1. First try graceful shutdown via ACPI/QEMU Guest Agent
 	exec.Command("virsh", "shutdown", name).Run()
-	for i := 0; i < 20; i++ {
+	// Wait up to 45 seconds for graceful shutdown (Windows update/flushing dirty blocks)
+	for i := 0; i < 45; i++ {
 		if status, _ := m.GetContainerStatus(name); status != "running" {
 			config.UpdateContainerStatusAndRestore(id, "stopped", false)
 			return nil
 		}
 		time.Sleep(1 * time.Second)
 	}
+
+	// 2. If still running, force destroy as fallback to prevent hang
 	cmd := exec.Command("virsh", "destroy", name)
 	if output, err := cmd.CombinedOutput(); err != nil {
+		// Verify if it stopped despite error
+		if st, _ := m.GetContainerStatus(name); st != "running" {
+			config.UpdateContainerStatusAndRestore(id, "stopped", false)
+			return nil
+		}
 		return fmt.Errorf("virsh destroy failed: %v, output: %s", err, string(output))
 	}
 	config.UpdateContainerStatusAndRestore(id, "stopped", false)
@@ -1068,6 +1104,9 @@ func (m *Manager) ensureDomainDefinition(c *config.Container) error {
 }
 
 func (m *Manager) CreateSnapshot(id int, createdBy string, scheduled bool, rotateLimit int, storagePoolID ...string) (config.Snapshot, error) {
+	releaseLock := acquireVMLock(id)
+	defer releaseLock()
+
 	kvmSnapshotMu.Lock()
 	defer kvmSnapshotMu.Unlock()
 
@@ -1134,16 +1173,26 @@ func (m *Manager) CreateSnapshot(id int, createdBy string, scheduled bool, rotat
 		}
 	}
 
-	if isRunning {
-		// Live snapshot via QEMU / virsh live external snapshot or qemu-img snapshot
-		// Step 1: quiesce filesystem if guest-agent is active
-		if qemuGuestPing(name) == nil {
-			_ = exec.Command("virsh", "qemu-agent-command", name, `{"execute":"guest-fsfreeze-freeze"}`).Run()
-			defer func() {
-				_ = exec.Command("virsh", "qemu-agent-command", name, `{"execute":"guest-fsfreeze-thaw"}`).Run()
-			}()
-		}
-		// Copy config and non-disk metadata
+		if isRunning {
+			// Live snapshot via QEMU / virsh live external snapshot or qemu-img snapshot
+			// Step 1: quiesce filesystem if guest-agent is active with safe timeout & thaw protection
+			frozen := false
+			if qemuGuestPing(name) == nil {
+				ctxFreeze, cancelFreeze := context.WithTimeout(context.Background(), 10*time.Second)
+				if err := exec.CommandContext(ctxFreeze, "virsh", "qemu-agent-command", name, `{"execute":"guest-fsfreeze-freeze"}`).Run(); err == nil {
+					frozen = true
+				}
+				cancelFreeze()
+			}
+			if frozen {
+				defer func() {
+					// Safe unfreeze with context timeout
+					ctxThaw, cancelThaw := context.WithTimeout(context.Background(), 10*time.Second)
+					_ = exec.CommandContext(ctxThaw, "virsh", "qemu-agent-command", name, `{"execute":"guest-fsfreeze-thaw"}`).Run()
+					cancelThaw()
+				}()
+			}
+			// Copy config and non-disk metadata
 		for _, file := range []string{"domain.xml", "meta-data", "user-data", "network-config", "seed.iso", "unattend.iso"} {
 			src := filepath.Join(instanceDir, file)
 			if _, err := os.Stat(src); err == nil {
@@ -1205,13 +1254,16 @@ func (m *Manager) deleteSnapshotLocked(snapshot config.Snapshot) error {
 }
 
 func (m *Manager) RestoreSnapshot(id string) error {
-	kvmSnapshotMu.Lock()
-	defer kvmSnapshotMu.Unlock()
-
 	snapshot := config.FindSnapshot(id)
 	if snapshot == nil {
 		return fmt.Errorf("snapshot not found: %s", id)
 	}
+
+	releaseLock := acquireVMLock(snapshot.ContainerID)
+	defer releaseLock()
+
+	kvmSnapshotMu.Lock()
+	defer kvmSnapshotMu.Unlock()
 	if snapshot.Path == "" {
 		return fmt.Errorf("snapshot path is empty")
 	}
@@ -1536,6 +1588,9 @@ func (m *Manager) convertDiskToOverlay(c *config.Container, diskPath string) err
 
 // CreateBackup creates a full compressed independent backup archive of a KVM instance
 func (m *Manager) CreateBackup(id int, createdBy string, storagePoolID ...string) (config.Backup, error) {
+	releaseLock := acquireVMLock(id)
+	defer releaseLock()
+
 	kvmSnapshotMu.Lock()
 	defer kvmSnapshotMu.Unlock()
 
@@ -1620,13 +1675,16 @@ func (m *Manager) CreateBackup(id int, createdBy string, storagePoolID ...string
 
 // RestoreBackup restores a KVM instance from a full backup
 func (m *Manager) RestoreBackup(id string) error {
-	kvmSnapshotMu.Lock()
-	defer kvmSnapshotMu.Unlock()
-
 	backup := config.FindBackup(id)
 	if backup == nil {
 		return fmt.Errorf("backup not found: %s", id)
 	}
+
+	releaseLock := acquireVMLock(backup.ContainerID)
+	defer releaseLock()
+
+	kvmSnapshotMu.Lock()
+	defer kvmSnapshotMu.Unlock()
 	if backup.Path == "" {
 		return fmt.Errorf("backup path is empty")
 	}
@@ -1693,6 +1751,9 @@ func (m *Manager) DeleteBackup(id string) error {
 
 // ResizeDisk resizes the KVM disk offline or online (via virsh blockresize + guest agent)
 func (m *Manager) ResizeDisk(id int, newSizeGB int) error {
+	releaseLock := acquireVMLock(id)
+	defer releaseLock()
+
 	c := config.FindContainer(id)
 	if c == nil {
 		return fmt.Errorf("container not found: %d", id)
@@ -1753,6 +1814,9 @@ func (m *Manager) ResizeDisk(id int, newSizeGB int) error {
 
 // ImportDiskImage imports an external QCOW2/RAW/VMDK image into a KVM instance
 func (m *Manager) ImportDiskImage(id int, srcPath string, asOverlayBase bool) error {
+	releaseLock := acquireVMLock(id)
+	defer releaseLock()
+
 	c := config.FindContainer(id)
 	if c == nil {
 		return fmt.Errorf("container not found: %d", id)

@@ -28,7 +28,17 @@ type SyncProgress struct {
 var (
 	progressMu sync.RWMutex
 	progressMap = make(map[string]*SyncProgress)
+	syncOpLocks sync.Map
 )
+
+func acquireSyncLock(id string) func() {
+	raw, _ := syncOpLocks.LoadOrStore(id, &sync.Mutex{})
+	mu := raw.(*sync.Mutex)
+	mu.Lock()
+	return func() {
+		mu.Unlock()
+	}
+}
 
 // SetProgress updates or stores the sync progress for a given ID.
 func SetProgress(p SyncProgress) {
@@ -94,6 +104,10 @@ func SyncSingleSnapshotToPool(snap *config.Snapshot, pool *config.StoragePool) e
 	if snap == nil || pool == nil {
 		return fmt.Errorf("snapshot or pool is nil")
 	}
+
+	releaseLock := acquireSyncLock(snap.ID)
+	defer releaseLock()
+
 	client, err := NewClient(pool.Type, pool.Config)
 	if err != nil {
 		return fmt.Errorf("remote storage sync client init error for %s: %w", pool.Name, err)
@@ -205,6 +219,10 @@ func SyncSingleBackupToPool(bkp *config.Backup, pool *config.StoragePool) error 
 	if bkp == nil || pool == nil {
 		return fmt.Errorf("backup or pool is nil")
 	}
+
+	releaseLock := acquireSyncLock(bkp.ID)
+	defer releaseLock()
+
 	client, err := NewClient(pool.Type, pool.Config)
 	if err != nil {
 		return fmt.Errorf("remote storage sync client init error for %s: %w", pool.Name, err)
@@ -304,6 +322,10 @@ func EnsureLocalSnapshotFromRemote(snapshot *config.Snapshot) error {
 	if snapshot == nil {
 		return fmt.Errorf("snapshot is nil")
 	}
+
+	releaseLock := acquireSyncLock(snapshot.ID)
+	defer releaseLock()
+
 	if snapshot.RemoteStoragePoolID == "" || snapshot.RemotePath == "" {
 		return fmt.Errorf("no remote storage record for snapshot %s", snapshot.ID)
 	}
@@ -364,6 +386,10 @@ func EnsureLocalBackupFromRemote(backup *config.Backup) error {
 	if backup == nil {
 		return fmt.Errorf("backup is nil")
 	}
+
+	releaseLock := acquireSyncLock(backup.ID)
+	defer releaseLock()
+
 	if backup.RemoteStoragePoolID == "" || backup.RemotePath == "" {
 		return fmt.Errorf("no remote storage record for backup %s", backup.ID)
 	}

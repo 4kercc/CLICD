@@ -74,11 +74,12 @@ func main() {
 		lxc.EnsureForwardRules("virbr0")
 		lxc.EnsureAllAssignedPublicIPv4s()
 
-		// Start expiry scanners (stops expired/over-traffic workloads every 30s)
-		manager := lxc.NewManager()
-		kvmManager := kvm.NewManager()
-		manager.StartExpiryScanner()
-		kvmManager.StartExpiryScanner()
+			// Start expiry scanners (stops expired/over-traffic workloads every 30s)
+			manager := lxc.NewManager()
+			kvmManager := kvm.NewManager()
+			go kvmManager.ThawAllRunningVMs() // Auto recover any orphaned frozen VMs from prior unclean restarts
+			manager.StartExpiryScanner()
+			kvmManager.StartExpiryScanner()
 
 		// Start usage monitors (computes CPU/network/disk rates every 5s)
 		manager.StartUsageMonitor()
