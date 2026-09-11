@@ -36,8 +36,9 @@ api.interceptors.response.use(
 )
 
 export interface LoginResponse {
-  token: string
-  username: string
+  token?: string
+  username?: string
+  requires_2fa?: boolean
 }
 
 export type ContainerIdentifier = number | string
@@ -461,8 +462,8 @@ export interface APIResponse<T = unknown> {
 }
 
 // Auth
-export const login = (username: string, password: string) =>
-  api.post<APIResponse<LoginResponse>>('/login', { username, password })
+export const login = (username: string, password: string, totpCode?: string) =>
+  api.post<APIResponse<LoginResponse>>('/login', { username, password, totp_code: totpCode })
 
 export const checkAuth = () =>
   api.get<APIResponse>('/check-auth')
@@ -1123,6 +1124,30 @@ export const getLanguage = () =>
 
 export const updateLanguage = (language: PanelLanguage) =>
   api.post<APIResponse<{ language: PanelLanguage }>>('/language', { language })
+
+// 2FA / TOTP
+export interface TOTPStatusResponse {
+  enabled: boolean
+}
+
+export interface TOTPSetupResponse {
+  secret: string
+  otpauth_url: string
+  account_name: string
+  issuer: string
+}
+
+export const getTOTPStatus = () =>
+  api.get<APIResponse<TOTPStatusResponse>>('/2fa/status')
+
+export const setupTOTP = () =>
+  api.post<APIResponse<TOTPSetupResponse>>('/2fa/setup')
+
+export const enableTOTP = (secret: string, code: string) =>
+  api.post<APIResponse>('/2fa/enable', { secret, code })
+
+export const disableTOTP = (password: string, code?: string) =>
+  api.post<APIResponse>('/2fa/disable', { password, code })
 
 // Version
 export const getVersion = () =>

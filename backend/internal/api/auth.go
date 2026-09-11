@@ -2,8 +2,15 @@ package api
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha1"
+	"encoding/base32"
+	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -16,11 +23,13 @@ import (
 type LoginRequest struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
+	TOTPCode string `json:"totp_code,omitempty"`
 }
 
 type LoginResponse struct {
-	Token    string `json:"token"`
-	Username string `json:"username"`
+	Token       string `json:"token,omitempty"`
+	Username    string `json:"username,omitempty"`
+	Requires2FA bool   `json:"requires_2fa,omitempty"`
 }
 
 type APIResponse struct {
@@ -271,6 +280,26 @@ func HandleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// If 2FA is enabled, require valid TOTP code
+	if config.AppConfig.AdminTOTPEnabled {
+		if req.TOTPCode == "" {
+			jsonResponse(w, http.StatusOK, APIResponse{
+				Success: false,
+				Message: "Two-Factor Authentication required",
+				Data: LoginResponse{
+					Requires2FA: true,
+					Username:    req.Username,
+				},
+			})
+			return
+		}
+		if !ValidateTOTP(config.AppConfig.AdminTOTPSecret, req.TOTPCode) {
+			RecordLoginLog(req.Username, ip, ua, false)
+			jsonResponse(w, http.StatusUnauthorized, APIResponse{Success: false, Message: "Invalid two-factor authentication code"})
+			return
+		}
+	}
+
 	RecordLoginLog(req.Username, ip, ua, true)
 
 	// Generate JWT token
@@ -390,3 +419,174 @@ func AdminMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		next(w, r)
 	})
 }
+
+// GenerateRandomBase32Key generates a random 16-byte base32 encoded secret key
+func GenerateRandomBase32Key() string {
+	bytes := make([]byte, 16)
+	_, _ = rand.Read(bytes)
+	return base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(bytes)
+}
+
+// GenerateTOTPCode generates a 6-digit TOTP code for a secret and timestamp counter
+func GenerateTOTPCode(secret string, counter uint64) (string, error) {
+	cleanSecret := strings.ToUpper(strings.TrimSpace(secret))
+	key, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(cleanSecret)
+	if err != nil {
+		// Fallback with std padding if needed
+		key, err = base32.StdEncoding.DecodeString(cleanSecret)
+		if err != nil {
+			return "", err
+		}
+	}
+
+	buf := make([]byte, 8)
+	binary.BigEndian.PutUint64(buf, counter)
+
+	mac := hmac.New(sha1.New, key)
+	mac.Write(buf)
+	h := mac.Sum(nil)
+
+	offset := h[len(h)-1] & 0x0f
+	code := (int(h[offset]&0x7f) << 24) |
+		(int(h[offset+1]&0xff) << 16) |
+		(int(h[offset+2]&0xff) << 8) |
+		int(h[offset+3]&0xff)
+
+	otp := code % 1000000
+	return fmt.Sprintf("%06d", otp), nil
+}
+
+// ValidateTOTP verifies a 6-digit TOTP code against a secret allowing clock skew (-1, 0, +1 interval)
+func ValidateTOTP(secret string, code string) bool {
+	code = strings.TrimSpace(code)
+	if len(code) != 6 || secret == "" {
+		return false
+	}
+
+	t := time.Now().Unix() / 30
+	for _, offset := range []int64{-1, 0, 1} {
+		expected, err := GenerateTOTPCode(secret, uint64(t+offset))
+		if err == nil && expected == code {
+			return true
+		}
+	}
+	return false
+}
+
+// HandleTOTPStatus returns the current 2FA status
+func HandleTOTPStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, APIResponse{
+		Success: true,
+		Data: map[string]interface{}{
+			"enabled": config.AppConfig.AdminTOTPEnabled,
+		},
+	})
+}
+
+// HandleTOTPSetup generates a new TOTP secret and QR uri
+func HandleTOTPSetup(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
+		return
+	}
+
+	secret := GenerateRandomBase32Key()
+	issuer := "CLICD"
+	user := config.AppConfig.AdminUser
+	if user == "" {
+		user = "admin"
+	}
+	otpauthURL := fmt.Sprintf("otpauth://totp/%s:%s?secret=%s&issuer=%s&algorithm=SHA1&digits=6&period=30",
+		url.PathEscape(issuer), url.PathEscape(user), secret, url.QueryEscape(issuer))
+
+	jsonResponse(w, http.StatusOK, APIResponse{
+		Success: true,
+		Data: map[string]interface{}{
+			"secret":       secret,
+			"otpauth_url":  otpauthURL,
+			"account_name": user,
+			"issuer":       issuer,
+		},
+	})
+}
+
+// HandleTOTPEnable verifies a setup code and enables 2FA
+func HandleTOTPEnable(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
+		return
+	}
+
+	var req struct {
+		Secret string `json:"secret"`
+		Code   string `json:"code"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Invalid request body"})
+		return
+	}
+
+	if !ValidateTOTP(req.Secret, req.Code) {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Invalid verification code. Please check your authenticator app time."})
+		return
+	}
+
+	config.AppConfig.AdminTOTPSecret = req.Secret
+	config.AppConfig.AdminTOTPEnabled = true
+	if err := config.SaveConfig(); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: "Failed to save configuration"})
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, APIResponse{
+		Success: true,
+		Message: "Two-factor authentication enabled successfully",
+	})
+}
+
+// HandleTOTPDisable disables 2FA with password/code confirmation
+func HandleTOTPDisable(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
+		return
+	}
+
+	var req struct {
+		Password string `json:"password"`
+		Code     string `json:"code"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Invalid request body"})
+		return
+	}
+
+	// Verify admin password
+	if err := bcrypt.CompareHashAndPassword([]byte(config.AppConfig.AdminPassHash), []byte(req.Password)); err != nil {
+		jsonResponse(w, http.StatusUnauthorized, APIResponse{Success: false, Message: "Invalid administrator password"})
+		return
+	}
+
+	// If code is provided, verify it too
+	if req.Code != "" && !ValidateTOTP(config.AppConfig.AdminTOTPSecret, req.Code) {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Invalid two-factor authentication code"})
+		return
+	}
+
+	config.AppConfig.AdminTOTPSecret = ""
+	config.AppConfig.AdminTOTPEnabled = false
+	if err := config.SaveConfig(); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: "Failed to save configuration"})
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, APIResponse{
+		Success: true,
+		Message: "Two-factor authentication disabled successfully",
+	})
+}
+

@@ -1,5 +1,5 @@
 import { FormEvent, useState } from 'react'
-import { Lock, User } from 'lucide-react'
+import { KeyRound, Lock, ShieldCheck, User } from 'lucide-react'
 import AppIcon from '../components/AppIcon'
 import { useAuth } from '../contexts/AuthContext'
 import { useLanguage } from '../contexts/LanguageContext'
@@ -19,6 +19,8 @@ export default function Login() {
   const { language, toggleLanguage, t } = useLanguage()
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
+  const [totpCode, setTotpCode] = useState('')
+  const [requires2FA, setRequires2FA] = useState(false)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
 
@@ -37,12 +39,17 @@ export default function Login() {
       if (isAccessCodeLogin) {
         await accessCodeLogin(accessCode, password)
       } else {
-        await login(username, password)
+        const res = await login(username, password, requires2FA ? totpCode : undefined)
+        if (res?.requires2FA) {
+          setRequires2FA(true)
+          setLoading(false)
+          return
+        }
       }
     } catch (err: unknown) {
       const error = err as { response?: { status?: number; data?: { message?: string } } }
       if (error.response?.status === 401) {
-        setError(t(isAccessCodeLogin ? '访问码或密码错误' : '用户名或密码错误'))
+        setError(error.response?.data?.message || t(isAccessCodeLogin ? '访问码或密码错误' : '用户名或密码错误'))
       } else {
         setError(error.response?.data?.message || t('登录失败，请检查用户名和密码'))
       }
@@ -93,7 +100,8 @@ export default function Login() {
                       type="text"
                       value={username}
                       onChange={(event) => setUsername(event.target.value)}
-                      className="block w-full pl-10 pr-3 py-2.5 border border-gray-300 rounded-md text-black bg-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-black focus:border-black text-sm"
+                      disabled={requires2FA}
+                      className="block w-full pl-10 pr-3 py-2.5 border border-gray-300 rounded-md text-black bg-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-black focus:border-black text-sm disabled:bg-gray-100"
                       placeholder={t('输入用户名')}
                       required
                       autoComplete="username"
@@ -114,7 +122,8 @@ export default function Login() {
                   type="password"
                   value={password}
                   onChange={(event) => setPassword(event.target.value)}
-                  className="block w-full pl-10 pr-3 py-2.5 border border-gray-300 rounded-md text-black bg-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-black focus:border-black text-sm"
+                  disabled={requires2FA}
+                  className="block w-full pl-10 pr-3 py-2.5 border border-gray-300 rounded-md text-black bg-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-black focus:border-black text-sm disabled:bg-gray-100"
                   placeholder={t('输入密码')}
                   required
                   autoComplete="current-password"
@@ -122,12 +131,53 @@ export default function Login() {
               </div>
             </div>
 
+            {requires2FA && (
+              <div className="rounded-lg border border-blue-200 bg-blue-50/50 p-4 space-y-3">
+                <div className="flex items-center gap-2 text-sm font-medium text-blue-900">
+                  <ShieldCheck className="h-4 w-4 text-blue-600" />
+                  {t('双因素认证 (2FA)')}
+                </div>
+                <p className="text-xs text-blue-700 leading-relaxed">
+                  {t('请输入身份验证器（Authenticator）应用中显示的 6 位动态验证码')}
+                </p>
+                <div>
+                  <div className="relative">
+                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                      <KeyRound className="h-4 w-4 text-gray-400" />
+                    </div>
+                    <input
+                      type="text"
+                      maxLength={6}
+                      autoFocus
+                      value={totpCode}
+                      onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, ''))}
+                      className="block w-full pl-10 pr-3 py-2.5 border border-blue-300 rounded-md text-black bg-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-blue-600 text-sm font-mono tracking-widest text-center"
+                      placeholder="000000"
+                      required
+                    />
+                  </div>
+                </div>
+                <div className="text-right">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setRequires2FA(false)
+                      setTotpCode('')
+                    }}
+                    className="text-xs text-gray-500 hover:text-black underline"
+                  >
+                    {t('返回重新输入密码')}
+                  </button>
+                </div>
+              </div>
+            )}
+
             <button
               type="submit"
-              disabled={loading}
+              disabled={loading || (requires2FA && totpCode.length !== 6)}
               className="w-full bg-black text-white py-2.5 rounded-md hover:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-black focus:ring-offset-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium"
             >
-              {loading ? t('登录中...') : t('登录')}
+              {loading ? t('登录中...') : (requires2FA ? t('验证并登录') : t('登录'))}
             </button>
           </form>
         </div>
