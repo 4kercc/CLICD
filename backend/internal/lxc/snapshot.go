@@ -32,14 +32,14 @@ func (m *Manager) CreateSnapshot(id int, createdBy string, scheduled bool, rotat
 	releaseLock := acquireLXCLock(id)
 	defer releaseLock()
 
-	snapshotMu.Lock()
-	defer snapshotMu.Unlock()
-
 	c := config.FindContainer(id)
 	if c == nil {
 		return config.Snapshot{}, fmt.Errorf("container not found: %d", id)
 	}
 	if scheduled && rotateLimit > 0 {
+		// Global lock only for rotation (shared snapshot-list mutation), never
+		// across the long rootfs copy below.
+		snapshotMu.Lock()
 		for {
 			existing := config.ContainerSnapshots(id)
 			if len(existing) < rotateLimit {
@@ -47,9 +47,11 @@ func (m *Manager) CreateSnapshot(id int, createdBy string, scheduled bool, rotat
 			}
 			sortSnapshotsOldestFirst(existing)
 			if err := m.deleteSnapshotLocked(existing[0]); err != nil {
+				snapshotMu.Unlock()
 				return config.Snapshot{}, err
 			}
 		}
+		snapshotMu.Unlock()
 	}
 
 	lxcName := c.LxcName()
@@ -107,18 +109,23 @@ func (m *Manager) CreateSnapshot(id int, createdBy string, scheduled bool, rotat
 		Path:          snapshotDir,
 		SizeBytes:     dirSizeBytes(snapshotDir),
 	}
+	snapshotMu.Lock()
 	config.AddSnapshot(snapshot)
+	snapshotMu.Unlock()
 	return snapshot, nil
 }
 
 func (m *Manager) DeleteSnapshot(id string) error {
-	snapshotMu.Lock()
-	defer snapshotMu.Unlock()
-
 	snapshot := config.FindSnapshot(id)
 	if snapshot == nil {
 		return fmt.Errorf("snapshot not found: %s", id)
 	}
+
+	releaseLock := acquireLXCLock(snapshot.ContainerID)
+	defer releaseLock()
+
+	snapshotMu.Lock()
+	defer snapshotMu.Unlock()
 	return m.deleteSnapshotLocked(*snapshot)
 }
 
@@ -144,8 +151,6 @@ func (m *Manager) RestoreSnapshot(id string) error {
 	releaseLock := acquireLXCLock(snapshot.ContainerID)
 	defer releaseLock()
 
-	snapshotMu.Lock()
-	defer snapshotMu.Unlock()
 	if snapshot.Path == "" {
 		return fmt.Errorf("snapshot path is empty")
 	}
