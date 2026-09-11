@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"clicd/internal/config"
 	"clicd/internal/lxc"
@@ -424,6 +425,24 @@ func updateExpiry(w http.ResponseWriter, r *http.Request, id int) {
 	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: "Expiry updated"})
 }
 
+// validateDisplayName bounds user-editable labels (container name, template tag):
+// non-empty, at most 64 runes, no control characters.
+func validateDisplayName(value string) error {
+	if value == "" {
+		return fmt.Errorf("value cannot be empty")
+	}
+	runes := []rune(value)
+	if len(runes) > 64 {
+		return fmt.Errorf("value is too long (max 64 characters)")
+	}
+	for _, r := range runes {
+		if unicode.IsControl(r) {
+			return fmt.Errorf("value contains invalid control characters")
+		}
+	}
+	return nil
+}
+
 func updateContainerName(w http.ResponseWriter, r *http.Request, id int) {
 	var req struct {
 		Name string `json:"name"`
@@ -433,8 +452,8 @@ func updateContainerName(w http.ResponseWriter, r *http.Request, id int) {
 		return
 	}
 	name := strings.TrimSpace(req.Name)
-	if name == "" {
-		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Name cannot be empty"})
+	if err := validateDisplayName(name); err != nil {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: err.Error()})
 		return
 	}
 	c := config.FindContainer(id)
@@ -458,8 +477,8 @@ func updateContainerTemplate(w http.ResponseWriter, r *http.Request, id int) {
 		return
 	}
 	template := strings.TrimSpace(req.Template)
-	if template == "" {
-		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Template cannot be empty"})
+	if err := validateDisplayName(template); err != nil {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: err.Error()})
 		return
 	}
 	c := config.FindContainer(id)
@@ -711,6 +730,12 @@ func handleResizeDisk(w http.ResponseWriter, r *http.Request, id int) {
 }
 
 func handleImportDisk(w http.ResponseWriter, r *http.Request, id int) {
+	// Security: importing reads an arbitrary host file into a VM disk, which would
+	// let a sub-user exfiltrate host files they don't own. Admin only.
+	if isSubUserRequest(r) {
+		jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "Administrator permission required for disk import"})
+		return
+	}
 	var req struct {
 		SourcePath    string `json:"source_path"`
 		AsOverlayBase bool   `json:"as_overlay_base"`

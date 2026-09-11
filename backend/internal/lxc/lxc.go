@@ -2215,16 +2215,20 @@ func (m *Manager) getContainerVethByNS(lxcName string) string {
 	if pid == "" {
 		return ""
 	}
-	cmd := exec.Command("sh", "-c",
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	cmd := exec.CommandContext(ctx, "sh", "-c",
 		fmt.Sprintf("nsenter -t %s -n ip -o link show 2>/dev/null | grep -oP 'eth0@if\\K[0-9]+'", pid))
 	out, _ := cmd.Output()
+	cancel()
 	ifIdx := strings.TrimSpace(string(out))
 	if ifIdx == "" {
 		return ""
 	}
-	cmd2 := exec.Command("sh", "-c",
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+	cmd2 := exec.CommandContext(ctx2, "sh", "-c",
 		fmt.Sprintf("ip -o link show | grep '^%s:' | grep -oP 'veth[^:@]+'", ifIdx))
 	out2, _ := cmd2.Output()
+	cancel2()
 	return strings.TrimSpace(string(out2))
 }
 
@@ -3737,12 +3741,19 @@ func (m *Manager) getContainerDiskIOBytes(lxcName string) (uint64, uint64) {
 }
 
 func (m *Manager) getContainerInitPID(lxcName string) string {
-	cmd := exec.Command("lxc-info", "-n", lxcName, "-pH")
-	out, err := cmd.Output()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "lxc-info", "-n", lxcName, "-pH").Output()
 	if err != nil {
 		return ""
 	}
-	return strings.TrimSpace(string(out))
+	pid := strings.TrimSpace(string(out))
+	// Defensive: the PID is interpolated into root shell commands downstream,
+	// so only accept pure numeric output.
+	if _, err := strconv.Atoi(pid); err != nil {
+		return ""
+	}
+	return pid
 }
 
 // readCgroupFile tries each path template in order, reads the file directly (no shell),

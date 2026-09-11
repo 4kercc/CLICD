@@ -105,6 +105,22 @@ func acquireVMLock(id int) func() {
 	}
 }
 
+// virshCombinedOutput runs virsh with a hard timeout so a wedged libvirtd cannot
+// hang API handlers or background monitors forever.
+func virshCombinedOutput(timeout time.Duration, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "virsh", args...).CombinedOutput()
+	return string(out), err
+}
+
+// virshOutput runs virsh capturing stdout with a hard timeout.
+func virshOutput(timeout time.Duration, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return exec.CommandContext(ctx, "virsh", args...).Output()
+}
+
 func BaseDir() string {
 	if pool := config.PreferredStoragePoolForContent(config.StorageContentKVM); pool != nil {
 		return filepath.Join(pool.Path, "kvm")
@@ -1107,9 +1123,6 @@ func (m *Manager) CreateSnapshot(id int, createdBy string, scheduled bool, rotat
 	releaseLock := acquireVMLock(id)
 	defer releaseLock()
 
-	kvmSnapshotMu.Lock()
-	defer kvmSnapshotMu.Unlock()
-
 	c := config.FindContainer(id)
 	if c == nil {
 		return config.Snapshot{}, fmt.Errorf("container not found: %d", id)
@@ -1118,6 +1131,9 @@ func (m *Manager) CreateSnapshot(id int, createdBy string, scheduled bool, rotat
 		return config.Snapshot{}, fmt.Errorf("container is not a KVM VM: %d", id)
 	}
 	if scheduled && rotateLimit > 0 {
+		// Global lock is held ONLY for rotation (shared snapshot-list mutation + deletes),
+		// never across the long disk copy below, so unrelated VMs don't serialize.
+		kvmSnapshotMu.Lock()
 		for {
 			existing := config.ContainerSnapshots(id)
 			if len(existing) < rotateLimit {
@@ -1125,9 +1141,11 @@ func (m *Manager) CreateSnapshot(id int, createdBy string, scheduled bool, rotat
 			}
 			sortSnapshotsOldestFirst(existing)
 			if err := m.deleteSnapshotLocked(existing[0]); err != nil {
+				kvmSnapshotMu.Unlock()
 				return config.Snapshot{}, err
 			}
 		}
+		kvmSnapshotMu.Unlock()
 	}
 
 	name := c.VirshName()
@@ -1173,35 +1191,59 @@ func (m *Manager) CreateSnapshot(id int, createdBy string, scheduled bool, rotat
 		}
 	}
 
-		if isRunning {
-			// Live snapshot via QEMU / virsh live external snapshot or qemu-img snapshot
-			// Step 1: quiesce filesystem if guest-agent is active with safe timeout & thaw protection
-			frozen := false
-			if qemuGuestPing(name) == nil {
-				ctxFreeze, cancelFreeze := context.WithTimeout(context.Background(), 10*time.Second)
-				if err := exec.CommandContext(ctxFreeze, "virsh", "qemu-agent-command", name, `{"execute":"guest-fsfreeze-freeze"}`).Run(); err == nil {
-					frozen = true
-				}
-				cancelFreeze()
+	if isRunning {
+		// Live snapshot: keep the source image quiet while copying so the snapshot
+		// can never be a torn image.
+		//  - With Guest Agent: fsfreeze the whole copy window (application-consistent).
+		//  - Without agent: take an external disk snapshot (atomic) so the original
+		//    file becomes a quiet read-only backing, copy it, then active-blockcommit
+		//    the delta back. Falls back to a plain copy (crash-consistent at best).
+		frozen := false
+		if qemuGuestPing(name) == nil {
+			if _, err := virshCombinedOutput(10*time.Second, "qemu-agent-command", name, `{"execute":"guest-fsfreeze-freeze"}`); err == nil {
+				frozen = true
 			}
-			if frozen {
+		}
+		if frozen {
+			defer func() {
+				_, _ = virshCombinedOutput(10*time.Second, "qemu-agent-command", name, `{"execute":"guest-fsfreeze-thaw"}`)
+			}()
+		}
+
+		externalOverlay := ""
+		if !frozen {
+			overlayPath := filepath.Join(instanceDir, fmt.Sprintf(".%s-livesnap-%d.qcow2", name, now.UnixNano()))
+			dev := kvmDiskTargetDev(c)
+			snapName := fmt.Sprintf("clicd-tmp-%d", now.UnixNano())
+			diskspec := fmt.Sprintf("%s,snapshot=external,file=%s", dev, overlayPath)
+			if _, err := virshCombinedOutput(30*time.Second, "snapshot-create-as", name, snapName, "--disk-only", "--atomic", "--no-metadata", "--diskspec", diskspec); err == nil {
+				externalOverlay = overlayPath
+			} else {
+				fmt.Printf("Warning: external disk snapshot failed for %s, falling back to direct copy (crash-consistent only): %v\n", name, err)
+			}
+			if externalOverlay != "" {
 				defer func() {
-					// Safe unfreeze with context timeout
-					ctxThaw, cancelThaw := context.WithTimeout(context.Background(), 10*time.Second)
-					_ = exec.CommandContext(ctxThaw, "virsh", "qemu-agent-command", name, `{"execute":"guest-fsfreeze-thaw"}`).Run()
-					cancelThaw()
+					// Merge the live delta back into the original disk and pivot.
+					if _, err := virshCombinedOutput(120*time.Second, "blockcommit", name, dev, "--active", "--pivot"); err != nil {
+						fmt.Printf("Warning: blockcommit pivot failed for %s (VM keeps writing into %s; run 'virsh blockjob %s %s --abort' if needed): %v\n", name, externalOverlay, name, dev, err)
+						_, _ = virshCombinedOutput(30*time.Second, "blockjob", name, dev, "--abort")
+						return
+					}
+					_ = os.Remove(externalOverlay)
 				}()
 			}
-			// Copy config and non-disk metadata
+		}
+
+		// Copy config and non-disk metadata
 		for _, file := range []string{"domain.xml", "meta-data", "user-data", "network-config", "seed.iso", "unattend.iso"} {
 			src := filepath.Join(instanceDir, file)
 			if _, err := os.Stat(src); err == nil {
 				_ = copyFile(src, filepath.Join(snapshotDir, file))
 			}
 		}
-		// Copy overlay disk cleanly using sparse/reflink or qemu-img convert
+		// Copy the disk: -U shares the QEMU lock so convert works on live images
 		dstDisk := filepath.Join(snapshotDir, "disk.qcow2")
-		cmd := exec.Command("qemu-img", "convert", "-p", "-O", "qcow2", "-l", diskPath, dstDisk)
+		cmd := exec.Command("qemu-img", "convert", "-p", "-U", "-O", "qcow2", diskPath, dstDisk)
 		if _, err := cmd.CombinedOutput(); err != nil {
 			// Fallback to sparse copy
 			_ = exec.Command("cp", "--sparse=always", diskPath, dstDisk).Run()
@@ -1225,18 +1267,41 @@ func (m *Manager) CreateSnapshot(id int, createdBy string, scheduled bool, rotat
 		Path:          snapshotDir,
 		SizeBytes:     dirSizeBytes(snapshotDir),
 	}
+	kvmSnapshotMu.Lock()
 	config.AddSnapshot(snapshot)
+	kvmSnapshotMu.Unlock()
 	return snapshot, nil
 }
 
-func (m *Manager) DeleteSnapshot(id string) error {
-	kvmSnapshotMu.Lock()
-	defer kvmSnapshotMu.Unlock()
+// kvmDiskTargetDev maps the VM's disk bus to the guest-visible block device name
+// used by virsh blockcommit/blockjob.
+func kvmDiskTargetDev(c *config.Container) string {
+	bus := strings.ToLower(strings.TrimSpace(c.DiskBus))
+	switch bus {
+	case "sata", "scsi":
+		return "sda"
+	case "ide":
+		return "hda"
+	case "virtio":
+		return "vda"
+	}
+	if IsWindowsImage(c.Template) {
+		return "sda"
+	}
+	return "vda"
+}
 
+func (m *Manager) DeleteSnapshot(id string) error {
 	snapshot := config.FindSnapshot(id)
 	if snapshot == nil {
 		return fmt.Errorf("snapshot not found: %s", id)
 	}
+
+	releaseLock := acquireVMLock(snapshot.ContainerID)
+	defer releaseLock()
+
+	kvmSnapshotMu.Lock()
+	defer kvmSnapshotMu.Unlock()
 	return m.deleteSnapshotLocked(*snapshot)
 }
 
@@ -1262,8 +1327,6 @@ func (m *Manager) RestoreSnapshot(id string) error {
 	releaseLock := acquireVMLock(snapshot.ContainerID)
 	defer releaseLock()
 
-	kvmSnapshotMu.Lock()
-	defer kvmSnapshotMu.Unlock()
 	if snapshot.Path == "" {
 		return fmt.Errorf("snapshot path is empty")
 	}
@@ -1591,9 +1654,6 @@ func (m *Manager) CreateBackup(id int, createdBy string, storagePoolID ...string
 	releaseLock := acquireVMLock(id)
 	defer releaseLock()
 
-	kvmSnapshotMu.Lock()
-	defer kvmSnapshotMu.Unlock()
-
 	c := config.FindContainer(id)
 	if c == nil {
 		return config.Backup{}, fmt.Errorf("container not found: %d", id)
@@ -1669,7 +1729,9 @@ func (m *Manager) CreateBackup(id int, createdBy string, storagePoolID ...string
 		Format:        "qcow2",
 		Compressed:    true,
 	}
+	kvmSnapshotMu.Lock()
 	config.AddBackup(backup)
+	kvmSnapshotMu.Unlock()
 	return backup, nil
 }
 
@@ -1683,8 +1745,6 @@ func (m *Manager) RestoreBackup(id string) error {
 	releaseLock := acquireVMLock(backup.ContainerID)
 	defer releaseLock()
 
-	kvmSnapshotMu.Lock()
-	defer kvmSnapshotMu.Unlock()
 	if backup.Path == "" {
 		return fmt.Errorf("backup path is empty")
 	}
@@ -1735,13 +1795,16 @@ func (m *Manager) RestoreBackup(id string) error {
 
 // DeleteBackup removes a backup record and files
 func (m *Manager) DeleteBackup(id string) error {
-	kvmSnapshotMu.Lock()
-	defer kvmSnapshotMu.Unlock()
-
 	backup := config.FindBackup(id)
 	if backup == nil {
 		return fmt.Errorf("backup not found: %s", id)
 	}
+
+	releaseLock := acquireVMLock(backup.ContainerID)
+	defer releaseLock()
+
+	kvmSnapshotMu.Lock()
+	defer kvmSnapshotMu.Unlock()
 	if backup.Path != "" {
 		_ = os.RemoveAll(backup.Path)
 	}
@@ -1827,6 +1890,9 @@ func (m *Manager) ImportDiskImage(id int, srcPath string, asOverlayBase bool) er
 	if _, err := os.Stat(srcPath); err != nil {
 		return fmt.Errorf("source disk image not found: %v", err)
 	}
+	if err := validateImportSourcePath(srcPath); err != nil {
+		return err
+	}
 
 	instanceDir := m.instanceDir(c.VirshName())
 	_ = os.MkdirAll(instanceDir, 0755)
@@ -1865,6 +1931,40 @@ func (m *Manager) ImportDiskImage(id int, srcPath string, asOverlayBase bool) er
 	c.DiskImage = dstDisk
 	c.StoragePath = instanceDir
 	return config.SaveConfig()
+}
+
+// validateImportSourcePath restricts disk import sources to storage-pool / image-cache
+// directories, preventing arbitrary host file reads (e.g. /etc/shadow) through the API.
+func validateImportSourcePath(srcPath string) error {
+	clean := filepath.Clean(srcPath)
+	if resolved, err := filepath.EvalSymlinks(clean); err == nil {
+		clean = resolved
+	}
+	abs, err := filepath.Abs(clean)
+	if err != nil {
+		return fmt.Errorf("failed to resolve source path: %v", err)
+	}
+	bases := []string{BaseDir(), CacheDir()}
+	if config.AppConfig != nil {
+		if config.AppConfig.DataDir != "" {
+			bases = append(bases, config.AppConfig.DataDir)
+		}
+		for _, pool := range config.AppConfig.StoragePools {
+			if strings.TrimSpace(pool.Path) != "" {
+				bases = append(bases, pool.Path)
+			}
+		}
+	}
+	for _, base := range bases {
+		baseAbs, err := filepath.Abs(base)
+		if err != nil || baseAbs == "" {
+			continue
+		}
+		if abs != baseAbs && strings.HasPrefix(abs, baseAbs+string(os.PathSeparator)) {
+			return nil
+		}
+	}
+	return fmt.Errorf("source image must be located under a configured storage pool, the KVM data directory or the image cache (refusing %s)", srcPath)
 }
 
 func (m *Manager) GetResourceUsage(id int) (map[string]interface{}, error) {
@@ -2110,8 +2210,7 @@ func shouldApplyPortMappings(id int, force bool) bool {
 }
 
 func (m *Manager) GetContainerStatus(name string) (string, error) {
-	cmd := exec.Command("virsh", "domstate", name)
-	out, err := cmd.Output()
+	out, err := virshOutput(5*time.Second, "domstate", name)
 	if err != nil {
 		return "", err
 	}
@@ -2127,8 +2226,7 @@ func (m *Manager) GetContainerStatus(name string) (string, error) {
 
 func (m *Manager) GetContainerIP(name string) (string, error) {
 	for _, source := range []string{"lease", "arp", "agent"} {
-		cmd := exec.Command("virsh", "domifaddr", name, "--source", source)
-		out, err := cmd.Output()
+		out, err := virshOutput(8*time.Second, "domifaddr", name, "--source", source)
 		if err != nil {
 			continue
 		}
@@ -3596,9 +3694,9 @@ fi
 }
 
 func qemuGuestPing(name string) error {
-	out, err := exec.Command("virsh", "qemu-agent-command", name, `{"execute":"guest-ping"}`).CombinedOutput()
+	out, err := virshCombinedOutput(5*time.Second, "qemu-agent-command", name, `{"execute":"guest-ping"}`)
 	if err != nil {
-		msg := strings.TrimSpace(string(out))
+		msg := strings.TrimSpace(out)
 		if strings.Contains(msg, "guest agent is not configured") || strings.Contains(msg, "QEMU guest agent is not configured") || strings.Contains(msg, "argument unsupported") {
 			return fmt.Errorf("QEMU guest agent is not active for %s; restart the VM once to attach the agent channel, or reinstall if the image was created before KVM SSH initialization support", name)
 		}
@@ -3629,24 +3727,31 @@ func qemuGuestExecCommandOutput(name string, path string, args []string, timeout
 	if err != nil {
 		return "", "", err
 	}
-	out, err := exec.Command("virsh", "qemu-agent-command", name, string(payload)).CombinedOutput()
+	out, err := virshCombinedOutput(30*time.Second, "qemu-agent-command", name, string(payload))
 	if err != nil {
-		return "", "", fmt.Errorf("guest-exec failed: %v, output: %s", err, string(out))
+		return "", "", fmt.Errorf("guest-exec failed: %v, output: %s", err, out)
 	}
 	var started struct {
 		Return struct {
 			PID int `json:"pid"`
 		} `json:"return"`
 	}
-	if err := json.Unmarshal(out, &started); err != nil || started.Return.PID <= 0 {
-		return "", "", fmt.Errorf("guest-exec returned invalid response: %s", string(out))
+	if err := json.Unmarshal([]byte(out), &started); err != nil || started.Return.PID <= 0 {
+		return "", "", fmt.Errorf("guest-exec returned invalid response: %s", out)
 	}
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		statusReq := fmt.Sprintf(`{"execute":"guest-exec-status","arguments":{"pid":%d}}`, started.Return.PID)
-		statusOut, err := exec.Command("virsh", "qemu-agent-command", name, statusReq).CombinedOutput()
+		remaining := time.Until(deadline)
+		if remaining > 30*time.Second {
+			remaining = 30 * time.Second
+		}
+		if remaining < time.Second {
+			remaining = time.Second
+		}
+		statusOut, err := virshCombinedOutput(remaining, "qemu-agent-command", name, statusReq)
 		if err != nil {
-			return "", "", fmt.Errorf("guest-exec-status failed: %v, output: %s", err, string(statusOut))
+			return "", "", fmt.Errorf("guest-exec-status failed: %v, output: %s", err, statusOut)
 		}
 		var status struct {
 			Return struct {
@@ -3656,8 +3761,8 @@ func qemuGuestExecCommandOutput(name string, path string, args []string, timeout
 				ErrData  string `json:"err-data"`
 			} `json:"return"`
 		}
-		if err := json.Unmarshal(statusOut, &status); err != nil {
-			return "", "", fmt.Errorf("guest-exec-status returned invalid response: %s", string(statusOut))
+		if err := json.Unmarshal([]byte(statusOut), &status); err != nil {
+			return "", "", fmt.Errorf("guest-exec-status returned invalid response: %s", statusOut)
 		}
 		if !status.Return.Exited {
 			time.Sleep(3 * time.Second)
@@ -3812,7 +3917,7 @@ func (m *Manager) updateAllRates() {
 }
 
 func virshDomstatsCounters(name string) (uint64, uint64, uint64) {
-	out, err := exec.Command("virsh", "domstats", name, "--cpu-total", "--block").Output()
+	out, err := virshOutput(5*time.Second, "domstats", name, "--cpu-total", "--block")
 	if err != nil {
 		return 0, 0, 0
 	}
@@ -3841,7 +3946,7 @@ func virshInterfaceBytes(name string, mac string) (uint64, uint64) {
 	if iface == "" {
 		return 0, 0
 	}
-	out, err := exec.Command("virsh", "domifstat", name, iface).Output()
+	out, err := virshOutput(5*time.Second, "domifstat", name, iface)
 	if err != nil {
 		return 0, 0
 	}
@@ -3869,7 +3974,7 @@ func virshInterfaceBytes(name string, mac string) (uint64, uint64) {
 }
 
 func virshInterfaceName(name string, mac string) string {
-	out, err := exec.Command("virsh", "domiflist", name).Output()
+	out, err := virshOutput(5*time.Second, "domiflist", name)
 	if err != nil {
 		return ""
 	}
