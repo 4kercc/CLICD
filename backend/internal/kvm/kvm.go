@@ -2205,6 +2205,66 @@ func createOverlayDisk(base, target string, diskGB int) error {
 	return nil
 }
 
+func (m *Manager) MountVirtioISO(id int, mount bool) error {
+	c := config.FindContainer(id)
+	if c == nil {
+		return fmt.Errorf("container not found: %d", id)
+	}
+	if !c.IsKVM() {
+		return fmt.Errorf("instance is not KVM: %d", id)
+	}
+	name := c.VirshName()
+	if mount {
+		if err := ensureVirtioWinISO(); err != nil {
+			return err
+		}
+		virtioPath := virtioWinISOPath()
+		// Try eject first, then insert into hdc or hdb
+		_ = exec.Command("virsh", "change-media", name, "hdc", "--eject", "--config", "--live").Run()
+		_ = exec.Command("virsh", "change-media", name, "hdc", "--eject").Run()
+		cmd := exec.Command("virsh", "change-media", name, "hdc", virtioPath, "--insert", "--config", "--live")
+		if output, err := cmd.CombinedOutput(); err != nil {
+			// Fallback without config/live flags
+			cmd2 := exec.Command("virsh", "change-media", name, "hdc", virtioPath, "--insert")
+			if out2, err2 := cmd2.CombinedOutput(); err2 != nil {
+				return fmt.Errorf("failed to mount virtio-win.iso to hdc: %v (%s)", err2, string(out2))
+			}
+		}
+		return nil
+	} else {
+		cmd := exec.Command("virsh", "change-media", name, "hdc", "--eject", "--config", "--live")
+		if output, err := cmd.CombinedOutput(); err != nil {
+			cmd2 := exec.Command("virsh", "change-media", name, "hdc", "--eject")
+			_ = cmd2.Run()
+		}
+		return nil
+	}
+}
+
+func (m *Manager) GetGuestAgentStatus(id int) (bool, map[string]interface{}, error) {
+	c := config.FindContainer(id)
+	if c == nil {
+		return false, nil, fmt.Errorf("container not found: %d", id)
+	}
+	if !c.IsKVM() {
+		return false, nil, fmt.Errorf("instance is not KVM: %d", id)
+	}
+	name := c.VirshName()
+	if c.Status != "running" {
+		return false, nil, nil
+	}
+	if err := qemuGuestPing(name); err != nil {
+		return false, nil, nil
+	}
+	// Agent is alive, let's fetch fsinfo
+	out, err := exec.Command("virsh", "qemu-agent-command", name, `{"execute":"guest-get-fsinfo"}`).Output()
+	var fsData map[string]interface{}
+	if err == nil {
+		_ = json.Unmarshal(out, &fsData)
+	}
+	return true, fsData, nil
+}
+
 func ensureVirtioWinISO() error {
 	virtioPath := virtioWinISOPath()
 	if _, err := os.Stat(virtioPath); err == nil {

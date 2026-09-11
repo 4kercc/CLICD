@@ -196,11 +196,21 @@ func HandleSingleContainer(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			handleImportDisk(w, r, id)
-		case action == "hardware-config" && r.Method == http.MethodPut:
-			if !requireScope(w, r, "container:resize") {
-				return
-			}
-			handleUpdateHardwareConfig(w, r, id)
+			case action == "hardware-config" && r.Method == http.MethodPut:
+				if !requireScope(w, r, "container:resize") {
+					return
+				}
+				handleUpdateHardwareConfig(w, r, id)
+			case action == "mount-virtio" && r.Method == http.MethodPost:
+				if !requireScope(w, r, "container:reinstall") {
+					return
+				}
+				handleMountVirtioISO(w, r, id)
+			case action == "guest-agent" && r.Method == http.MethodGet:
+				if !requireScope(w, r, "container:read") {
+					return
+				}
+				handleGuestAgentStatus(w, r, id)
 	case action == "port-mappings" && r.Method == http.MethodPost:
 		if !requireScope(w, r, "container:network") {
 			return
@@ -702,6 +712,39 @@ func handleUpdateHardwareConfig(w http.ResponseWriter, r *http.Request, id int) 
 	user := requestUser(r)
 	config.AddAuditLog("container.hardware_update", c.Name, fmt.Sprintf("boot=%s, nic=%s, bus=%s", c.BootOrder, c.NICModel, c.DiskBus), user)
 	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: "Hardware settings updated", Data: c})
+}
+
+func handleMountVirtioISO(w http.ResponseWriter, r *http.Request, id int) {
+	var req struct {
+		Mount bool `json:"mount"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		req.Mount = true
+	}
+	if err := mountVirtioISOByRuntime(id, req.Mount); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: err.Error()})
+		return
+	}
+	msg := "VirtIO 驱动与 Guest Agent 光盘已成功挂载到虚拟机光驱 (CD-ROM)"
+	if !req.Mount {
+		msg = "VirtIO 驱动光盘已成功弹出"
+	}
+	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: msg})
+}
+
+func handleGuestAgentStatus(w http.ResponseWriter, r *http.Request, id int) {
+	connected, fsInfo, err := getGuestAgentStatusByRuntime(id)
+	if err != nil {
+		jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: err.Error()})
+		return
+	}
+	jsonResponse(w, http.StatusOK, APIResponse{
+		Success: true,
+		Data: map[string]interface{}{
+			"connected": connected,
+			"fs_info":   fsInfo,
+		},
+	})
 }
 
 func getRandomPort(w http.ResponseWriter, r *http.Request, id int) {
