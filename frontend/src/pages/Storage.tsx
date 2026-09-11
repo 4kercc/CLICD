@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { AlertCircle, CheckCircle2, Cloud, HardDrive, Plus, RefreshCw, Save, Trash2 } from 'lucide-react'
-import { getStorageInfo, updateStoragePools, testRemoteStorage, StorageDisk, StorageInfo, StoragePool } from '../services/api'
+import { AlertCircle, CheckCircle2, Cloud, HardDrive, Plus, RefreshCw, Save, Trash2, ArrowUpRight } from 'lucide-react'
+import { getStorageInfo, updateStoragePools, testRemoteStorage, syncAllToRemoteStorage, StorageDisk, StorageInfo, StoragePool } from '../services/api'
 import { useLanguage } from '../contexts/LanguageContext'
+import { useDialog } from '../components/Dialog'
 
 const contentOptions = [
   ['lxc', 'LXC 容器'],
@@ -23,10 +24,12 @@ const contentColors: Record<string, string> = {
 
 export default function Storage() {
   const { t } = useLanguage()
+  const dialog = useDialog()
   const [info, setInfo] = useState<StorageInfo | null>(null)
   const [pools, setPools] = useState<StoragePool[]>([])
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  const [syncingPool, setSyncingPool] = useState<string | null>(null)
   const [saveMessage, setSaveMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
 
   // Remote storage modal state
@@ -224,7 +227,31 @@ export default function Storage() {
           <h1 className="text-2xl font-bold text-black dark:text-white">{t('存储管理')}</h1>
           <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">{t('支持管理宿主机本地挂载磁盘与远程对象存储/文件系统（SFTP / WebDAV / MinIO S3），支持快照/备份异地双写同步。')}</p>
         </div>
-        <div className="flex shrink-0 gap-2">
+        <div className="flex shrink-0 gap-2 flex-wrap items-center">
+          {remotePools.length > 0 && (
+            <button
+              onClick={async () => {
+                if (!(await dialog.confirm('一键全量同步', '确定将系统中所有虚拟机和容器现有的历史快照与全量备份同步至启用的远程存储吗？这将在后台按需上传文件。'))) return
+                setSyncingPool('all')
+                try {
+                  const res = await syncAllToRemoteStorage()
+                  dialog.alert('同步完成', res.data.message || '已成功触发全量快照与备份同步。')
+                  fetchData()
+                } catch (err: unknown) {
+                  const error = err as { response?: { data?: { message?: string } } }
+                  dialog.alert('同步失败', error.response?.data?.message || '同步至远程存储失败，请检查连通性')
+                } finally {
+                  setSyncingPool(null)
+                }
+              }}
+              disabled={!!syncingPool}
+              className="inline-flex items-center gap-1.5 rounded-md border border-emerald-600 bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-100 disabled:opacity-50"
+              title="将系统中所有已创建的快照与全量备份全部同步至外部远程存储"
+            >
+              <Cloud className="h-4 w-4" />
+              {syncingPool === 'all' ? '正在全量同步...' : '一键同步所有快照与备份'}
+            </button>
+          )}
           <button
             onClick={() => {
               setRemoteTestMessage(null)
@@ -340,6 +367,28 @@ export default function Storage() {
                   </div>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    onClick={async () => {
+                      if (!(await dialog.confirm('同步至该存储', `确定将系统中现有的所有快照与全量备份同步至「${rp.name}」吗？`))) return
+                      setSyncingPool(rp.id)
+                      try {
+                        const res = await syncAllToRemoteStorage(rp.id)
+                        dialog.alert('同步完成', res.data.message || '已成功同步至该存储池。')
+                        fetchData()
+                      } catch (err: unknown) {
+                        const error = err as { response?: { data?: { message?: string } } }
+                        dialog.alert('同步失败', error.response?.data?.message || '同步失败，请检查存储连通性')
+                      } finally {
+                        setSyncingPool(null)
+                      }
+                    }}
+                    disabled={!!syncingPool}
+                    className="inline-flex items-center gap-1 rounded border border-blue-200 bg-blue-50 px-2.5 py-1.5 text-xs text-blue-700 hover:bg-blue-100 disabled:opacity-50"
+                    title="立即将系统所有快照与备份同步到此存储池"
+                  >
+                    <Cloud className="h-3.5 w-3.5" />
+                    {syncingPool === rp.id ? '同步中...' : '一键同步现有快照/备份'}
+                  </button>
                   <button
                     onClick={() => handleDeletePool(rp.id)}
                     className="inline-flex items-center gap-1 rounded border border-red-200 bg-red-50 px-2.5 py-1.5 text-xs text-red-600 hover:bg-red-100"

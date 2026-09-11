@@ -876,6 +876,9 @@ export const updateStoragePools = (pools: StoragePool[]) =>
 export const testRemoteStorage = (type: string, config: Record<string, string>) =>
   api.post<APIResponse>('/storage/test', { type, config })
 
+export const syncAllToRemoteStorage = (poolId?: string) =>
+  api.post<APIResponse<{ snapshots_synced: number; backups_synced: number }>>('/storage/sync-all', { pool_id: poolId || '' }, { timeout: 3600000 })
+
 // Snapshots
 export interface Snapshot {
   id: string
