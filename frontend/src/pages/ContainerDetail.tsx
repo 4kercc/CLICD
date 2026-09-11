@@ -9,6 +9,7 @@ import {
   Copy,
   Cpu,
   CheckCircle2,
+  Check,
   Disc,
   HardDrive,
   HelpCircle,
@@ -238,6 +239,7 @@ export default function ContainerDetail() {
   const [checkingGuestAgent, setCheckingGuestAgent] = useState(false)
   const [showVirtioModal, setShowVirtioModal] = useState(false)
   const [mountingVirtio, setMountingVirtio] = useState(false)
+  const [copiedLinuxScript, setCopiedLinuxScript] = useState(false)
 
   const fetchContainer = useCallback(async () => {
     if (!containerIdentifier) return
@@ -1626,10 +1628,10 @@ export default function ContainerDetail() {
                       <button
                         onClick={() => setShowVirtioModal(true)}
                         className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] text-blue-700 border border-blue-200 bg-blue-50 rounded hover:bg-blue-100"
-                        title="挂载 VirtIO 驱动与 Guest Agent 光盘"
+                        title={isWindows ? "挂载 VirtIO 驱动与 Guest Agent 光盘" : "查看 Linux Guest Agent 安装指南与脚本"}
                       >
-                        <Disc className="w-3 h-3" />
-                        挂载驱动盘
+                        {isWindows ? <Disc className="w-3 h-3" /> : <TerminalSquare className="w-3 h-3" />}
+                        {isWindows ? '挂载驱动盘' : '安装指南'}
                       </button>
                     )}
                   </div>
@@ -2933,42 +2935,81 @@ export default function ContainerDetail() {
 
       {/* VirtIO & Guest Agent Modal */}
       {showVirtioModal && (
-        <Modal title="QEMU Guest Agent & VirtIO 驱动光盘" onClose={() => setShowVirtioModal(false)}>
+        <Modal
+          title={isWindows ? 'QEMU Guest Agent & VirtIO 驱动光盘 (Windows)' : 'QEMU Guest Agent 安装指南 (Linux)'}
+          onClose={() => setShowVirtioModal(false)}
+        >
           <div className="space-y-4">
             <div className="flex items-start gap-3 p-3.5 bg-blue-50 border border-blue-100 rounded-lg text-xs text-blue-900 leading-relaxed">
-              <Disc className="w-5 h-5 text-blue-600 shrink-0 mt-0.5" />
+              {isWindows ? <Disc className="w-5 h-5 text-blue-600 shrink-0 mt-0.5" /> : <TerminalSquare className="w-5 h-5 text-blue-600 shrink-0 mt-0.5" />}
               <div>
-                <div className="font-semibold text-sm mb-1">关于 Guest Agent 与 VirtIO 驱动</div>
+                <div className="font-semibold text-sm mb-1">关于 Guest Agent 协同能力</div>
                 <p>
-                  安装 QEMU Guest Agent 与 VirtIO 驱动后，宿主机与虚拟机之间将实现深度协同：
+                  安装并运行 QEMU Guest Agent 后，宿主机与虚拟机之间将实现深度协同：
                 </p>
                 <ul className="list-disc pl-4 mt-1.5 space-y-0.5 text-blue-800">
-                  <li><strong>磁盘内部容量读取</strong>：在面板实时显示 Windows C 盘与分区真实使用率。</li>
-                  <li><strong>磁盘在线热扩容</strong>：无需关机，后台调大容量时内部自动扩展分区。</li>
-                  <li><strong>安全优雅关机与冻结</strong>：打快照/备份时自动冻结文件系统（VSS），保证数据一致性。</li>
-                  <li><strong>网卡与内存气球优化</strong>：大幅提升虚拟机网络吞吐量并降低宿主机资源消耗。</li>
+                  <li><strong>磁盘内部容量读取</strong>：在面板实时显示系统盘内部真实占用与分区使用率。</li>
+                  <li><strong>磁盘在线热扩容</strong>：无需关机，后台调大容量时内部自动扩展分区（Linux growpart / Windows extend）。</li>
+                  <li><strong>安全优雅关机与冻结</strong>：打快照/备份时自动冻结文件系统（fsfreeze / VSS），保证数据一致性。</li>
+                  <li><strong>动态网络与资源协同</strong>：实时获取 guest 内部网络配置与资源指标。</li>
                 </ul>
               </div>
             </div>
 
-            <div className="border border-gray-200 rounded-lg p-3 bg-gray-50 text-xs space-y-2">
-              <div className="font-medium text-gray-800">Windows 安装说明：</div>
-              <ol className="list-decimal pl-4 space-y-1 text-gray-600">
-                <li>点击下方「一键挂载驱动光盘」，系统将把 <code className="font-mono bg-white px-1 py-0.5 border rounded">virtio-win.iso</code> 插入虚拟机光驱。</li>
-                <li>通过 <strong>RDP 远程桌面</strong> 或 <strong>WebVNC</strong> 进入虚拟机，打开 <strong>此电脑 (This PC)</strong>。</li>
-                <li>双击光驱盘符进入，找到 <code className="font-mono bg-white px-1 py-0.5 border rounded">virtio-win-gt-x64.msi</code>（或 <code className="font-mono bg-white px-1 py-0.5 border rounded">qemu-ga-x86_64.msi</code>）双击运行安装。</li>
-                <li>驱动安装完成后，点击「弹出驱动光盘」即可。</li>
-              </ol>
-            </div>
+            {isWindows ? (
+              <div className="border border-gray-200 rounded-lg p-3 bg-gray-50 text-xs space-y-2">
+                <div className="font-medium text-gray-800">Windows 安装说明：</div>
+                <ol className="list-decimal pl-4 space-y-1 text-gray-600">
+                  <li>点击下方「一键挂载驱动光盘」，系统将把 <code className="font-mono bg-white px-1 py-0.5 border rounded">virtio-win.iso</code> 插入虚拟机光驱。</li>
+                  <li>通过 <strong>RDP 远程桌面</strong> 或 <strong>WebVNC</strong> 进入虚拟机，打开 <strong>此电脑 (This PC)</strong>。</li>
+                  <li>双击光驱盘符进入，找到 <code className="font-mono bg-white px-1 py-0.5 border rounded">virtio-win-gt-x64.msi</code>（或 <code className="font-mono bg-white px-1 py-0.5 border rounded">qemu-ga-x86_64.msi</code>）双击运行安装。</li>
+                  <li>驱动安装完成后，点击「弹出驱动光盘」即可。</li>
+                </ol>
+              </div>
+            ) : (
+              <div className="border border-gray-200 rounded-lg p-3.5 bg-gray-50 text-xs space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="font-medium text-gray-800">Linux 一键安装与启动脚本：</div>
+                  <button
+                    onClick={async () => {
+                      const script = `which qemu-ga >/dev/null 2>&1 || { if command -v apt-get >/dev/null; then apt-get update && apt-get install -y qemu-guest-agent; elif command -v dnf >/dev/null; then dnf install -y qemu-guest-agent; elif command -v yum >/dev/null; then yum install -y qemu-guest-agent; elif command -v pacman >/dev/null; then pacman -Sy --noconfirm qemu-guest-agent; elif command -v apk >/dev/null; then apk add qemu-guest-agent; fi; }; systemctl enable --now qemu-guest-agent 2>/dev/null || rc-service qemu-guest-agent start 2>/dev/null`
+                      await copyText(script)
+                      setCopiedLinuxScript(true)
+                      setTimeout(() => setCopiedLinuxScript(false), 3000)
+                    }}
+                    className="inline-flex items-center gap-1 px-2 py-1 text-[11px] bg-white border border-gray-300 rounded text-gray-700 hover:bg-gray-100 transition-colors shadow-sm"
+                  >
+                    {copiedLinuxScript ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+                    {copiedLinuxScript ? '已复制命令' : '复制一键命令'}
+                  </button>
+                </div>
+                
+                <div className="bg-gray-900 rounded-md p-2.5 font-mono text-[11px] text-gray-200 overflow-x-auto select-all leading-relaxed">
+                  # Debian / Ubuntu / CentOS / Rocky / Alpine 全通用<br />
+                  <span className="text-emerald-400">which qemu-ga &gt;/dev/null 2&gt;&amp;1 || &#123; if command -v apt-get &gt;/dev/null; then apt-get update &amp;&amp; apt-get install -y qemu-guest-agent; elif command -v dnf &gt;/dev/null; then dnf install -y qemu-guest-agent; elif command -v yum &gt;/dev/null; then yum install -y qemu-guest-agent; elif command -v pacman &gt;/dev/null; then pacman -Sy --noconfirm qemu-guest-agent; elif command -v apk &gt;/dev/null; then apk add qemu-guest-agent; fi; &#125;; systemctl enable --now qemu-guest-agent 2&gt;/dev/null || rc-service qemu-guest-agent start 2&gt;/dev/null</span>
+                </div>
+
+                <div className="space-y-1.5 pt-1 text-gray-600 text-[11px]">
+                  <p><strong>各发行版分步手动安装：</strong></p>
+                  <ul className="list-disc pl-4 space-y-1 text-gray-500">
+                    <li><strong className="text-gray-700">Debian / Ubuntu:</strong> <code className="bg-white px-1 py-0.5 border rounded">apt-get update && apt-get install -y qemu-guest-agent && systemctl enable --now qemu-guest-agent</code></li>
+                    <li><strong className="text-gray-700">CentOS / RHEL / Rocky / Alma:</strong> <code className="bg-white px-1 py-0.5 border rounded">yum install -y qemu-guest-agent && systemctl enable --now qemu-guest-agent</code></li>
+                    <li><strong className="text-gray-700">Alpine Linux:</strong> <code className="bg-white px-1 py-0.5 border rounded">apk add qemu-guest-agent && rc-service qemu-guest-agent start</code></li>
+                  </ul>
+                </div>
+              </div>
+            )}
 
             <div className="flex items-center justify-between pt-2">
-              <button
-                onClick={() => handleMountVirtio(false)}
-                disabled={mountingVirtio}
-                className="px-3 py-2 text-xs text-gray-700 border border-gray-300 rounded-md hover:bg-gray-100 disabled:opacity-50"
-              >
-                {mountingVirtio ? '处理中...' : '弹出驱动光盘 (Eject)'}
-              </button>
+              {isWindows ? (
+                <button
+                  onClick={() => handleMountVirtio(false)}
+                  disabled={mountingVirtio}
+                  className="px-3 py-2 text-xs text-gray-700 border border-gray-300 rounded-md hover:bg-gray-100 disabled:opacity-50"
+                >
+                  {mountingVirtio ? '处理中...' : '弹出驱动光盘 (Eject)'}
+                </button>
+              ) : <div />}
               <div className="flex gap-2">
                 <button
                   onClick={() => setShowVirtioModal(false)}
@@ -2976,14 +3017,16 @@ export default function ContainerDetail() {
                 >
                   关闭
                 </button>
-                <button
-                  onClick={() => handleMountVirtio(true)}
-                  disabled={mountingVirtio}
-                  className="px-4 py-2 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 font-medium flex items-center gap-1.5"
-                >
-                  <Disc className="w-4 h-4" />
-                  {mountingVirtio ? '正在挂载...' : '一键挂载驱动光盘'}
-                </button>
+                {isWindows && (
+                  <button
+                    onClick={() => handleMountVirtio(true)}
+                    disabled={mountingVirtio}
+                    className="px-4 py-2 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 font-medium flex items-center gap-1.5"
+                  >
+                    <Disc className="w-4 h-4" />
+                    {mountingVirtio ? '正在挂载...' : '一键挂载驱动光盘'}
+                  </button>
+                )}
               </div>
             </div>
           </div>
