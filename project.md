@@ -1,12 +1,12 @@
 # CLICD 项目架构、功能设计与演进记录全景文档 (Project Documentation)
 
-本文档记录了 **CLICD (LXC/KVM 虚拟化管理面板)** 的系统全景架构、模块代码分工、关键技术设计、历史演进记录（涵盖 v1.20、v1.20.1 与 v1.20.2 核心特性）以及常用运维与部署指令。
+本文档记录了 **CLICD (LXC/KVM 虚拟化管理面板)** 的系统全景架构、模块代码分工、关键技术设计、历史演进记录（涵盖 v1.20 ~ v1.20.3 核心特性）以及常用运维与部署指令。
 
 ---
 
 ## 📌 项目基本信息
 - **项目名称**：CLICD (Container & KVM Lifecycle Controller Daemon)
-- **当前版本**：`v1.20.2`
+- **当前版本**：`v1.20.3`
 - **代码仓库**：[https://github.com/4kercc/CLICD](https://github.com/4kercc/CLICD)
 - **后端技术栈**：Go 1.24+ (原生标准库 + SkyLight / Libvirt / LXC / Conntrack 深度调用，无重型第三方框架)
 - **前端技术栈**：React 18 + TypeScript + Vite + Tailwind CSS + Lucide Icons
@@ -106,6 +106,19 @@
    - **双击重命名**：主机名和系统标签支持双击行内快速编辑，便于管理多台同配置虚拟机。
    - **红色高亮删除与二次防误触**：危险操作独立红色展示，并引入两次弹窗确认，彻底杜绝误删风险。
 
+### 九、 虚拟化安全加固与稳定性防卡死重构 (v1.20.3)
+1. **安全修复（严重）**：
+   - 「导入外部磁盘」源路径强制白名单（存储池 / KVM 数据目录 / 镜像缓存，含符号链接解析），并收紧为仅管理员可用，彻底封堵子用户越权读取宿主机任意文件的漏洞。
+2. **并发与锁重构（高）**：
+   - KVM/LXC 快照、备份、还原的全局互斥锁收窄至「轮转删除」与「配置登记」瞬时阶段；长磁盘 I/O 由单机维度互斥锁（`acquireVMLock` / `acquireLXCLock` / `acquireSyncLock`）保护，多虚拟机操作互不阻塞。
+3. **热快照防撕裂（高）**：
+   - 有 Guest Agent：`fsfreeze` 冻结整个拷贝窗口（应用一致性）。
+   - 无 Agent：`virsh snapshot-create-as --disk-only --atomic --no-metadata` 原子外部快照 + `blockcommit --active --pivot` 回合并清理，拷贝统一 `qemu-img convert -U`。
+   - 服务启动时自动解冻遗留冻结虚拟机（`ThawAllRunningVMs`），优雅关机等待延长至 45 秒。
+4. **超时与输入校验**：
+   - `virsh` 热路径（domstate / domifaddr / domstats / guest-ping / guest-exec 等）统一 5–30 秒硬超时封装（`virshCombinedOutput` / `virshOutput`）。
+   - LXC PID 拼接前强制数字校验；主机名 / 系统标签统一 64 字符与控制字符校验。
+
 ---
 
 ## 🛠️ 运维与部署常用指令
@@ -141,6 +154,6 @@ cp -r frontend/dist/* backend/internal/server/web/
 
 # 3. 交叉编译 Linux 二进制
 cd backend
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w -X clicd/internal/version.Version=1.20.2" -o ../build/clicd-linux-amd64 .
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w -X clicd/internal/version.Version=1.20.2" -o ../build/clicd-linux-arm64 .
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w -X clicd/internal/version.Version=1.20.3" -o ../build/clicd-linux-amd64 .
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w -X clicd/internal/version.Version=1.20.3" -o ../build/clicd-linux-arm64 .
 ```
