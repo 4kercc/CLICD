@@ -20,39 +20,45 @@ func SyncSnapshotToRemoteStorage(snapshot *config.Snapshot) {
 			continue
 		}
 		go func(p config.StoragePool, snap config.Snapshot) {
-			client, err := NewClient(p.Type, p.Config)
-			if err != nil {
-				fmt.Printf("Remote storage sync client init error for %s: %v\n", p.Name, err)
-				return
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-			defer cancel()
-
-			remoteBasePath := fmt.Sprintf("snapshots/%d/%s", snap.ContainerID, snap.ID)
-			// Walk directory and upload files
-			err = filepath.Walk(snap.Path, func(path string, info os.FileInfo, walkErr error) error {
-				if walkErr != nil || info.IsDir() {
-					return walkErr
-				}
-				relPath, _ := filepath.Rel(snap.Path, path)
-				remoteFile := filepath.ToSlash(filepath.Join(remoteBasePath, relPath))
-				return client.UploadFile(ctx, path, remoteFile)
-			})
-
-			if err == nil {
-				// Mark as synced in config
-				if s := config.FindSnapshot(snap.ID); s != nil {
-					s.RemoteSynced = true
-					s.RemoteStoragePoolID = p.ID
-					s.RemotePath = remoteBasePath
-					_ = config.SaveConfig()
-				}
-				fmt.Printf("Successfully synced snapshot %s to remote storage %s\n", snap.ID, p.Name)
-			} else {
-				fmt.Printf("Failed to sync snapshot %s to %s: %v\n", snap.ID, p.Name, err)
-			}
+			_ = SyncSingleSnapshotToPool(&snap, &p)
 		}(pool, *snapshot)
 	}
+}
+
+// SyncSingleSnapshotToPool syncs a snapshot to a specific pool synchronously and updates its config state.
+func SyncSingleSnapshotToPool(snap *config.Snapshot, pool *config.StoragePool) error {
+	if snap == nil || pool == nil {
+		return fmt.Errorf("snapshot or pool is nil")
+	}
+	client, err := NewClient(pool.Type, pool.Config)
+	if err != nil {
+		return fmt.Errorf("remote storage sync client init error for %s: %w", pool.Name, err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+
+	remoteBasePath := fmt.Sprintf("snapshots/%d/%s", snap.ContainerID, snap.ID)
+	err = filepath.Walk(snap.Path, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil || info.IsDir() {
+			return walkErr
+		}
+		relPath, _ := filepath.Rel(snap.Path, path)
+		remoteFile := filepath.ToSlash(filepath.Join(remoteBasePath, relPath))
+		return client.UploadFile(ctx, path, remoteFile)
+	})
+
+	if err == nil {
+		if s := config.FindSnapshot(snap.ID); s != nil {
+			s.RemoteSynced = true
+			s.RemoteStoragePoolID = pool.ID
+			s.RemotePath = remoteBasePath
+			_ = config.SaveConfig()
+		}
+		fmt.Printf("Successfully synced snapshot %s to remote storage %s\n", snap.ID, pool.Name)
+		return nil
+	}
+	fmt.Printf("Failed to sync snapshot %s to %s: %v\n", snap.ID, pool.Name, err)
+	return err
 }
 
 // SyncBackupToRemoteStorage uploads a newly created backup to configured remote storage pools.
@@ -65,38 +71,45 @@ func SyncBackupToRemoteStorage(backup *config.Backup) {
 			continue
 		}
 		go func(p config.StoragePool, bkp config.Backup) {
-			client, err := NewClient(p.Type, p.Config)
-			if err != nil {
-				fmt.Printf("Remote storage sync client init error for %s: %v\n", p.Name, err)
-				return
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
-			defer cancel()
-
-			remoteBasePath := fmt.Sprintf("backups/%d/%s", bkp.ContainerID, bkp.ID)
-			// Walk directory and upload all files (xml, disk.qcow2, etc.)
-			err = filepath.Walk(bkp.Path, func(path string, info os.FileInfo, walkErr error) error {
-				if walkErr != nil || info.IsDir() {
-					return walkErr
-				}
-				relPath, _ := filepath.Rel(bkp.Path, path)
-				remoteFile := filepath.ToSlash(filepath.Join(remoteBasePath, relPath))
-				return client.UploadFile(ctx, path, remoteFile)
-			})
-
-			if err == nil {
-				if b := config.FindBackup(bkp.ID); b != nil {
-					b.RemoteSynced = true
-					b.RemoteStoragePoolID = p.ID
-					b.RemotePath = remoteBasePath
-					_ = config.SaveConfig()
-				}
-				fmt.Printf("Successfully synced backup %s to remote storage %s\n", bkp.ID, p.Name)
-			} else {
-				fmt.Printf("Failed to sync backup %s to %s: %v\n", bkp.ID, p.Name, err)
-			}
+			_ = SyncSingleBackupToPool(&bkp, &p)
 		}(pool, *backup)
 	}
+}
+
+// SyncSingleBackupToPool syncs a backup to a specific pool synchronously and updates its config state.
+func SyncSingleBackupToPool(bkp *config.Backup, pool *config.StoragePool) error {
+	if bkp == nil || pool == nil {
+		return fmt.Errorf("backup or pool is nil")
+	}
+	client, err := NewClient(pool.Type, pool.Config)
+	if err != nil {
+		return fmt.Errorf("remote storage sync client init error for %s: %w", pool.Name, err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
+	defer cancel()
+
+	remoteBasePath := fmt.Sprintf("backups/%d/%s", bkp.ContainerID, bkp.ID)
+	err = filepath.Walk(bkp.Path, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil || info.IsDir() {
+			return walkErr
+		}
+		relPath, _ := filepath.Rel(bkp.Path, path)
+		remoteFile := filepath.ToSlash(filepath.Join(remoteBasePath, relPath))
+		return client.UploadFile(ctx, path, remoteFile)
+	})
+
+	if err == nil {
+		if b := config.FindBackup(bkp.ID); b != nil {
+			b.RemoteSynced = true
+			b.RemoteStoragePoolID = pool.ID
+			b.RemotePath = remoteBasePath
+			_ = config.SaveConfig()
+		}
+		fmt.Printf("Successfully synced backup %s to remote storage %s\n", bkp.ID, pool.Name)
+		return nil
+	}
+	fmt.Printf("Failed to sync backup %s to %s: %v\n", bkp.ID, pool.Name, err)
+	return err
 }
 
 // EnsureLocalSnapshotFromRemote downloads remote snapshot files if local copy is missing or remote source is requested.

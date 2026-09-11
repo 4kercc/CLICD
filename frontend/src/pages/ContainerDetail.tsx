@@ -51,6 +51,8 @@ import {
   createContainerBackup,
   deleteContainerBackup,
   restoreContainerBackup,
+  syncContainerBackup,
+  syncAllContainerBackups,
   resizeContainerDisk,
   importContainerDisk,
   updateHardwareConfig,
@@ -84,6 +86,8 @@ import {
   updateSnapshotQuota,
   updateSnapshotSchedule,
   restoreContainerSnapshot,
+  syncContainerSnapshot,
+  syncAllContainerSnapshots,
   resetTraffic,
   updateTrafficLimit,
   updateResourceLimit,
@@ -1074,6 +1078,78 @@ export default function ContainerDetail() {
     }
   }
 
+  const handleSyncSnapshot = async (snapshot: Snapshot) => {
+    if (!containerIdentifier) return
+    if (!(await ensureSubUserCanOperate())) return
+    setSnapshotBusy(snapshot.id)
+    try {
+      await syncContainerSnapshot(containerIdentifier, snapshot.id)
+      await fetchSnapshots()
+      dialog.alert('同步成功', `快照 ${snapshot.created_at} 已成功同步至远程存储。`)
+    } catch (err: unknown) {
+      const error = err as { response?: { data?: { message?: string } } }
+      await dialog.alert('同步失败', error.response?.data?.message || '同步到远程存储失败，请检查远程存储设置与连通性。')
+    } finally {
+      setSnapshotBusy('')
+    }
+  }
+
+  const handleSyncAllSnapshots = async () => {
+    if (!containerIdentifier) return
+    if (!(await ensureSubUserCanOperate())) return
+    if (snapshots.length === 0) {
+      dialog.alert('暂无快照', '当前容器还没有任何快照可供同步。')
+      return
+    }
+    setSnapshotBusy('sync-all')
+    try {
+      const res = await syncAllContainerSnapshots(containerIdentifier)
+      await fetchSnapshots()
+      dialog.alert('同步完成', res.data.message || '所有快照已成功同步至远程存储。')
+    } catch (err: unknown) {
+      const error = err as { response?: { data?: { message?: string } } }
+      await dialog.alert('同步失败', error.response?.data?.message || '同步到远程存储失败，请检查远程存储设置与连通性。')
+    } finally {
+      setSnapshotBusy('')
+    }
+  }
+
+  const handleSyncBackup = async (backup: Backup) => {
+    if (!containerIdentifier) return
+    if (!(await ensureSubUserCanOperate())) return
+    setBackupBusy(backup.id)
+    try {
+      await syncContainerBackup(containerIdentifier, backup.id)
+      await fetchBackups()
+      dialog.alert('同步成功', `备份 ${backup.created_at} 已成功同步至远程存储。`)
+    } catch (err: unknown) {
+      const error = err as { response?: { data?: { message?: string } } }
+      dialog.alert('同步失败', error.response?.data?.message || '同步到远程存储失败，请检查远程存储设置与连通性。')
+    } finally {
+      setBackupBusy('')
+    }
+  }
+
+  const handleSyncAllBackups = async () => {
+    if (!containerIdentifier) return
+    if (!(await ensureSubUserCanOperate())) return
+    if (backups.length === 0) {
+      dialog.alert('暂无备份', '当前容器还没有任何全量备份可供同步。')
+      return
+    }
+    setBackupBusy('sync-all')
+    try {
+      const res = await syncAllContainerBackups(containerIdentifier)
+      await fetchBackups()
+      dialog.alert('同步完成', res.data.message || '所有全量备份已成功同步至远程存储。')
+    } catch (err: unknown) {
+      const error = err as { response?: { data?: { message?: string } } }
+      dialog.alert('同步失败', error.response?.data?.message || '同步到远程存储失败，请检查远程存储设置与连通性。')
+    } finally {
+      setBackupBusy('')
+    }
+  }
+
   const fetchBackups = useCallback(async () => {
     if (!containerIdentifier) return
     try {
@@ -1934,6 +2010,15 @@ export default function ContainerDetail() {
           extra={
             <div className="flex items-center gap-2">
               <button
+                onClick={handleSyncAllSnapshots}
+                disabled={!!snapshotBusy || snapshots.length === 0}
+                className="inline-flex items-center gap-1.5 rounded-md border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs text-blue-700 hover:bg-blue-100 disabled:opacity-50"
+                title="将当前容器的所有快照同步备份至外部远程存储"
+              >
+                <Cloud className="w-3.5 h-3.5" />
+                {snapshotBusy === 'sync-all' ? '同步中...' : '一键同步至远程'}
+              </button>
+              <button
                 onClick={openSnapshotSchedule}
                 disabled={!!snapshotBusy || storageLoading || !snapshotStorageReady}
                 className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs ${
@@ -2064,6 +2149,7 @@ export default function ContainerDetail() {
             <SnapshotTable
               snapshots={snapshots}
               busy={snapshotBusy}
+              onSync={handleSyncSnapshot}
               onRestore={handleRestoreSnapshot}
               onDelete={handleDeleteSnapshot}
             />
@@ -2673,14 +2759,25 @@ export default function ContainerDetail() {
           onClose={() => setShowBackups(false)}
           wide
           extra={
-            <button
-              onClick={handleCreateBackup}
-              disabled={!!backupBusy || isSubUserPolicyBlocked}
-              className="inline-flex items-center gap-1.5 rounded-md bg-black px-3 py-1.5 text-xs text-white hover:bg-gray-800 disabled:opacity-50"
-            >
-              <HardDrive className="w-3.5 h-3.5" />
-              {backupBusy === 'create' ? '压缩打包中...' : '新建全量备份'}
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleSyncAllBackups}
+                disabled={!!backupBusy || backups.length === 0}
+                className="inline-flex items-center gap-1.5 rounded-md border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs text-blue-700 hover:bg-blue-100 disabled:opacity-50"
+                title="将当前容器的所有全量备份同步至外部远程存储"
+              >
+                <Cloud className="w-3.5 h-3.5" />
+                {backupBusy === 'sync-all' ? '同步中...' : '一键同步至远程'}
+              </button>
+              <button
+                onClick={handleCreateBackup}
+                disabled={!!backupBusy || isSubUserPolicyBlocked}
+                className="inline-flex items-center gap-1.5 rounded-md bg-black px-3 py-1.5 text-xs text-white hover:bg-gray-800 disabled:opacity-50"
+              >
+                <HardDrive className="w-3.5 h-3.5" />
+                {backupBusy === 'create' ? '压缩打包中...' : '新建全量备份'}
+              </button>
+            </div>
           }
         >
           <div className="space-y-4">
@@ -2718,6 +2815,14 @@ export default function ContainerDetail() {
                       <td className="px-3 py-2 text-gray-600">{b.created_by}</td>
                       <td className="px-3 py-2 text-right">
                         <div className="inline-flex items-center gap-1">
+                          <button
+                            onClick={() => handleSyncBackup(b)}
+                            disabled={!!backupBusy}
+                            className="px-2 py-1 bg-blue-50 text-blue-700 hover:bg-blue-100 rounded text-xs font-medium"
+                            title="手动同步该备份至远程存储"
+                          >
+                            {backupBusy === b.id ? '同步中...' : '同步'}
+                          </button>
                           <button
                             onClick={() => handleRestoreBackup(b)}
                             disabled={!!backupBusy}
@@ -3176,9 +3281,10 @@ function PlainRow({ label, value, mono = false, copyValue, onCopy, children }: {
   )
 }
 
-function SnapshotTable({ snapshots, busy, onRestore, onDelete }: {
+function SnapshotTable({ snapshots, busy, onSync, onRestore, onDelete }: {
   snapshots: Snapshot[]
   busy: string
+  onSync: (snapshot: Snapshot) => void
   onRestore: (snapshot: Snapshot) => void
   onDelete: (snapshot: Snapshot) => void
 }) {
@@ -3218,6 +3324,14 @@ function SnapshotTable({ snapshots, busy, onRestore, onDelete }: {
               <td className="px-3 py-2 font-mono text-xs text-gray-600">{formatBytes(snapshot.size_bytes || 0)}</td>
               <td className="px-3 py-2">
                 <div className="flex justify-end gap-1.5">
+                  <button
+                    onClick={() => onSync(snapshot)}
+                    disabled={!!busy}
+                    className="rounded border border-blue-200 bg-blue-50 px-2.5 py-1 text-xs text-blue-700 hover:bg-blue-100 disabled:opacity-50"
+                    title="手动同步该快照至远程存储"
+                  >
+                    {busy === snapshot.id ? '同步中...' : '同步'}
+                  </button>
                   <button
                     onClick={() => onRestore(snapshot)}
                     disabled={!!busy}
