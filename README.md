@@ -38,14 +38,44 @@ CLICD 是一个面向 LXC/KVM 的轻量虚拟化管理面板，集成 Web 控制
 One-click Install / 一键安装：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/MengMengCode/CLICD/main/install.sh | sudo sh
+curl -fsSL https://raw.githubusercontent.com/4kercc/CLICD/main/install.sh | sudo sh
 ```
 
 One-click Uninstall / 一键卸载：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/MengMengCode/CLICD/main/install.sh | sudo sh -s -- uninstall
+curl -fsSL https://raw.githubusercontent.com/4kercc/CLICD/main/install.sh | sudo sh -s -- uninstall
 ```
+
+---
+
+## 🚀 Recent Enhancements & Enterprise Features / 最新功能特性与优化说明
+
+为了满足生产环境、PVE 虚拟机平滑迁移、大容量 Windows 实例高效运行等需求，本分支进行了以下核心增强（方便后续向原仓库发起 Pull Request）：
+
+### 1. 🔀 KVM 引导管理与灵活硬件驱动选型 (Boot & Hardware Flexibility)
+- **第一启动项动态控制 (Boot Order)**：支持自由切换 **硬盘优先 (Hard Disk)**、**光盘/ISO 优先 (CD-ROM)** 或 **网络 PXE 引导**，彻底解决了 Windows/PE 重启后再次跌入光盘安装界面的问题。
+- **虚拟硬件模型适配**：
+  - **网卡驱动 (NIC Model)**：支持切换为高性能 `VirtIO`（Linux原生、Windows需驱动）、`Intel e1000e`（免驱千兆兼容）或 `RTL8139`。
+  - **磁盘总线 (Disk Bus)**：支持切换为 `VirtIO Block (vda)`、`SATA AHCI (sda)`、`IDE (hda)`。
+
+### 2. 🛡️ 快照 (Snapshot) 与 备份 (Backup) 架构分离 + 零停机在线热快照
+- **零停机在线热快照 (Live Snapshot)**：结合 QEMU Guest Agent `fsfreeze` 静默冻结与 COW 增量捕获，**打快照无需关机**，1秒内极速完成。
+- **自动分层 COW 轻量化**：自动将单体大镜像转换为 `Base (只读基盘) + Overlay (轻量增量层)` 架构，单次快照体积从数十 GB 暴降至 **几十 KB ~ 几十 MB**，彻底避免撑爆宿主机硬盘。
+- **独立的 Full Backup 全量备份体系**：新增独立接口与数据表，备份时执行全量合并与 `qcow2` 压缩打包归档，用于长期异地容灾与跨机还原。
+
+### 3. 📈 在线与离线磁盘动态扩容 (Live Disk Resize)
+- 支持在面板一键调整 KVM 磁盘容量。
+- **在线扩容**：虚拟机开机状态下调用 `virsh blockresize`，并由 Guest Agent 自动触发内部系统文件系统无缝扩展（Windows C 盘自动 extend，Linux 自动 growpart / resize2fs）。
+- **离线扩容**：关机状态下调用 `qemu-img resize` 安全扩容。
+
+### 4. 🔄 外部磁盘镜像导入与 PVE/KVM 迁移向导 (Disk Import & Migration)
+- 支持直接输入宿主机外部镜像路径（如 PVE 导出的 `vm-301-disk-0.qcow2` 或 raw/vmdk 镜像）。
+- 支持一键转为 Base 只读基盘并自动挂载增量层，实现从 PVE 到 CLICD 的极速平滑迁移。
+
+### 5. 💽 Windows PE / WePE 自定义维护镜像支持
+- 放宽第三方 Windows 维护镜像的体积限制（支持 50MB~800MB 的 WinPE / WePE / FirPE 镜像）。
+- 修复了下载体积较小的 PE 镜像被误判为“文件不完整”的问题。
 
 
 
