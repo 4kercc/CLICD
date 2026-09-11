@@ -42,6 +42,14 @@ import {
   getContainer,
   getContainerHistory,
   getContainerSnapshots,
+  getContainerBackups,
+  createContainerBackup,
+  deleteContainerBackup,
+  restoreContainerBackup,
+  resizeContainerDisk,
+  importContainerDisk,
+  updateHardwareConfig,
+  Backup,
   getContainerUsage,
   getHostInfo,
   getStorageInfo,
@@ -199,6 +207,19 @@ export default function ContainerDetail() {
   const [firewallMessage, setFirewallMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
   const [editingFirewallRule, setEditingFirewallRule] = useState<FirewallRule | null>(null)
   const [showFirewallEditor, setShowFirewallEditor] = useState(false)
+  const [showBackups, setShowBackups] = useState(false)
+  const [backups, setBackups] = useState<Backup[]>([])
+  const [backupBusy, setBackupBusy] = useState('')
+  const [showHardwareModal, setShowHardwareModal] = useState(false)
+  const [hardwareDraft, setHardwareDraft] = useState({ boot_order: 'disk', boot_media: '', nic_model: 'virtio', disk_bus: 'virtio' })
+  const [savingHardware, setSavingHardware] = useState(false)
+  const [showResizeDiskModal, setShowResizeDiskModal] = useState(false)
+  const [resizeDiskDraft, setResizeDiskDraft] = useState(50)
+  const [savingResizeDisk, setSavingResizeDisk] = useState(false)
+  const [showImportDiskModal, setShowImportDiskModal] = useState(false)
+  const [importDiskPath, setImportDiskPath] = useState('')
+  const [importAsOverlay, setImportAsOverlay] = useState(true)
+  const [savingImportDisk, setSavingImportDisk] = useState(false)
 
   const fetchContainer = useCallback(async () => {
     if (!containerIdentifier) return
@@ -913,6 +934,119 @@ export default function ContainerDetail() {
     }
   }
 
+  const fetchBackups = useCallback(async () => {
+    if (!containerIdentifier) return
+    try {
+      const res = await getContainerBackups(containerIdentifier)
+      setBackups(res.data.data?.backups || [])
+    } catch (err) {
+      console.error('Failed to fetch backups:', err)
+    }
+  }, [containerIdentifier])
+
+  const handleCreateBackup = async () => {
+    if (!containerIdentifier) return
+    if (!(await ensureSubUserCanOperate())) return
+    setBackupBusy('create')
+    try {
+      await createContainerBackup(containerIdentifier)
+      await fetchBackups()
+      dialog.alert('创建备份成功', '全量压缩备份已生成并存档。')
+    } catch (err: unknown) {
+      const error = err as { response?: { data?: { message?: string } } }
+      dialog.alert('创建备份失败', error.response?.data?.message || '请稍后重试。')
+    } finally {
+      setBackupBusy('')
+    }
+  }
+
+  const handleDeleteBackup = async (backupId: string) => {
+    if (!containerIdentifier || !(await dialog.confirm('删除备份', '确定要彻底删除该全量备份文件吗？'))) return
+    setBackupBusy(backupId)
+    try {
+      await deleteContainerBackup(containerIdentifier, backupId)
+      await fetchBackups()
+    } catch (err: unknown) {
+      const error = err as { response?: { data?: { message?: string } } }
+      dialog.alert('删除失败', error.response?.data?.message || '请稍后重试。')
+    } finally {
+      setBackupBusy('')
+    }
+  }
+
+  const handleRestoreBackup = async (backup: Backup) => {
+    if (!containerIdentifier) return
+    if (!(await ensureSubUserCanOperate())) return
+    if (!(await dialog.confirm('恢复备份', `确定要从 ${backup.created_at} 的全量备份覆盖还原虚拟机吗？当前所有未备份改动将丢失。`))) return
+    setBackupBusy(backup.id)
+    try {
+      await restoreContainerBackup(containerIdentifier, backup.id)
+      await Promise.all([fetchBackups(), fetchContainer()])
+      dialog.alert('恢复成功', '虚拟机已从备份完全恢复。')
+    } catch (err: unknown) {
+      const error = err as { response?: { data?: { message?: string } } }
+      dialog.alert('恢复备份失败', error.response?.data?.message || '请稍后重试。')
+    } finally {
+      setBackupBusy('')
+    }
+  }
+
+  const saveHardwareConfig = async () => {
+    if (!containerIdentifier) return
+    setSavingHardware(true)
+    try {
+      await updateHardwareConfig(containerIdentifier, hardwareDraft)
+      await fetchContainer()
+      setShowHardwareModal(false)
+      dialog.alert('保存成功', '硬件与引导配置已更新，下次启动时生效。')
+    } catch (err: unknown) {
+      const error = err as { response?: { data?: { message?: string } } }
+      dialog.alert('保存失败', error.response?.data?.message || '请稍后重试')
+    } finally {
+      setSavingHardware(false)
+    }
+  }
+
+  const submitResizeDisk = async () => {
+    if (!containerIdentifier) return
+    if (resizeDiskDraft <= (container?.disk_gb || 0)) {
+      dialog.alert('输入错误', `新容量必须大于当前容量 (${container?.disk_gb} GB)`)
+      return
+    }
+    setSavingResizeDisk(true)
+    try {
+      await resizeContainerDisk(containerIdentifier, resizeDiskDraft)
+      await fetchContainer()
+      setShowResizeDiskModal(false)
+      dialog.alert('扩容成功', `磁盘已成功扩容至 ${resizeDiskDraft} GB。系统若运行了 Guest Agent 将自动完成内部文件系统扩展。`)
+    } catch (err: unknown) {
+      const error = err as { response?: { data?: { message?: string } } }
+      dialog.alert('扩容失败', error.response?.data?.message || '请稍后重试')
+    } finally {
+      setSavingResizeDisk(false)
+    }
+  }
+
+  const submitImportDisk = async () => {
+    if (!containerIdentifier || !importDiskPath.trim()) {
+      dialog.alert('输入错误', '请输入宿主机上的镜像绝对路径')
+      return
+    }
+    if (!(await dialog.confirm('导入确认', '导入将覆盖现有虚拟机的系统磁盘，确认继续吗？'))) return
+    setSavingImportDisk(true)
+    try {
+      await importContainerDisk(containerIdentifier, importDiskPath.trim(), importAsOverlay)
+      await fetchContainer()
+      setShowImportDiskModal(false)
+      dialog.alert('导入成功', '外部磁盘镜像已成功导入并就绪。')
+    } catch (err: unknown) {
+      const error = err as { response?: { data?: { message?: string } } }
+      dialog.alert('导入失败', error.response?.data?.message || '请稍后重试')
+    } finally {
+      setSavingImportDisk(false)
+    }
+  }
+
   const copyText = async (text: string) => {
     await copyToClipboard(text)
   }
@@ -1168,6 +1302,28 @@ export default function ContainerDetail() {
               <Camera className="w-3.5 h-3.5" />
               快照
             </ActionButton>
+            {isKVM && (
+              <>
+                <ActionButton onClick={() => { setShowBackups(true); fetchBackups(); }} disabled={!!taskStatus || !!backupBusy || isSubUserPolicyBlocked}>
+                  <HardDrive className="w-3.5 h-3.5" />
+                  备份
+                </ActionButton>
+                {!isSubUser && (
+                  <ActionButton onClick={() => {
+                    setHardwareDraft({
+                      boot_order: container.boot_order || 'disk',
+                      boot_media: container.boot_media || '',
+                      nic_model: container.nic_model || (isWindows ? 'e1000e' : 'virtio'),
+                      disk_bus: container.disk_bus || (isWindows ? 'sata' : 'virtio'),
+                    })
+                    setShowHardwareModal(true)
+                  }} disabled={!!taskStatus || isSubUserPolicyBlocked}>
+                    <Settings className="w-3.5 h-3.5" />
+                    引导/硬件
+                  </ActionButton>
+                )}
+              </>
+            )}
             <ActionButton onClick={openReinstall} disabled={!!taskStatus || isExpired || isSubUserPolicyBlocked}>
               <RefreshCw className="w-3.5 h-3.5" />
               {isExpired ? '已到期' : taskStatus === 'reinstall' ? taskActionLabels['reinstall'] : '重装'}
@@ -1269,9 +1425,35 @@ export default function ContainerDetail() {
         ) : undefined}>
           <PlainRow label="vCPU" value={`${container.vcpu} 核`} />
           <PlainRow label="内存" value={`${container.ram_mb} MB`} />
-          <PlainRow label="磁盘" value={`${container.disk_gb} GB`} />
+          <PlainRow label="磁盘" value={`${container.disk_gb} GB`}>
+            {!isSubUser && isKVM && (
+              <div className="flex items-center gap-1.5 ml-2">
+                <button
+                  onClick={() => { setResizeDiskDraft(container.disk_gb + 10); setShowResizeDiskModal(true); }}
+                  className="px-1.5 py-0.5 text-[10px] text-gray-700 border border-gray-300 rounded hover:bg-gray-100"
+                  title="在线/离线扩容磁盘"
+                >
+                  扩容
+                </button>
+                <button
+                  onClick={() => { setImportDiskPath(''); setShowImportDiskModal(true); }}
+                  className="px-1.5 py-0.5 text-[10px] text-blue-700 border border-blue-200 bg-blue-50 rounded hover:bg-blue-100"
+                  title="导入/替换外部 QCOW2 镜像"
+                >
+                  导入镜像
+                </button>
+              </div>
+            )}
+          </PlainRow>
           <PlainRow label="网络速率" value={formatDirectionalLimit(t('下行'), networkDownLimit, t('上行'), networkUpLimit, 'Mbps')} />
           <PlainRow label="IO 速度" value={formatDirectionalLimit(t('读取'), ioReadLimit, t('写入'), ioWriteLimit, 'MB/s')} />
+          {isKVM && (
+            <>
+              <PlainRow label="引导顺序" value={container.boot_order === 'cdrom' ? '光盘优先' : container.boot_order === 'network' ? 'PXE网络优先' : '硬盘优先'} />
+              <PlainRow label="网卡驱动" value={(container.nic_model || (isWindows ? 'e1000e' : 'virtio')).toUpperCase()} />
+              <PlainRow label="磁盘总线" value={(container.disk_bus || (isWindows ? 'sata' : 'virtio')).toUpperCase()} />
+            </>
+          )}
         </Panel>
 
         <Panel title="实时状态">
@@ -2251,11 +2433,204 @@ export default function ContainerDetail() {
                   className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm" />
               </div>
             </div>
-            <p className="text-[11px] text-gray-400">磁盘容量不支持动态修改。修改后运行中的容器会立即应用新的 cgroup 限制。</p>
+            <p className="text-[11px] text-gray-400">修改后运行中的容器会立即应用新的 cgroup 限制。</p>
             <div className="flex justify-end gap-2 pt-2">
               <button onClick={() => setShowResourceEdit(false)} className="px-4 py-2 text-sm text-gray-600 border border-gray-200 rounded-md hover:bg-gray-50">取消</button>
               <button onClick={saveResourceLimit} disabled={savingResource} className="px-4 py-2 text-sm bg-black text-white rounded-md hover:bg-gray-800 disabled:opacity-50">
                 {savingResource ? '保存中...' : '保存'}
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* Backups Modal */}
+      {showBackups && (
+        <Modal
+          title="全量独立备份"
+          onClose={() => setShowBackups(false)}
+          wide
+          extra={
+            <button
+              onClick={handleCreateBackup}
+              disabled={!!backupBusy || isSubUserPolicyBlocked}
+              className="inline-flex items-center gap-1.5 rounded-md bg-black px-3 py-1.5 text-xs text-white hover:bg-gray-800 disabled:opacity-50"
+            >
+              <HardDrive className="w-3.5 h-3.5" />
+              {backupBusy === 'create' ? '压缩打包中...' : '新建全量备份'}
+            </button>
+          }
+        >
+          <div className="space-y-4">
+            <div className="rounded-lg border border-blue-100 bg-blue-50 p-3 text-xs text-blue-700">
+              💡 全量备份会将当前虚拟机的所有磁盘差异合并并使用 qcow2 压缩算法进行打平归档。备份文件完全独立于原盘，适合跨机迁移与长期容灾。
+            </div>
+            <div className="overflow-x-auto rounded-lg border border-gray-200">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-gray-50 text-gray-500">
+                  <tr>
+                    <th className="px-3 py-2 font-medium">备份 ID</th>
+                    <th className="px-3 py-2 font-medium">创建时间</th>
+                    <th className="px-3 py-2 font-medium">大小</th>
+                    <th className="px-3 py-2 font-medium">格式</th>
+                    <th className="px-3 py-2 font-medium">创建人</th>
+                    <th className="px-3 py-2 text-right font-medium">操作</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {backups.map((b) => (
+                    <tr key={b.id} className="hover:bg-gray-50">
+                      <td className="px-3 py-2 font-mono text-gray-800">{b.id}</td>
+                      <td className="px-3 py-2 text-gray-600">{b.created_at}</td>
+                      <td className="px-3 py-2 font-mono text-gray-700">{(b.size_bytes / (1024 * 1024 * 1024)).toFixed(2)} GB</td>
+                      <td className="px-3 py-2"><span className="px-1.5 py-0.5 rounded bg-gray-100 text-gray-700 uppercase font-mono">{b.format || 'qcow2'}</span></td>
+                      <td className="px-3 py-2 text-gray-600">{b.created_by}</td>
+                      <td className="px-3 py-2 text-right">
+                        <div className="inline-flex items-center gap-1">
+                          <button
+                            onClick={() => handleRestoreBackup(b)}
+                            disabled={!!backupBusy}
+                            className="px-2 py-1 bg-amber-50 text-amber-700 hover:bg-amber-100 rounded text-xs font-medium"
+                          >
+                            还原
+                          </button>
+                          <button
+                            onClick={() => handleDeleteBackup(b.id)}
+                            disabled={!!backupBusy}
+                            className="p-1 text-gray-400 hover:text-red-600 rounded hover:bg-red-50"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                  {backups.length === 0 && (
+                    <tr>
+                      <td colSpan={6} className="px-3 py-8 text-center text-gray-400">暂无全量备份，点击右上角新建一个吧</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* Hardware / Boot Settings Modal */}
+      {showHardwareModal && (
+        <Modal title="KVM 引导与硬件设置" onClose={() => setShowHardwareModal(false)}>
+          <div className="space-y-4">
+            <Field label="第一启动项 (Boot Order)">
+              <select
+                value={hardwareDraft.boot_order}
+                onChange={(e) => setHardwareDraft({ ...hardwareDraft, boot_order: e.target.value })}
+                className={inputClass}
+              >
+                <option value="disk">硬盘优先 (Hard Disk - 推荐已装好系统)</option>
+                <option value="cdrom">光盘/ISO 优先 (CD-ROM - 用于安装PE或重装系统)</option>
+                <option value="network">网络 PXE 引导 (Network Boot)</option>
+              </select>
+            </Field>
+            <Field label="虚拟网卡驱动 (NIC Model)">
+              <select
+                value={hardwareDraft.nic_model}
+                onChange={(e) => setHardwareDraft({ ...hardwareDraft, nic_model: e.target.value })}
+                className={inputClass}
+              >
+                <option value="virtio">VirtIO (高性能千兆/万兆 - Linux默认，Windows需驱动)</option>
+                <option value="e1000e">Intel e1000e (通用免驱千兆 - Windows默认)</option>
+                <option value="rtl8139">Realtek RTL8139 (老旧系统兼容百兆)</option>
+              </select>
+            </Field>
+            <Field label="系统磁盘总线 (Disk Bus)">
+              <select
+                value={hardwareDraft.disk_bus}
+                onChange={(e) => setHardwareDraft({ ...hardwareDraft, disk_bus: e.target.value })}
+                className={inputClass}
+              >
+                <option value="virtio">VirtIO Block (vda - Linux极速，Windows需驱动)</option>
+                <option value="sata">SATA AHCI (sda - Windows原生免驱兼容)</option>
+                <option value="ide">IDE (hda - 旧版 Legacy 兼容)</option>
+              </select>
+            </Field>
+            <Field label="自定义挂载 ISO 路径 (留空为使用系统默认)">
+              <input
+                value={hardwareDraft.boot_media}
+                onChange={(e) => setHardwareDraft({ ...hardwareDraft, boot_media: e.target.value })}
+                placeholder="例如: /var/lib/clicd/images/kvm/custom.iso"
+                className={inputClass}
+              />
+            </Field>
+            <div className="flex justify-end gap-2 pt-2">
+              <button onClick={() => setShowHardwareModal(false)} className="px-4 py-2 text-sm text-gray-600 border border-gray-200 rounded-md hover:bg-gray-50">取消</button>
+              <button onClick={saveHardwareConfig} disabled={savingHardware} className="px-4 py-2 text-sm bg-black text-white rounded-md hover:bg-gray-800 disabled:opacity-50">
+                {savingHardware ? '保存中...' : '保存'}
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* Resize Disk Modal */}
+      {showResizeDiskModal && (
+        <Modal title="磁盘在线/离线扩容" onClose={() => setShowResizeDiskModal(false)}>
+          <div className="space-y-4">
+            <p className="text-xs text-gray-500">当前虚拟磁盘容量：<span className="font-semibold text-black">{container.disk_gb} GB</span></p>
+            <Field label="新磁盘容量 (GB)">
+              <input
+                type="number"
+                min={container.disk_gb + 1}
+                max={9999}
+                value={resizeDiskDraft}
+                onChange={(e) => setResizeDiskDraft(Math.max(container.disk_gb + 1, Number(e.target.value) || container.disk_gb + 1))}
+                className={inputClass}
+              />
+            </Field>
+            <div className="rounded-lg bg-gray-50 p-3 text-xs text-gray-500">
+              💡 扩容为非破坏性操作（仅允许向上调大，不支持缩容）。若虚拟机处于运行中且已安装 QEMU Guest Agent，后台将自动通知系统扩展内部分区（支持 Windows C盘在线扩容及 Linux growpart/resize2fs）。
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <button onClick={() => setShowResizeDiskModal(false)} className="px-4 py-2 text-sm text-gray-600 border border-gray-200 rounded-md hover:bg-gray-50">取消</button>
+              <button onClick={submitResizeDisk} disabled={savingResizeDisk} className="px-4 py-2 text-sm bg-black text-white rounded-md hover:bg-gray-800 disabled:opacity-50">
+                {savingResizeDisk ? '扩容中...' : '确认扩容'}
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* Import External Disk Modal */}
+      {showImportDiskModal && (
+        <Modal title="导入外部磁盘镜像 (PVE/KVM 迁移)" onClose={() => setShowImportDiskModal(false)}>
+          <div className="space-y-4">
+            <Field label="宿主机上的镜像绝对路径">
+              <input
+                value={importDiskPath}
+                onChange={(e) => setImportDiskPath(e.target.value)}
+                placeholder="/root/vm-301-disk-0.qcow2 或 /var/lib/vz/images/..."
+                className={inputClass}
+              />
+            </Field>
+            <div className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                id="asOverlay"
+                checked={importAsOverlay}
+                onChange={(e) => setImportAsOverlay(e.target.checked)}
+                className="rounded border-gray-300 text-black focus:ring-black"
+              />
+              <label htmlFor="asOverlay" className="text-xs text-gray-700 cursor-pointer select-none">
+                将此大镜像转为只读基盘 (Base) 并挂载轻量增量层 (推荐：使后续快照仅占数十M)
+              </label>
+            </div>
+            <div className="rounded-lg bg-amber-50 p-3 text-xs text-amber-800">
+              ⚠️ 注意：导入将替换当前虚拟机的系统盘，请确认虚拟机已关机或数据已备份。导入后请根据原系统驱动在“引导/硬件”中匹配相应的网卡与磁盘总线。
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <button onClick={() => setShowImportDiskModal(false)} className="px-4 py-2 text-sm text-gray-600 border border-gray-200 rounded-md hover:bg-gray-50">取消</button>
+              <button onClick={submitImportDisk} disabled={savingImportDisk} className="px-4 py-2 text-sm bg-black text-white rounded-md hover:bg-gray-800 disabled:opacity-50">
+                {savingImportDisk ? '导入处理中...' : '开始导入'}
               </button>
             </div>
           </div>

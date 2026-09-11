@@ -131,7 +131,11 @@ export interface Container {
   snapshot_schedule_created_by: string
   policy_blocked?: boolean
   policy_blocked_reason?: string
-  policy_blocked_at?: string
+  boot_order?: string
+  boot_media?: string
+  firmware?: string
+  nic_model?: string
+  disk_bus?: string
 }
 
 export interface Template {
@@ -919,6 +923,55 @@ export const updateSnapshotQuota = (id: ContainerIdentifier, snapshotLimit: numb
     `/containers/${id}/snapshots/quota`,
     { snapshot_limit: snapshotLimit }
   )
+
+// Backups
+export interface Backup {
+  id: string
+  container_id: number
+  container_name: string
+  lxc_name: string
+  created_at: string
+  created_by: string
+  path: string
+  size_bytes: number
+  format: string
+  compressed: boolean
+}
+
+export interface ContainerBackupsResponse {
+  backups: Backup[]
+}
+
+export const getBackups = () =>
+  api.get<APIResponse<Backup[]>>('/backups')
+
+export const getContainerBackups = (id: ContainerIdentifier) =>
+  api.get<APIResponse<ContainerBackupsResponse>>(`/containers/${id}/backups`)
+
+export const createContainerBackup = (id: ContainerIdentifier, options?: { storage_pool_id?: string }) =>
+  api.post<APIResponse<Backup>>(`/containers/${id}/backups`, options || {}, { timeout: 1800000 })
+
+export const deleteContainerBackup = (id: ContainerIdentifier, backupId: string) =>
+  api.delete<APIResponse>(`/containers/${id}/backups/${backupId}`, { timeout: 600000 })
+
+export const restoreContainerBackup = (id: ContainerIdentifier, backupId: string) =>
+  api.post<APIResponse>(`/containers/${id}/backups/${backupId}/restore`, {}, { timeout: 1800000 })
+
+// Disk Resize & Import
+export const resizeContainerDisk = (id: ContainerIdentifier, diskGb: number) =>
+  api.post<APIResponse<Container>>(`/containers/${id}/resize-disk`, { disk_gb: diskGb })
+
+export const importContainerDisk = (id: ContainerIdentifier, sourcePath: string, asOverlayBase: boolean) =>
+  api.post<APIResponse<Container>>(`/containers/${id}/import-disk`, { source_path: sourcePath, as_overlay_base: asOverlayBase }, { timeout: 1800000 })
+
+export const updateHardwareConfig = (id: ContainerIdentifier, data: {
+  boot_order?: string
+  boot_media?: string
+  firmware?: string
+  nic_model?: string
+  disk_bus?: string
+}) =>
+  api.put<APIResponse<Container>>(`/containers/${id}/hardware-config`, data)
 
 // WebSSH URL generator
 export const getWebSSHUrl = (containerName: string) => {

@@ -253,3 +253,137 @@ func filterSnapshotsForRequest(r *http.Request, snapshots []config.Snapshot) []c
 	}
 	return filtered
 }
+
+// HandleBackups handles global backup listing
+func HandleBackups(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
+		return
+	}
+	if !requireScope(w, r, "snapshot:read") {
+		return
+	}
+	backups := append([]config.Backup(nil), config.AppConfig.Backups...)
+	backups = filterBackupsForRequest(r, backups)
+	sortBackupsNewestFirst(backups)
+	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Data: backups})
+}
+
+func handleContainerBackups(w http.ResponseWriter, r *http.Request, containerID int, action string) {
+	switch {
+	case action == "backups" && r.Method == http.MethodGet:
+		if !requireScope(w, r, "snapshot:read") {
+			return
+		}
+		listContainerBackups(w, r, containerID)
+	case action == "backups" && r.Method == http.MethodPost:
+		if !requireScope(w, r, "snapshot:create") {
+			return
+		}
+		createContainerBackup(w, r, containerID)
+	case strings.HasPrefix(action, "backups/") && strings.HasSuffix(action, "/restore") && r.Method == http.MethodPost:
+		if !requireScope(w, r, "snapshot:restore") {
+			return
+		}
+		backupID := strings.TrimSuffix(strings.TrimPrefix(action, "backups/"), "/restore")
+		restoreContainerBackup(w, r, containerID, backupID)
+	case strings.HasPrefix(action, "backups/") && r.Method == http.MethodDelete:
+		if !requireScope(w, r, "snapshot:delete") {
+			return
+		}
+		backupID := strings.TrimPrefix(action, "backups/")
+		deleteContainerBackup(w, r, containerID, backupID)
+	default:
+		jsonResponse(w, http.StatusNotFound, APIResponse{Success: false, Message: "Backup action not found"})
+	}
+}
+
+func listContainerBackups(w http.ResponseWriter, r *http.Request, containerID int) {
+	c := config.FindContainer(containerID)
+	if c == nil {
+		jsonResponse(w, http.StatusNotFound, APIResponse{Success: false, Message: "Container not found"})
+		return
+	}
+	backups := config.ContainerBackups(containerID)
+	sortBackupsNewestFirst(backups)
+	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Data: map[string]interface{}{
+		"backups": backups,
+	}})
+}
+
+func createContainerBackup(w http.ResponseWriter, r *http.Request, containerID int) {
+	user := requestUser(r)
+	var req struct {
+		StoragePoolID string `json:"storage_pool_id"`
+	}
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+			jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Invalid request body"})
+			return
+		}
+	}
+	req.StoragePoolID = strings.TrimSpace(req.StoragePoolID)
+	if _, err := config.SelectStoragePoolForContent(config.StorageContentBackups, req.StoragePoolID, 0); err != nil {
+		jsonResponse(w, http.StatusConflict, APIResponse{Success: false, Message: err.Error()})
+		return
+	}
+	backup, err := createBackupByRuntime(containerID, user, req.StoragePoolID)
+	if err != nil {
+		jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: err.Error()})
+		return
+	}
+	config.AddAuditLog("backup.create", backup.ContainerName, backup.ID, user)
+	jsonResponse(w, http.StatusCreated, APIResponse{Success: true, Data: backup})
+}
+
+func deleteContainerBackup(w http.ResponseWriter, r *http.Request, containerID int, backupID string) {
+	backup := config.FindBackup(backupID)
+	if backup == nil || backup.ContainerID != containerID {
+		jsonResponse(w, http.StatusNotFound, APIResponse{Success: false, Message: "Backup not found"})
+		return
+	}
+	user := requestUser(r)
+	if err := deleteBackupByRuntime(backupID); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: err.Error()})
+		return
+	}
+	config.AddAuditLog("backup.delete", backup.ContainerName, backup.ID, user)
+	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: "Backup deleted"})
+}
+
+func restoreContainerBackup(w http.ResponseWriter, r *http.Request, containerID int, backupID string) {
+	backup := config.FindBackup(backupID)
+	if backup == nil || backup.ContainerID != containerID {
+		jsonResponse(w, http.StatusNotFound, APIResponse{Success: false, Message: "Backup not found"})
+		return
+	}
+	user := requestUser(r)
+	if err := restoreBackupByRuntime(backupID); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: err.Error()})
+		return
+	}
+	config.AddAuditLog("backup.restore", backup.ContainerName, backup.ID, user)
+	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: "Backup restored"})
+}
+
+func sortBackupsNewestFirst(backups []config.Backup) {
+	sort.SliceStable(backups, func(i, j int) bool {
+		ti, _ := time.Parse("2006-01-02 15:04:05", backups[i].CreatedAt)
+		tj, _ := time.Parse("2006-01-02 15:04:05", backups[j].CreatedAt)
+		return tj.Before(ti)
+	})
+}
+
+func filterBackupsForRequest(r *http.Request, backups []config.Backup) []config.Backup {
+	allowed, restricted := requestAllowedContainers(r)
+	if !restricted {
+		return backups
+	}
+	filtered := make([]config.Backup, 0, len(backups))
+	for _, backup := range backups {
+		if c := config.FindContainer(backup.ContainerID); c != nil && isContainerAllowed(allowed, c) {
+			filtered = append(filtered, backup)
+		}
+	}
+	return filtered
+}
