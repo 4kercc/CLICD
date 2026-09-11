@@ -162,7 +162,17 @@ func HandleSingleContainer(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		getRandomPort(w, r, id)
-	case action == "expiry" && r.Method == http.MethodPut:
+		case action == "rename" && r.Method == http.MethodPut:
+			if !requireScope(w, r, "container:resize") {
+				return
+			}
+			updateContainerName(w, r, id)
+		case action == "template" && r.Method == http.MethodPut:
+			if !requireScope(w, r, "container:resize") {
+				return
+			}
+			updateContainerTemplate(w, r, id)
+		case action == "expiry" && r.Method == http.MethodPut:
 		if !requireScope(w, r, "container:resize") {
 			return
 		}
@@ -412,6 +422,56 @@ func updateExpiry(w http.ResponseWriter, r *http.Request, id int) {
 	c.ExpiresAt = req.ExpiresAt
 	config.SaveConfig()
 	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: "Expiry updated"})
+}
+
+func updateContainerName(w http.ResponseWriter, r *http.Request, id int) {
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Invalid request"})
+		return
+	}
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Name cannot be empty"})
+		return
+	}
+	c := config.FindContainer(id)
+	if c == nil {
+		jsonResponse(w, http.StatusNotFound, APIResponse{Success: false, Message: "Container not found"})
+		return
+	}
+	c.Name = name
+	config.SaveConfig()
+	user := requestUser(r)
+	config.AddAuditLog("container.rename", c.Name, fmt.Sprintf("Renamed to %s", name), user)
+	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: "Name updated successfully", Data: c})
+}
+
+func updateContainerTemplate(w http.ResponseWriter, r *http.Request, id int) {
+	var req struct {
+		Template string `json:"template"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Invalid request"})
+		return
+	}
+	template := strings.TrimSpace(req.Template)
+	if template == "" {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Template cannot be empty"})
+		return
+	}
+	c := config.FindContainer(id)
+	if c == nil {
+		jsonResponse(w, http.StatusNotFound, APIResponse{Success: false, Message: "Container not found"})
+		return
+	}
+	c.Template = template
+	config.SaveConfig()
+	user := requestUser(r)
+	config.AddAuditLog("container.update_template", c.Name, fmt.Sprintf("Updated template label to %s", template), user)
+	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: "Template updated successfully", Data: c})
 }
 
 func resetTraffic(w http.ResponseWriter, r *http.Request, id int) {

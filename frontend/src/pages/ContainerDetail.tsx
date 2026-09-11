@@ -82,6 +82,8 @@ import {
   StorageInfo,
   Template,
   updateContainerExpiry,
+  updateContainerName,
+  updateContainerTemplate,
   updateFirewall,
   updateSnapshotQuota,
   updateSnapshotSchedule,
@@ -245,6 +247,12 @@ export default function ContainerDetail() {
   const [agentInstallTab, setAgentInstallTab] = useState<'windows' | 'linux'>('windows')
   const [mountingVirtio, setMountingVirtio] = useState(false)
   const [copiedLinuxScript, setCopiedLinuxScript] = useState(false)
+  const [editingName, setEditingName] = useState(false)
+  const [nameDraft, setNameDraft] = useState('')
+  const [savingName, setSavingName] = useState(false)
+  const [editingTemplate, setEditingTemplate] = useState(false)
+  const [templateDraft, setTemplateDraft] = useState('')
+  const [savingTemplate, setSavingTemplate] = useState(false)
 
   const fetchContainer = useCallback(async () => {
     if (!containerIdentifier) return
@@ -461,7 +469,8 @@ export default function ContainerDetail() {
           await restartContainer(containerIdentifier)
           break
         case 'delete':
-          if (!(await dialog.confirm('删除容器', `确定要删除容器 ${container?.name} 吗？此操作不可撤销。`))) return
+          if (!(await dialog.confirm('删除确认 (不可恢复)', `确定要彻底删除虚拟机/容器【${container?.name}】吗？`))) return
+          if (!(await dialog.confirm('二次危险确认', `警告：删除后该容器的所有磁盘数据、快照及网络配置将被彻底销毁且无法找回！请确认是否立即执行删除？`))) return
           await deleteContainer(containerIdentifier)
           navigate('/containers')
           return
@@ -472,6 +481,56 @@ export default function ContainerDetail() {
       dialog.alert('操作失败', (err as Error).message || '请稍后重试')
     } finally {
       setActionLoading(null)
+    }
+  }
+
+  const handleSaveName = async () => {
+    if (!container) return
+    const newName = nameDraft.trim()
+    if (!newName) {
+      dialog.alert('输入错误', '主机名不能为空')
+      return
+    }
+    if (newName === container.name) {
+      setEditingName(false)
+      return
+    }
+    setSavingName(true)
+    try {
+      await updateContainerName(container.id, newName)
+      await fetchContainer()
+      setEditingName(false)
+      dialog.alert('修改成功', '主机名已更新')
+    } catch (err: unknown) {
+      const error = err as { response?: { data?: { message?: string } } }
+      dialog.alert('修改失败', error.response?.data?.message || '保存主机名失败')
+    } finally {
+      setSavingName(false)
+    }
+  }
+
+  const handleSaveTemplate = async () => {
+    if (!container) return
+    const newTemplate = templateDraft.trim()
+    if (!newTemplate) {
+      dialog.alert('输入错误', '系统标识不能为空')
+      return
+    }
+    if (newTemplate === container.template) {
+      setEditingTemplate(false)
+      return
+    }
+    setSavingTemplate(true)
+    try {
+      await updateContainerTemplate(container.id, newTemplate)
+      await fetchContainer()
+      setEditingTemplate(false)
+      dialog.alert('修改成功', '系统标识已更新')
+    } catch (err: unknown) {
+      const error = err as { response?: { data?: { message?: string } } }
+      dialog.alert('修改失败', error.response?.data?.message || '保存系统标识失败')
+    } finally {
+      setSavingTemplate(false)
     }
   }
 
@@ -1473,11 +1532,114 @@ export default function ContainerDetail() {
             </div>
             <div>
               <div className="flex items-center gap-2 flex-wrap">
-                <h1 className="text-xl font-bold text-black">{container.name}</h1>
+                {editingName && !isSubUser ? (
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="text"
+                      value={nameDraft}
+                      onChange={(e) => setNameDraft(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') handleSaveName()
+                        if (e.key === 'Escape') setEditingName(false)
+                      }}
+                      autoFocus
+                      placeholder="输入新主机名"
+                      className="px-2 py-0.5 border border-black rounded text-base font-bold text-black bg-white focus:outline-none focus:ring-1 focus:ring-black w-48"
+                      disabled={savingName}
+                    />
+                    <button
+                      onClick={handleSaveName}
+                      disabled={savingName}
+                      className="px-2 py-1 bg-black text-white text-xs rounded hover:bg-gray-800 disabled:opacity-50"
+                    >
+                      {savingName ? '...' : '保存'}
+                    </button>
+                    <button
+                      onClick={() => setEditingName(false)}
+                      disabled={savingName}
+                      className="px-2 py-1 border border-gray-300 text-gray-700 text-xs rounded hover:bg-gray-100 disabled:opacity-50"
+                    >
+                      取消
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-1.5 group">
+                    <h1
+                      onDoubleClick={() => {
+                        if (!isSubUser) {
+                          setNameDraft(container.name)
+                          setEditingName(true)
+                        }
+                      }}
+                      className={`text-xl font-bold text-black select-none ${!isSubUser ? 'cursor-pointer hover:text-blue-600 transition-colors' : ''}`}
+                      title={!isSubUser ? '双击可直接修改主机名' : undefined}
+                    >
+                      {container.name}
+                    </h1>
+                    {!isSubUser && (
+                      <button
+                        onClick={() => {
+                          setNameDraft(container.name)
+                          setEditingName(true)
+                        }}
+                        className="opacity-0 group-hover:opacity-100 p-0.5 text-gray-400 hover:text-black transition-opacity rounded"
+                        title="点击修改主机名 (也可双击名称修改)"
+                      >
+                        <Pencil className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                )}
                 <StatusBadge running={isRunning} initializing={isInitializing} />
               </div>
               <div className="flex items-center gap-2 flex-wrap mt-2">
-                <InfoTag color="blue">系统 {container.template}</InfoTag>
+                {editingTemplate && !isSubUser ? (
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="text"
+                      value={templateDraft}
+                      onChange={(e) => setTemplateDraft(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') handleSaveTemplate()
+                        if (e.key === 'Escape') setEditingTemplate(false)
+                      }}
+                      autoFocus
+                      placeholder="如 debian-12 或 win10"
+                      className="px-2 py-0.5 border border-black rounded text-[11px] text-black bg-white focus:outline-none w-36 font-mono"
+                      disabled={savingTemplate}
+                    />
+                    <button
+                      onClick={handleSaveTemplate}
+                      disabled={savingTemplate}
+                      className="px-1.5 py-0.5 bg-black text-white text-[10px] rounded hover:bg-gray-800 disabled:opacity-50"
+                    >
+                      {savingTemplate ? '...' : '保存'}
+                    </button>
+                    <button
+                      onClick={() => setEditingTemplate(false)}
+                      disabled={savingTemplate}
+                      className="px-1.5 py-0.5 border border-gray-300 text-gray-700 text-[10px] rounded hover:bg-gray-100 disabled:opacity-50"
+                    >
+                      取消
+                    </button>
+                  </div>
+                ) : (
+                  <span
+                    onDoubleClick={() => {
+                      if (!isSubUser) {
+                        setTemplateDraft(container.template || '')
+                        setEditingTemplate(true)
+                      }
+                    }}
+                    className={`cursor-pointer group flex items-center gap-1`}
+                    title={!isSubUser ? '双击可修改系统模板标识（如自定义安装Windows/Debian后纠正图标与连接协议）' : undefined}
+                  >
+                    <InfoTag color="blue">
+                      系统 {container.template}
+                      {!isSubUser && <Pencil className="w-2.5 h-2.5 inline ml-1 opacity-60 group-hover:opacity-100" />}
+                    </InfoTag>
+                  </span>
+                )}
                 <InfoTag color="slate">类型 {(container.virtualization || 'lxc').toUpperCase()}</InfoTag>
                 <InfoTag color="emerald">内网 {container.ip || '-'}</InfoTag>
                 {hasIndependentIPv4 ? (
@@ -1568,7 +1730,7 @@ export default function ContainerDetail() {
               {isExpired ? '已到期' : taskStatus === 'reinstall' ? taskActionLabels['reinstall'] : '重装'}
             </ActionButton>
             {!isSubUser && (
-              <ActionButton disabled={!!taskStatus} onClick={() => handleAction('delete')}>
+              <ActionButton danger disabled={!!taskStatus} onClick={() => handleAction('delete')}>
                 <Trash2 className="w-3.5 h-3.5" />
                 {taskStatus === 'delete' ? taskActionLabels['delete'] : '删除'}
               </ActionButton>
@@ -3198,12 +3360,31 @@ function InfoTag({ color, children }: { color: 'blue' | 'emerald' | 'amber' | 'v
   return <span className={`px-1.5 py-0.5 border rounded text-[11px] whitespace-nowrap ${classes[color]}`}>{children}</span>
 }
 
-function ActionButton({ children, onClick, disabled, dark = false }: { children: ReactNode; onClick: () => void; disabled?: boolean; dark?: boolean }) {
+function ActionButton({
+  children,
+  onClick,
+  disabled,
+  dark = false,
+  danger = false,
+}: {
+  children: ReactNode
+  onClick: () => void
+  disabled?: boolean
+  dark?: boolean
+  danger?: boolean
+}) {
+  const baseClasses = 'inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap'
+  const variantClasses = danger
+    ? 'bg-rose-600 text-white hover:bg-rose-700 border border-transparent shadow-sm'
+    : dark
+    ? 'bg-black text-white hover:bg-gray-800'
+    : 'border border-gray-300 text-gray-700 hover:bg-gray-50'
+
   return (
     <button
       onClick={onClick}
       disabled={disabled}
-      className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap ${dark ? 'bg-black text-white hover:bg-gray-800' : 'border border-gray-300 text-gray-700 hover:bg-gray-50'}`}
+      className={`${baseClasses} ${variantClasses}`}
     >
       {children}
     </button>

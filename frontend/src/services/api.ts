@@ -938,6 +938,12 @@ export const updateSnapshotSchedule = (id: ContainerIdentifier, enabled: boolean
     { timeout: 600000 }
   )
 
+export const updateContainerName = (id: ContainerIdentifier, name: string) =>
+  api.put<APIResponse<Container>>(`/containers/${id}/rename`, { name })
+
+export const updateContainerTemplate = (id: ContainerIdentifier, template: string) =>
+  api.put<APIResponse<Container>>(`/containers/${id}/template`, { template })
+
 export const updateSnapshotQuota = (id: ContainerIdentifier, snapshotLimit: number) =>
   api.put<APIResponse<{ container: Container; quota: number }>>(
     `/containers/${id}/snapshots/quota`,
