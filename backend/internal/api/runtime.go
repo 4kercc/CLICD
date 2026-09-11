@@ -185,12 +185,12 @@ func restoreSnapshotByRuntime(snapshotID string) error {
 	return lxcManager.RestoreSnapshot(snapshotID)
 }
 
-func setSnapshotScheduleByRuntime(id int, enabled bool, intervalHours int, scheduleTime string, createdBy string) (*config.Container, error) {
+func setSnapshotScheduleByRuntime(id int, enabled bool, intervalHours int, scheduleTime string, maxCopies int, createdBy string) (*config.Container, error) {
 	c := config.FindContainer(id)
 	if c != nil && c.IsKVM() {
-		return kvmManager.SetSnapshotSchedule(id, enabled, intervalHours, scheduleTime, createdBy)
+		return kvmManager.SetSnapshotSchedule(id, enabled, intervalHours, scheduleTime, maxCopies, createdBy)
 	}
-	return lxcManager.SetSnapshotSchedule(id, enabled, intervalHours, scheduleTime, createdBy)
+	return lxcManager.SetSnapshotSchedule(id, enabled, intervalHours, scheduleTime, maxCopies, createdBy)
 }
 
 func createBackupByRuntime(id int, createdBy string, storagePoolID ...string) (config.Backup, error) {

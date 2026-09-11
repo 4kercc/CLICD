@@ -175,7 +175,7 @@ func (m *Manager) RestoreSnapshot(id string) error {
 	return nil
 }
 
-func (m *Manager) SetSnapshotSchedule(id int, enabled bool, intervalHours int, scheduleTime string, createdBy string) (*config.Container, error) {
+func (m *Manager) SetSnapshotSchedule(id int, enabled bool, intervalHours int, scheduleTime string, maxCopies int, createdBy string) (*config.Container, error) {
 	c := config.FindContainer(id)
 	if c == nil {
 		return nil, fmt.Errorf("container not found: %d", id)
@@ -186,9 +186,13 @@ func (m *Manager) SetSnapshotSchedule(id int, enabled bool, intervalHours int, s
 	if _, err := parseScheduleClock(scheduleTime); err != nil {
 		return nil, err
 	}
+	if maxCopies < 0 {
+		maxCopies = 0
+	}
 	c.SnapshotScheduleEnabled = enabled
 	c.SnapshotScheduleIntervalHours = intervalHours
 	c.SnapshotScheduleTime = scheduleTime
+	c.SnapshotScheduleMaxCopies = maxCopies
 	c.SnapshotScheduleCreatedBy = createdBy
 	if enabled {
 		c.SnapshotScheduleNextRun = nextSnapshotRun(time.Now(), intervalHours, scheduleTime).Format(time.RFC3339)
@@ -226,15 +230,15 @@ func (m *Manager) runDueSnapshotSchedules() {
 		if now.Before(nextRun) {
 			continue
 		}
-		createdBy := c.SnapshotScheduleCreatedBy
-		if createdBy == "" {
-			createdBy = "admin"
-		}
-		rotateLimit := 0
-		if strings.HasPrefix(createdBy, "user:") {
-			rotateLimit = config.ContainerSnapshotLimit(&c)
-		}
-		if _, err := m.CreateSnapshot(c.ID, createdBy, true, rotateLimit); err != nil {
+			createdBy := c.SnapshotScheduleCreatedBy
+			if createdBy == "" {
+				createdBy = "admin"
+			}
+			rotateLimit := c.SnapshotScheduleMaxCopies
+			if rotateLimit <= 0 && strings.HasPrefix(createdBy, "user:") {
+				rotateLimit = config.ContainerSnapshotLimit(&c)
+			}
+			if _, err := m.CreateSnapshot(c.ID, createdBy, true, rotateLimit); err != nil {
 			fmt.Printf("Warning: scheduled snapshot failed for %s: %v\n", c.Name, err)
 			continue
 		}

@@ -215,7 +215,7 @@ export default function ContainerDetail() {
   const [storageLoading, setStorageLoading] = useState(!isSubUser)
   const [snapshotStoragePoolID, setSnapshotStoragePoolID] = useState('')
   const [showSnapshotSchedule, setShowSnapshotSchedule] = useState(false)
-  const [snapshotScheduleDraft, setSnapshotScheduleDraft] = useState({ intervalHours: 24, time: '03:00' })
+  const [snapshotScheduleDraft, setSnapshotScheduleDraft] = useState({ intervalHours: 24, time: '03:00', maxCopies: 0 })
   const [showFirewall, setShowFirewall] = useState(false)
   const [firewallEnabled, setFirewallEnabled] = useState(false)
   const [firewallDefaultAction, setFirewallDefaultAction] = useState<'ACCEPT' | 'DROP'>('DROP')
@@ -1069,6 +1069,7 @@ export default function ContainerDetail() {
     setSnapshotScheduleDraft({
       intervalHours: Math.max(snapshotSchedule?.interval_hours || 24, 24),
       time: snapshotSchedule?.time || '03:00',
+      maxCopies: snapshotSchedule?.max_copies || 0,
     })
     setShowSnapshotSchedule(true)
   }
@@ -1078,13 +1079,14 @@ export default function ContainerDetail() {
     if (!(await ensureSubUserCanOperate())) return
     const intervalHours = snapshotScheduleDraft.intervalHours
     const scheduleTime = snapshotScheduleDraft.time || '03:00'
+    const maxCopies = Math.max(0, snapshotScheduleDraft.maxCopies || 0)
     if (enabled && intervalHours < 24) {
       await dialog.alert('参数错误', '自动快照周期最低是 1 天一次。')
       return
     }
     setSnapshotBusy('schedule')
     try {
-      await updateSnapshotSchedule(containerIdentifier, enabled, intervalHours, scheduleTime)
+      await updateSnapshotSchedule(containerIdentifier, enabled, intervalHours, scheduleTime, maxCopies)
       await Promise.all([fetchSnapshots(), fetchContainer()])
       setShowSnapshotSchedule(false)
     } catch (err: unknown) {
@@ -2399,7 +2401,11 @@ export default function ContainerDetail() {
               <div>
                 定时状态：
                 <span className="text-gray-900">
-                  {snapshotSchedule?.enabled ? `已开启，每 ${formatScheduleInterval(snapshotSchedule.interval_hours || 24)}，${snapshotSchedule.time || '03:00'} 执行` : '未开启'}
+                  {snapshotSchedule?.enabled
+                    ? `已开启，每 ${formatScheduleInterval(snapshotSchedule.interval_hours || 24)}，${snapshotSchedule.time || '03:00'} 执行${
+                        snapshotSchedule.max_copies && snapshotSchedule.max_copies > 0 ? ` (最多保留 ${snapshotSchedule.max_copies} 份)` : ' (保留全部)'
+                      }`
+                    : '未开启'}
                 </span>
               </div>
               {snapshotSchedule?.next_run && (
@@ -2495,8 +2501,26 @@ export default function ContainerDetail() {
                 className={inputClass}
               />
             </Field>
+            <Field label="最多保留份数 (超过自动清理最旧快照)">
+              <div className="space-y-1">
+                <input
+                  type="number"
+                  min={0}
+                  max={99}
+                  value={snapshotScheduleDraft.maxCopies}
+                  onChange={(e) => setSnapshotScheduleDraft({ ...snapshotScheduleDraft, maxCopies: Math.max(0, parseInt(e.target.value || '0', 10)) })}
+                  className={inputClass}
+                  placeholder="0 代表不限制保留数量"
+                />
+                <p className="text-[11px] text-gray-400">
+                  设置为 0 表示不限制；若设置为 3，则每次执行自动定时快照时，仅保留最新的 3 份快照，自动删除日期最久的旧快照。
+                </p>
+              </div>
+            </Field>
             <div className="rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-500">
-              {`每 ${formatScheduleInterval(snapshotScheduleDraft.intervalHours)} 在 ${snapshotScheduleDraft.time || '03:00'} 执行。`}
+              {`每 ${formatScheduleInterval(snapshotScheduleDraft.intervalHours)} 在 ${snapshotScheduleDraft.time || '03:00'} 执行${
+                snapshotScheduleDraft.maxCopies > 0 ? `，自动轮转保留最新的 ${snapshotScheduleDraft.maxCopies} 份` : '，保留全部快照'
+              }。`}
             </div>
             <div className="flex justify-between gap-3 pt-2">
               {snapshotSchedule?.enabled ? (

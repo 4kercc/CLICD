@@ -162,9 +162,10 @@ type Container struct {
 	SnapshotScheduleEnabled       bool                   `json:"snapshot_schedule_enabled"`
 	SnapshotScheduleIntervalHours int                    `json:"snapshot_schedule_interval_hours"`
 	SnapshotScheduleTime          string                 `json:"snapshot_schedule_time"`
+	SnapshotScheduleMaxCopies     int                    `json:"snapshot_schedule_max_copies,omitempty"`
 	SnapshotScheduleLastRun       string                 `json:"snapshot_schedule_last_run"`
 	SnapshotScheduleNextRun       string                 `json:"snapshot_schedule_next_run"`
-		SnapshotScheduleCreatedBy     string                 `json:"snapshot_schedule_created_by"`
+	SnapshotScheduleCreatedBy     string                 `json:"snapshot_schedule_created_by"`
 		PolicyBlocked                 bool                   `json:"policy_blocked"`
 		PolicyBlockedReason           string                 `json:"policy_blocked_reason,omitempty"`
 		PolicyBlockedAt               string                 `json:"policy_blocked_at,omitempty"`
@@ -1697,6 +1698,7 @@ func clearContainerSnapshotSchedule(c *Container) {
 	c.SnapshotScheduleEnabled = false
 	c.SnapshotScheduleIntervalHours = 0
 	c.SnapshotScheduleTime = ""
+	c.SnapshotScheduleMaxCopies = 0
 	c.SnapshotScheduleLastRun = ""
 	c.SnapshotScheduleNextRun = ""
 	c.SnapshotScheduleCreatedBy = ""
