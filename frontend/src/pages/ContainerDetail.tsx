@@ -119,6 +119,7 @@ type MappingDraft = {
   host_ip: string
   container_port: string
   protocol: string
+  sync_ipv6: boolean
 }
 
 type IPAssignMode = 'clear' | 'random' | 'custom'
@@ -130,6 +131,7 @@ const emptyDraft: MappingDraft = {
   host_ip: '',
   container_port: '',
   protocol: 'all',
+  sync_ipv6: true,
 }
 
 export default function ContainerDetail() {
@@ -743,6 +745,7 @@ export default function ContainerDetail() {
       host_ip: pm.host_ip || '',
       container_port: String(pm.container_port),
       protocol: pm.protocol || 'all',
+      sync_ipv6: true,
     })
     setShowNat(true)
     setShowMappingEditor(true)
@@ -794,6 +797,60 @@ export default function ContainerDetail() {
       } else {
         await updatePortMapping(containerIdentifier, draft.index, payload)
       }
+
+      // Sync IPv6 NAT / firewall rule if toggle is enabled
+      if (draft.sync_ipv6 && container && !isSubUser) {
+        try {
+          const fwRes = await getFirewall(container.id)
+          const currentRules = fwRes.data.data?.rules || container.firewall_rules || []
+          const fwEnabled = fwRes.data.data?.enabled ?? container.firewall_enabled ?? false
+          const fwDefault = fwRes.data.data?.default_action || container.firewall_default_action || 'DROP'
+          
+          const proto = (protocolVal === 'all' || protocolVal === 'tcp+udp') ? 'all' : (protocolVal as 'tcp' | 'udp' | 'icmp' | 'all')
+          const portStr = (proto === 'tcp' || proto === 'udp') ? String(containerPort) : ''
+          const desc = `[NAT-v6] ${payload.description}`
+
+          // Check if matching IPv6 rule already exists
+          const existingIdx = currentRules.findIndex(r => 
+            (r.network === 'ipv6' || r.network === 'all') && 
+            r.direction === 'in' && 
+            r.action === 'ACCEPT' && 
+            (r.port === String(containerPort) || (!portStr && !r.port))
+          )
+
+          let updatedRules = [...currentRules]
+          if (existingIdx >= 0) {
+            updatedRules[existingIdx] = {
+              ...updatedRules[existingIdx],
+              protocol: proto,
+              port: portStr,
+              description: desc,
+              enabled: true,
+            }
+          } else {
+            updatedRules.push({
+              id: `nat6-${Date.now()}`,
+              network: 'ipv6',
+              direction: 'in',
+              protocol: proto,
+              port: portStr,
+              source_ip: '',
+              action: 'ACCEPT',
+              description: desc,
+              enabled: true,
+            })
+          }
+
+          await updateFirewall(container.id, {
+            enabled: fwEnabled,
+            default_action: fwDefault,
+            rules: updatedRules,
+          })
+        } catch (fwErr) {
+          console.warn('Sync IPv6 rule warning:', fwErr)
+        }
+      }
+
       setDraft(emptyDraft)
       await fetchContainer()
       return true
@@ -807,15 +864,41 @@ export default function ContainerDetail() {
   }
 
   const removeMapping = async (index: number) => {
-    if (!containerIdentifier || !(await dialog.confirm('删除映射', '确定要删除这条映射规则吗？'))) return
+    if (!containerIdentifier || !(await dialog.confirm('删除映射', '确定要删除这条 NAT 规则吗？'))) return
     if (!(await ensureSubUserCanOperate())) return
+    const targetMapping = container?.port_mappings?.[index]
     try {
       await deletePortMapping(containerIdentifier, index)
+
+      // Optionally clean corresponding auto-synced IPv6 rule if exists
+      if (targetMapping && container && !isSubUser) {
+        try {
+          const fwRes = await getFirewall(container.id)
+          const currentRules = fwRes.data.data?.rules || container.firewall_rules || []
+          const fwEnabled = fwRes.data.data?.enabled ?? container.firewall_enabled ?? false
+          const fwDefault = fwRes.data.data?.default_action || container.firewall_default_action || 'DROP'
+          
+          const targetPortStr = String(targetMapping.container_port)
+          const filteredRules = currentRules.filter(r => 
+            !(r.network === 'ipv6' && r.direction === 'in' && r.action === 'ACCEPT' && r.port === targetPortStr && r.description.startsWith('[NAT-v6]'))
+          )
+          if (filteredRules.length !== currentRules.length) {
+            await updateFirewall(container.id, {
+              enabled: fwEnabled,
+              default_action: fwDefault,
+              rules: filteredRules,
+            })
+          }
+        } catch (fwErr) {
+          console.warn('Sync IPv6 rule removal warning:', fwErr)
+        }
+      }
+
       await fetchContainer()
       if (draft.index === index) setDraft(emptyDraft)
     } catch (err: unknown) {
       const error = err as { response?: { data?: { message?: string } } }
-      dialog.alert('操作失败', error.response?.data?.message || '删除端口映射失败')
+      dialog.alert('操作失败', error.response?.data?.message || '删除 NAT 规则失败')
     }
   }
 
@@ -1291,7 +1374,7 @@ export default function ContainerDetail() {
             {!hasIndependentIPv4 && hasNATQuota && (
               <ActionButton disabled={isSubUserPolicyBlocked} onClick={() => setShowNat(true)}>
                 <Settings className="w-3.5 h-3.5" />
-                IPv4 NAT 管理
+                NAT 规则
               </ActionButton>
             )}
             <ActionButton onClick={openFirewall} disabled={isSubUserPolicyBlocked}>
@@ -2218,10 +2301,10 @@ export default function ContainerDetail() {
       )}
 
       {showNat && !hasIndependentIPv4 && (
-        <Modal title="IPv4 NAT 端口管理" onClose={() => { setShowNat(false); setDraft(emptyDraft); setShowMappingEditor(false) }} wide extra={
+        <Modal title="NAT 规则" onClose={() => { setShowNat(false); setDraft(emptyDraft); setShowMappingEditor(false) }} wide extra={
           !isSubUser && canAddMapping && (
             <button onClick={openAddMapping} className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-black text-white rounded-md text-xs hover:bg-gray-800">
-              <Plus className="w-3.5 h-3.5" />添加映射
+              <Plus className="w-3.5 h-3.5" />添加 NAT 规则
             </button>
           )
         }>
@@ -2231,11 +2314,11 @@ export default function ContainerDetail() {
                 {hasNATQuota ? (
                   <>端口配额：<span className="font-mono text-gray-800">{mappingCount}/{mappingLimit}</span></>
                 ) : (
-                  <span>未分配 IPv4 NAT 端口配额</span>
+                  <span>未分配 NAT 端口配额</span>
                 )}
               </div>
               {!isSubUser && hasNATQuota && !canAddMapping && (
-                <div className="text-xs text-amber-600">已达到管理员分配的 IPv4 NAT 端口配额</div>
+                <div className="text-xs text-amber-600">已达到管理员分配的 NAT 端口配额</div>
               )}
             </div>
             <MappingTable mappings={container.port_mappings || []} publicHost={publicHost} onEdit={openEditMapping} onDelete={isSubUser ? () => {} : removeMapping} isSubUser={isSubUser} />
@@ -2245,7 +2328,7 @@ export default function ContainerDetail() {
 
       {showMappingEditor && (
         <Modal
-          title={draft.index === null ? '添加端口映射' : '修改端口映射'}
+          title={draft.index === null ? '添加 NAT 规则' : '修改 NAT 规则'}
           onClose={() => { setShowMappingEditor(false); setDraft(emptyDraft) }}
         >
           <MappingEditor
@@ -2950,6 +3033,25 @@ function MappingEditor({
         </Field>
       </div>
 
+      {!isSubUser && (
+        <div className="rounded-lg border border-gray-200 bg-gray-50 p-3.5 space-y-1">
+          <label className="flex items-center justify-between cursor-pointer select-none">
+            <span className="text-xs font-medium text-gray-800">
+              同步创建/放行同端口 IPv6 NAT 规则
+            </span>
+            <input
+              type="checkbox"
+              checked={draft.sync_ipv6}
+              onChange={(e) => updateDraft({ sync_ipv6: e.target.checked })}
+              className="h-4 w-4 rounded border-gray-300 text-black focus:ring-black"
+            />
+          </label>
+          <p className="text-[11px] text-gray-500 leading-relaxed">
+            默认开启：保存时将在 IPv6 防火墙自动生成/放行对应的入站端口规则；关闭后可分别在“NAT 规则”与“防火墙”中各自自行独立管理。
+          </p>
+        </div>
+      )}
+
       <div className="flex justify-end gap-2 border-t border-gray-100 pt-4">
         <button onClick={onCancel} className="px-4 py-2 text-sm text-gray-600 border border-gray-200 rounded-md hover:bg-gray-50">
           取消
@@ -2969,7 +3071,7 @@ function MappingEditor({
 
 function MappingTable({ mappings, publicHost, onEdit, onDelete, compact = false, isSubUser = false }: { mappings: PortMapping[]; publicHost: string; onEdit: (pm: PortMapping, index: number) => void; onDelete: (index: number) => void; compact?: boolean; isSubUser?: boolean }) {
   if (mappings.length === 0) {
-    return <p className="text-sm text-gray-400">暂无端口映射</p>
+    return <p className="text-sm text-gray-400">暂无 NAT 规则</p>
   }
 
   return (
