@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -9,8 +10,10 @@ import (
 	pathpkg "path"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"clicd/internal/config"
+	"clicd/internal/storage/remote"
 )
 
 type storageInfoResponse struct {
@@ -70,9 +73,11 @@ func HandleStorage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for _, pool := range pools {
-			if err := os.MkdirAll(pool.Path, 0755); err != nil {
-				jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: fmt.Sprintf("Failed to create %s: %v", pool.Path, err)})
-				return
+			if pool.Type == "local" || pool.Type == "" {
+				if err := os.MkdirAll(pool.Path, 0755); err != nil {
+					jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: fmt.Sprintf("Failed to create %s: %v", pool.Path, err)})
+					return
+				}
 			}
 		}
 		config.AppConfig.StoragePools = pools
@@ -86,29 +91,66 @@ func HandleStorage(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func HandleStorageTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
+		return
+	}
+	var req struct {
+		Type   string            `json:"type"`
+		Config map[string]string `json:"config"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Invalid request body"})
+		return
+	}
+	client, err := remote.NewClient(req.Type, req.Config)
+	if err != nil {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: err.Error()})
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	if err := client.TestConnection(ctx); err != nil {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: fmt.Sprintf("连接失败: %v", err)})
+		return
+	}
+	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: "远程存储连接测试成功！"})
+}
+
 func buildStorageInfo() storageInfoResponse {
 	disks := detectStorageDisks()
 	pools := make([]storagePoolInfo, 0, len(config.AppConfig.StoragePools))
 	for _, pool := range config.AppConfig.StoragePools {
 		info := storagePoolInfo{StoragePool: pool}
-		if filepath.Clean(pool.MountPoint) == string(os.PathSeparator) {
-			_ = os.MkdirAll(pool.Path, 0755)
-		}
-		if st, err := os.Stat(pool.Path); err == nil && st.IsDir() {
+		if pool.Type == "local" || pool.Type == "" {
+			if filepath.Clean(pool.MountPoint) == string(os.PathSeparator) {
+				_ = os.MkdirAll(pool.Path, 0755)
+			}
+			if st, err := os.Stat(pool.Path); err == nil && st.IsDir() {
+				info.Exists = true
+			} else if err != nil {
+				info.Error = err.Error()
+			}
+			detectedMountPoint := bestMountPointForPath(pool.Path, disks)
+			if info.MountPoint == "" {
+				info.MountPoint = detectedMountPoint
+			}
+			if detectedMountPoint != "" && filepath.Clean(info.MountPoint) == filepath.Clean(detectedMountPoint) {
+				info.Available = info.Exists
+				info.SizeBytes, info.UsedBytes, info.FreeBytes = dfPath(pool.Path)
+				info.ContentUsage, info.ClicdUsedBytes = contentUsageForPool(pool.Path)
+			} else if info.Error == "" {
+				info.Error = "storage disk is not mounted"
+			}
+		} else {
+			// Remote storage pool (SFTP / WebDAV / MinIO)
+			info.Available = pool.Enabled
 			info.Exists = true
-		} else if err != nil {
-			info.Error = err.Error()
-		}
-		detectedMountPoint := bestMountPointForPath(pool.Path, disks)
-		if info.MountPoint == "" {
-			info.MountPoint = detectedMountPoint
-		}
-		if detectedMountPoint != "" && filepath.Clean(info.MountPoint) == filepath.Clean(detectedMountPoint) {
-			info.Available = info.Exists
-			info.SizeBytes, info.UsedBytes, info.FreeBytes = dfPath(pool.Path)
-			info.ContentUsage, info.ClicdUsedBytes = contentUsageForPool(pool.Path)
-		} else if info.Error == "" {
-			info.Error = "storage disk is not mounted"
+			info.MountPoint = pool.Type
+			info.SizeBytes = 1000 * 1024 * 1024 * 1024 // Display placeholder 1TB
+			info.FreeBytes = 1000 * 1024 * 1024 * 1024
 		}
 		pools = append(pools, info)
 	}
@@ -150,6 +192,36 @@ func normalizeStoragePoolsRequestWithDisks(items []config.StoragePool, disks []s
 	seen := map[string]bool{}
 	defaultSeen := map[string]bool{}
 	for _, item := range items {
+		itemType := strings.ToLower(strings.TrimSpace(item.Type))
+		if itemType == "" {
+			itemType = "local"
+		}
+		if itemType != "local" {
+			// Remote Storage Pool (SFTP, WebDAV, MinIO/S3)
+			id := strings.TrimSpace(item.ID)
+			if id == "" {
+				id = fmt.Sprintf("remote-%s-%d", itemType, time.Now().Unix())
+			}
+			if seen[id] {
+				return nil, fmt.Errorf("duplicate storage pool ID: %s", id)
+			}
+			seen[id] = true
+			name := strings.TrimSpace(item.Name)
+			if name == "" {
+				name = fmt.Sprintf("%s 存储", strings.ToUpper(itemType))
+			}
+			result = append(result, config.StoragePool{
+				ID:            id,
+				Name:          name,
+				Type:          itemType,
+				Enabled:       item.Enabled,
+				SyncSnapshots: item.SyncSnapshots,
+				SyncBackups:   item.SyncBackups,
+				Config:        item.Config,
+			})
+			continue
+		}
+
 		disk, managedPath, err := storageDiskForPoolRequest(item, disks)
 		if err != nil {
 			return nil, err
@@ -180,11 +252,14 @@ func normalizeStoragePoolsRequestWithDisks(items []config.StoragePool, disks []s
 		result = append(result, config.StoragePool{
 			ID:              id,
 			Name:            name,
+			Type:            "local",
 			Path:            managedPath,
 			MountPoint:      disk.MountPoint,
 			ContentTypes:    contentTypes,
 			DefaultContents: defaults,
 			Enabled:         item.Enabled,
+			SyncSnapshots:   item.SyncSnapshots,
+			SyncBackups:     item.SyncBackups,
 		})
 	}
 	return result, nil

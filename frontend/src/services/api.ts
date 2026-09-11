@@ -198,10 +198,14 @@ export interface CreateContainerRequest {
 export interface StoragePool {
   id: string
   name: string
-  path: string
-  content_types: string[]
+  type?: 'local' | 'sftp' | 'webdav' | 'minio' | string
+  path?: string
+  content_types?: string[]
   default_contents?: string[]
   enabled: boolean
+  sync_snapshots?: boolean
+  sync_backups?: boolean
+  config?: Record<string, string>
   available?: boolean
   exists?: boolean
   size_bytes?: number
@@ -869,6 +873,9 @@ export const getStorageInfo = () =>
 export const updateStoragePools = (pools: StoragePool[]) =>
   api.put<APIResponse<StorageInfo>>('/storage', { pools })
 
+export const testRemoteStorage = (type: string, config: Record<string, string>) =>
+  api.post<APIResponse>('/storage/test', { type, config })
+
 // Snapshots
 export interface Snapshot {
   id: string
@@ -880,6 +887,9 @@ export interface Snapshot {
   scheduled: boolean
   path: string
   size_bytes: number
+  remote_synced?: boolean
+  remote_storage_pool_id?: string
+  remote_path?: string
 }
 
 export interface SnapshotSchedule {
@@ -909,8 +919,8 @@ export const createContainerSnapshot = (id: ContainerIdentifier, options?: Creat
 export const deleteContainerSnapshot = (id: ContainerIdentifier, snapshotId: string) =>
   api.delete<APIResponse>(`/containers/${id}/snapshots/${snapshotId}`, { timeout: 600000 })
 
-export const restoreContainerSnapshot = (id: ContainerIdentifier, snapshotId: string) =>
-  api.post<APIResponse>(`/containers/${id}/snapshots/${snapshotId}/restore`, {}, { timeout: 600000 })
+export const restoreContainerSnapshot = (id: ContainerIdentifier, snapshotId: string, options?: { source?: 'local' | 'remote' }) =>
+  api.post<APIResponse>(`/containers/${id}/snapshots/${snapshotId}/restore`, options || {}, { timeout: 600000 })
 
 export const updateSnapshotSchedule = (id: ContainerIdentifier, enabled: boolean, intervalHours: number, time: string) =>
   api.post<APIResponse<{ container: Container; snapshot?: Snapshot }>>(
@@ -937,6 +947,9 @@ export interface Backup {
   size_bytes: number
   format: string
   compressed: boolean
+  remote_synced?: boolean
+  remote_storage_pool_id?: string
+  remote_path?: string
 }
 
 export interface ContainerBackupsResponse {
@@ -955,8 +968,8 @@ export const createContainerBackup = (id: ContainerIdentifier, options?: { stora
 export const deleteContainerBackup = (id: ContainerIdentifier, backupId: string) =>
   api.delete<APIResponse>(`/containers/${id}/backups/${backupId}`, { timeout: 600000 })
 
-export const restoreContainerBackup = (id: ContainerIdentifier, backupId: string) =>
-  api.post<APIResponse>(`/containers/${id}/backups/${backupId}/restore`, {}, { timeout: 1800000 })
+export const restoreContainerBackup = (id: ContainerIdentifier, backupId: string, options?: { source?: 'local' | 'remote' }) =>
+  api.post<APIResponse>(`/containers/${id}/backups/${backupId}/restore`, options || {}, { timeout: 1800000 })
 
 // Disk Resize & Import
 export const resizeContainerDisk = (id: ContainerIdentifier, diskGb: number) =>

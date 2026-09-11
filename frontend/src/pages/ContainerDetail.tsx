@@ -5,6 +5,7 @@ import {
   AlertTriangle,
   Camera,
   Clock,
+  Cloud,
   Copy,
   Cpu,
   CheckCircle2,
@@ -215,6 +216,11 @@ export default function ContainerDetail() {
   const [editingFirewallRule, setEditingFirewallRule] = useState<FirewallRule | null>(null)
   const [showFirewallEditor, setShowFirewallEditor] = useState(false)
   const [showBackups, setShowBackups] = useState(false)
+  const [restoreSourcePrompt, setRestoreSourcePrompt] = useState<{
+    open: boolean
+    type: 'snapshot' | 'backup'
+    item: Snapshot | Backup | null
+  }>({ open: false, type: 'snapshot', item: null })
   const [backups, setBackups] = useState<Backup[]>([])
   const [backupBusy, setBackupBusy] = useState('')
   const [showHardwareModal, setShowHardwareModal] = useState(false)
@@ -1043,14 +1049,21 @@ export default function ContainerDetail() {
     }
   }
 
-  const handleRestoreSnapshot = async (snapshot: Snapshot) => {
+  const handleRestoreSnapshot = async (snapshot: Snapshot, source: 'local' | 'remote' = 'local') => {
     if (!containerIdentifier) return
     if (!(await ensureSubUserCanOperate())) return
-    if (!(await dialog.confirm('恢复快照', `确定恢复到 ${snapshot.created_at} 的快照吗？当前容器数据会被覆盖。`))) return
+    if (snapshot.remote_synced && !restoreSourcePrompt.open && source === 'local') {
+      setRestoreSourcePrompt({ open: true, type: 'snapshot', item: snapshot })
+      return
+    }
+    setRestoreSourcePrompt({ open: false, type: 'snapshot', item: null })
+    const sourceLabel = source === 'remote' ? '（从远程存储拉取）' : '（从本地存储）'
+    if (!(await dialog.confirm('恢复快照', `确定恢复到 ${snapshot.created_at} 的快照${sourceLabel}吗？当前容器数据会被覆盖。`))) return
     setSnapshotBusy(snapshot.id)
     try {
-      await restoreContainerSnapshot(containerIdentifier, snapshot.id)
+      await restoreContainerSnapshot(containerIdentifier, snapshot.id, { source })
       await Promise.all([fetchSnapshots(), fetchContainer()])
+      dialog.alert('恢复成功', `已成功从${source === 'remote' ? '远程存储' : '本地'}恢复快照。`)
     } catch (err: unknown) {
       const error = err as { response?: { data?: { message?: string } } }
       await dialog.alert('恢复快照失败', error.response?.data?.message || '请稍后重试。')
@@ -1099,15 +1112,21 @@ export default function ContainerDetail() {
     }
   }
 
-  const handleRestoreBackup = async (backup: Backup) => {
+  const handleRestoreBackup = async (backup: Backup, source: 'local' | 'remote' = 'local') => {
     if (!containerIdentifier) return
     if (!(await ensureSubUserCanOperate())) return
-    if (!(await dialog.confirm('恢复备份', `确定要从 ${backup.created_at} 的全量备份覆盖还原虚拟机吗？当前所有未备份改动将丢失。`))) return
+    if (backup.remote_synced && !restoreSourcePrompt.open && source === 'local') {
+      setRestoreSourcePrompt({ open: true, type: 'backup', item: backup })
+      return
+    }
+    setRestoreSourcePrompt({ open: false, type: 'backup', item: null })
+    const sourceLabel = source === 'remote' ? '（从远程存储拉取）' : '（从本地存储）'
+    if (!(await dialog.confirm('恢复备份', `确定要从 ${backup.created_at} 的全量备份覆盖还原虚拟机${sourceLabel}吗？当前所有未备份改动将丢失。`))) return
     setBackupBusy(backup.id)
     try {
-      await restoreContainerBackup(containerIdentifier, backup.id)
+      await restoreContainerBackup(containerIdentifier, backup.id, { source })
       await Promise.all([fetchBackups(), fetchContainer()])
-      dialog.alert('恢复成功', '虚拟机已从备份完全恢复。')
+      dialog.alert('恢复成功', `虚拟机已从${source === 'remote' ? '远程存储' : '本地备份'}完全恢复。`)
     } catch (err: unknown) {
       const error = err as { response?: { data?: { message?: string } } }
       dialog.alert('恢复备份失败', error.response?.data?.message || '请稍后重试。')
@@ -2684,7 +2703,16 @@ export default function ContainerDetail() {
                       <td className="px-3 py-2 font-mono text-gray-800">{b.id}</td>
                       <td className="px-3 py-2 text-gray-600">{b.created_at}</td>
                       <td className="px-3 py-2 font-mono text-gray-700">{(b.size_bytes / (1024 * 1024 * 1024)).toFixed(2)} GB</td>
-                      <td className="px-3 py-2"><span className="px-1.5 py-0.5 rounded bg-gray-100 text-gray-700 uppercase font-mono">{b.format || 'qcow2'}</span></td>
+                      <td className="px-3 py-2">
+                        <div className="inline-flex items-center gap-1">
+                          <span className="px-1.5 py-0.5 rounded bg-gray-100 text-gray-700 uppercase font-mono">{b.format || 'qcow2'}</span>
+                          {b.remote_synced && (
+                            <span className="inline-flex items-center gap-0.5 rounded bg-blue-50 px-1.5 py-0.5 text-[10px] text-blue-600 border border-blue-200" title="已同步到远程存储">
+                              <Cloud className="w-2.5 h-2.5" /> 异地副本
+                            </span>
+                          )}
+                        </div>
+                      </td>
                       <td className="px-3 py-2 text-gray-600">{b.created_by}</td>
                       <td className="px-3 py-2 text-right">
                         <div className="inline-flex items-center gap-1">
@@ -2713,6 +2741,71 @@ export default function ContainerDetail() {
                   )}
                 </tbody>
               </table>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* Restore Source Selection Modal */}
+      {restoreSourcePrompt.open && restoreSourcePrompt.item && (
+        <Modal
+          title={restoreSourcePrompt.type === 'snapshot' ? '选择快照恢复源' : '选择备份恢复源'}
+          onClose={() => setRestoreSourcePrompt({ open: false, type: 'snapshot', item: null })}
+        >
+          <div className="space-y-4">
+            <div className="rounded-lg border border-blue-100 bg-blue-50 p-3 text-xs text-blue-800">
+              💡 检测到该项已成功同步异地远程存储副本。您可以根据实际灾备场景选择恢复来源。
+            </div>
+            <div className="text-xs text-gray-600">
+              目标恢复时间点：<span className="font-mono font-medium text-gray-900">{restoreSourcePrompt.item.created_at}</span>
+            </div>
+            <div className="grid grid-cols-1 gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => {
+                  if (restoreSourcePrompt.type === 'snapshot') {
+                    handleRestoreSnapshot(restoreSourcePrompt.item as Snapshot, 'local')
+                  } else {
+                    handleRestoreBackup(restoreSourcePrompt.item as Backup, 'local')
+                  }
+                }}
+                className="flex items-start gap-3 rounded-lg border border-gray-200 p-3.5 text-left hover:border-black hover:bg-gray-50 transition-colors"
+              >
+                <div className="rounded-md bg-emerald-100 p-2 text-emerald-700">
+                  <HardDrive className="h-5 w-5" />
+                </div>
+                <div>
+                  <div className="font-medium text-sm text-gray-900">从本地存储恢复 (推荐 · 极速)</div>
+                  <div className="text-xs text-gray-500 mt-0.5">直接使用本机磁盘保留的镜像/差异盘进行还原，耗时最短。</div>
+                </div>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (restoreSourcePrompt.type === 'snapshot') {
+                    handleRestoreSnapshot(restoreSourcePrompt.item as Snapshot, 'remote')
+                  } else {
+                    handleRestoreBackup(restoreSourcePrompt.item as Backup, 'remote')
+                  }
+                }}
+                className="flex items-start gap-3 rounded-lg border border-gray-200 p-3.5 text-left hover:border-blue-500 hover:bg-blue-50 transition-colors"
+              >
+                <div className="rounded-md bg-blue-100 p-2 text-blue-700">
+                  <Cloud className="h-5 w-5" />
+                </div>
+                <div>
+                  <div className="font-medium text-sm text-gray-900">从远程存储拉取恢复 (异地灾备)</div>
+                  <div className="text-xs text-gray-500 mt-0.5">当本地数据受损或被误删时，自动从 SFTP / WebDAV / MinIO 下载副本并完成校验还原。</div>
+                </div>
+              </button>
+            </div>
+            <div className="flex justify-end pt-2">
+              <button
+                onClick={() => setRestoreSourcePrompt({ open: false, type: 'snapshot', item: null })}
+                className="rounded-md border border-gray-300 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
+              >
+                取消
+              </button>
             </div>
           </div>
         </Modal>
@@ -3067,9 +3160,16 @@ function SnapshotTable({ snapshots, busy, onRestore, onDelete }: {
             <tr key={snapshot.id}>
               <td className="px-3 py-2 font-mono text-xs text-gray-800">{snapshot.created_at}</td>
               <td className="px-3 py-2">
-                <span className={`rounded px-2 py-1 text-xs ${snapshot.scheduled ? 'bg-blue-50 text-blue-700' : 'bg-gray-100 text-gray-700'}`}>
-                  {snapshot.scheduled ? '定时' : '手动'}
-                </span>
+                <div className="inline-flex items-center gap-1">
+                  <span className={`rounded px-2 py-0.5 text-xs ${snapshot.scheduled ? 'bg-blue-50 text-blue-700' : 'bg-gray-100 text-gray-700'}`}>
+                    {snapshot.scheduled ? '定时' : '手动'}
+                  </span>
+                  {snapshot.remote_synced && (
+                    <span className="inline-flex items-center gap-0.5 rounded bg-blue-50 px-1.5 py-0.5 text-[10px] text-blue-600 border border-blue-200" title="已同步到远程存储">
+                      <Cloud className="w-2.5 h-2.5" /> 异地副本
+                    </span>
+                  )}
+                </div>
               </td>
               <td className="px-3 py-2 text-xs text-gray-600">{snapshot.created_by || '-'}</td>
               <td className="px-3 py-2 font-mono text-xs text-gray-600">{formatBytes(snapshot.size_bytes || 0)}</td>
