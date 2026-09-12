@@ -87,6 +87,8 @@ import {
   updateFirewall,
   updateSnapshotQuota,
   updateSnapshotSchedule,
+  updateBackupSchedule,
+  BackupSchedule,
   restoreContainerSnapshot,
   syncContainerSnapshot,
   syncAllContainerSnapshots,
@@ -235,6 +237,9 @@ export default function ContainerDetail() {
   }>({ open: false, type: 'snapshot', item: null })
   const [backups, setBackups] = useState<Backup[]>([])
   const [backupBusy, setBackupBusy] = useState('')
+  const [backupSchedule, setBackupSchedule] = useState<BackupSchedule | null>(null)
+  const [showBackupSchedule, setShowBackupSchedule] = useState(false)
+  const [backupScheduleDraft, setBackupScheduleDraft] = useState({ intervalHours: 24, time: '04:00', maxCopies: 3 })
   const [showHardwareModal, setShowHardwareModal] = useState(false)
   const [hardwareDraft, setHardwareDraft] = useState({ boot_order: 'disk', boot_media: '', nic_model: 'virtio', disk_bus: 'virtio' })
   const [savingHardware, setSavingHardware] = useState(false)
@@ -1144,6 +1149,38 @@ export default function ContainerDetail() {
     }
   }
 
+  const openBackupSchedule = () => {
+    if (isSubUser) return
+    setBackupScheduleDraft({
+      intervalHours: Math.max(backupSchedule?.interval_hours || 24, 24),
+      time: backupSchedule?.time || '04:00',
+      maxCopies: backupSchedule?.max_copies || 3,
+    })
+    setShowBackupSchedule(true)
+  }
+
+  const saveBackupSchedule = async (enabled: boolean) => {
+    if (!containerIdentifier || isSubUser) return
+    const intervalHours = backupScheduleDraft.intervalHours
+    const scheduleTime = backupScheduleDraft.time || '04:00'
+    const maxCopies = Math.max(1, backupScheduleDraft.maxCopies || 3)
+    if (enabled && intervalHours < 24) {
+      await dialog.alert('参数错误', '自动备份周期最低是 1 天一次。')
+      return
+    }
+    setBackupBusy('schedule')
+    try {
+      await updateBackupSchedule(containerIdentifier, enabled, intervalHours, scheduleTime, maxCopies)
+      await fetchBackups()
+      setShowBackupSchedule(false)
+    } catch (err: unknown) {
+      const error = err as { response?: { data?: { message?: string } } }
+      await dialog.alert('定时备份失败', error.response?.data?.message || '请稍后重试。')
+    } finally {
+      setBackupBusy('')
+    }
+  }
+
   const saveSnapshotQuota = async () => {
     if (!containerIdentifier || isSubUser) return
     const nextQuota = Math.max(1, Math.round(snapshotQuotaDraft || 1))
@@ -1402,6 +1439,7 @@ export default function ContainerDetail() {
     try {
       const res = await getContainerBackups(containerIdentifier)
       setBackups(res.data.data?.backups || [])
+      setBackupSchedule(res.data.data?.schedule || null)
     } catch (err) {
       console.error('Failed to fetch backups:', err)
     }
@@ -3239,20 +3277,46 @@ export default function ContainerDetail() {
           onClose={() => setShowBackups(false)}
           wide
           extra={
-            <button
-              onClick={handleCreateBackup}
-              disabled={!!backupBusy || isSubUserPolicyBlocked}
-              className="inline-flex items-center gap-1.5 rounded-md bg-black px-3 py-1.5 text-xs text-white hover:bg-gray-800 disabled:opacity-50"
-            >
-              <HardDrive className="w-3.5 h-3.5" />
-              {backupBusy === 'create' ? '压缩打包中...' : '新建全量备份'}
-            </button>
+            <div className="flex items-center gap-2">
+              {!isSubUser && (
+                <button
+                  onClick={openBackupSchedule}
+                  disabled={!!backupBusy || isSubUserPolicyBlocked}
+                  className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs border disabled:opacity-50 ${
+                    backupSchedule?.enabled
+                      ? 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100'
+                      : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-50'
+                  }`}
+                >
+                  <Clock className="w-3.5 h-3.5" />
+                  {backupBusy === 'schedule' ? '处理中...' : backupSchedule?.enabled ? '定时设置' : '定时备份'}
+                </button>
+              )}
+              <button
+                onClick={handleCreateBackup}
+                disabled={!!backupBusy || isSubUserPolicyBlocked}
+                className="inline-flex items-center gap-1.5 rounded-md bg-black px-3 py-1.5 text-xs text-white hover:bg-gray-800 disabled:opacity-50"
+              >
+                <HardDrive className="w-3.5 h-3.5" />
+                {backupBusy === 'create' ? '压缩打包中...' : '新建全量备份'}
+              </button>
+            </div>
           }
         >
           <div className="space-y-4">
             <div className="rounded-lg border border-blue-100 bg-blue-50 p-3 text-xs text-blue-700">
-              💡 全量备份会将当前虚拟机的所有磁盘差异合并并使用 qcow2 压缩算法进行打平归档。备份文件完全独立于原盘，适合跨机迁移与长期容灾。
+              💡 全量备份会将当前虚拟机的所有磁盘差异合并并使用 qcow2 压缩算法进行打平归档。备份文件完全独立于原盘，适合跨机迁移与长期容灾。运行中的虚拟机可直接备份，无需关机。
             </div>
+            {backupSchedule?.enabled && (
+              <div className="rounded-lg border border-emerald-100 bg-emerald-50 p-3 text-xs text-emerald-700">
+                <div>定时备份已开启：每 {formatScheduleInterval(backupSchedule.interval_hours || 24)}，{backupSchedule.time || '04:00'} 执行
+                  {backupSchedule.max_copies && backupSchedule.max_copies > 0 ? ` (自动轮转保留最新 ${backupSchedule.max_copies} 份)` : ''}
+                </div>
+                {backupSchedule.next_run && (
+                  <div className="mt-1">下次执行：<span className="font-mono">{formatDateTime(backupSchedule.next_run)}</span></div>
+                )}
+              </div>
+            )}
             <div className="overflow-x-auto rounded-lg border border-gray-200">
               <table className="w-full text-left text-xs">
                 <thead className="bg-gray-50 text-gray-500">
@@ -3309,6 +3373,74 @@ export default function ContainerDetail() {
                   )}
                 </tbody>
               </table>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* Backup Schedule Modal */}
+      {showBackupSchedule && (
+        <Modal title="定时全量备份" onClose={() => setShowBackupSchedule(false)}>
+          <div className="space-y-4">
+            <Field label="自动备份周期">
+              <select
+                value={backupScheduleDraft.intervalHours}
+                onChange={(e) => setBackupScheduleDraft({ ...backupScheduleDraft, intervalHours: Number(e.target.value) })}
+                className={inputClass}
+              >
+                <option value={24}>1 天</option>
+                <option value={72}>3 天</option>
+                <option value={168}>7 天</option>
+                <option value={336}>14 天</option>
+              </select>
+            </Field>
+            <Field label="执行时间">
+              <input
+                type="time"
+                value={backupScheduleDraft.time}
+                onChange={(e) => setBackupScheduleDraft({ ...backupScheduleDraft, time: e.target.value || '04:00' })}
+                className={inputClass}
+              />
+            </Field>
+            <Field label="最多保留份数 (超过自动清理最旧备份)">
+              <div className="space-y-1">
+                <input
+                  type="number"
+                  min={1}
+                  max={99}
+                  value={backupScheduleDraft.maxCopies}
+                  onChange={(e) => setBackupScheduleDraft({ ...backupScheduleDraft, maxCopies: Math.max(1, parseInt(e.target.value || '1', 10)) })}
+                  className={inputClass}
+                  placeholder="默认保留 3 份"
+                />
+                <p className="text-[11px] text-gray-400">
+                  每次执行定时备份后，仅保留最新的 N 份全量备份，自动删除日期最久的旧备份，避免磁盘被悄悄占满。
+                </p>
+              </div>
+            </Field>
+            <div className="rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-500">
+              {`每 ${formatScheduleInterval(backupScheduleDraft.intervalHours)} 在 ${backupScheduleDraft.time || '04:00'} 执行，自动轮转保留最新的 ${backupScheduleDraft.maxCopies} 份。备份过程无需关机。`}
+            </div>
+            <div className="flex justify-between gap-3 pt-2">
+              {backupSchedule?.enabled ? (
+                <button
+                  onClick={() => saveBackupSchedule(false)}
+                  disabled={backupBusy === 'schedule'}
+                  className="px-4 py-2 text-sm text-red-600 border border-red-200 rounded-md hover:bg-red-50 disabled:opacity-50"
+                >
+                  关闭定时
+                </button>
+              ) : <div />}
+              <div className="flex gap-2">
+                <button onClick={() => setShowBackupSchedule(false)} className="px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded-md">取消</button>
+                <button
+                  onClick={() => saveBackupSchedule(true)}
+                  disabled={backupBusy === 'schedule'}
+                  className="px-4 py-2 text-sm bg-black text-white rounded-md hover:bg-gray-800 disabled:opacity-50"
+                >
+                  {backupBusy === 'schedule' ? '保存中...' : '保存'}
+                </button>
+              </div>
             </div>
           </div>
         </Modal>

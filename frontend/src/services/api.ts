@@ -982,13 +982,25 @@ export interface Backup {
   size_bytes: number
   format: string
   compressed: boolean
+  checksum?: string
   remote_synced?: boolean
   remote_storage_pool_id?: string
   remote_path?: string
 }
 
+export interface BackupSchedule {
+  enabled: boolean
+  interval_hours: number
+  time: string
+  max_copies?: number
+  last_run: string
+  next_run: string
+  created_by: string
+}
+
 export interface ContainerBackupsResponse {
   backups: Backup[]
+  schedule?: BackupSchedule
 }
 
 export const getBackups = () =>
@@ -999,6 +1011,13 @@ export const getContainerBackups = (id: ContainerIdentifier) =>
 
 export const createContainerBackup = (id: ContainerIdentifier, options?: { storage_pool_id?: string }) =>
   api.post<APIResponse<Backup>>(`/containers/${id}/backups`, options || {}, { timeout: 1800000 })
+
+export const updateBackupSchedule = (id: ContainerIdentifier, enabled: boolean, intervalHours: number, time: string, maxCopies?: number) =>
+  api.post<APIResponse<{ container: Container; backup?: Backup }>>(
+    `/containers/${id}/backups/schedule`,
+    { enabled, interval_hours: intervalHours, time, max_copies: maxCopies || 0 },
+    { timeout: 600000 }
+  )
 
 export const deleteContainerBackup = (id: ContainerIdentifier, backupId: string) =>
   api.delete<APIResponse>(`/containers/${id}/backups/${backupId}`, { timeout: 600000 })
