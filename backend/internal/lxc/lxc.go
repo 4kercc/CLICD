@@ -70,6 +70,60 @@ func (m *Manager) StartUsageMonitor() {
 	}()
 }
 
+// frozenContainers tracks containers temporarily frozen by panel operations
+// (e.g. freeze-based snapshots) so the status reconciler does not mistake them
+// for stopped containers.
+var frozenContainers sync.Map
+
+// StartStatusReconciler periodically reconciles the persisted status and
+// RestoreOnHostBoot flag with the real LXC state. Changes made outside the panel
+// (e.g. poweroff from inside the container) are thereby recorded before they
+// matter, so a host power loss restores the actual desired state.
+func (m *Manager) StartStatusReconciler() {
+	go func() {
+		for {
+			time.Sleep(60 * time.Second)
+			m.reconcileStatuses()
+		}
+	}()
+}
+
+func (m *Manager) reconcileStatuses() {
+	out, err := exec.Command("lxc-ls", "-1", "--running").Output()
+	if err != nil {
+		return
+	}
+	running := make(map[string]bool)
+	for _, line := range strings.Split(string(out), "\n") {
+		if name := strings.TrimSpace(line); name != "" {
+			running[name] = true
+		}
+	}
+	changed := false
+	for i := range config.AppConfig.Containers {
+		c := &config.AppConfig.Containers[i]
+		if c.IsKVM() {
+			continue
+		}
+		if _, frozen := frozenContainers.Load(c.LxcName()); frozen {
+			continue
+		}
+		isRunning := running[c.LxcName()]
+		status := "stopped"
+		if isRunning {
+			status = "running"
+		}
+		if c.Status != status || c.RestoreOnHostBoot != isRunning {
+			c.Status = status
+			c.RestoreOnHostBoot = isRunning
+			changed = true
+		}
+	}
+	if changed {
+		config.SaveConfig()
+	}
+}
+
 // WarmRunningContainersSSH prepares sshd for containers that were already running
 // when clicd started, such as after host boot or service restart.
 func (m *Manager) WarmRunningContainersSSH() {

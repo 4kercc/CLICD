@@ -871,11 +871,70 @@ func (m *Manager) StopContainer(id int) error {
 }
 
 func (m *Manager) RestartContainer(id int) error {
+	c := config.FindContainer(id)
+	if c == nil {
+		return fmt.Errorf("container not found: %d", id)
+	}
+	name := c.VirshName()
+	status, _ := m.GetContainerStatus(name)
+	if status != "running" {
+		return m.StartContainer(id)
+	}
+
+	// Prefer an in-guest ACPI reboot: the QEMU process keeps running and the guest
+	// reboots in seconds, instead of a full ACPI-shutdown (up to 45s) + cold start.
+	if out, err := exec.Command("virsh", "reboot", name).CombinedOutput(); err == nil {
+		m.settleAfterHotReboot(id, name)
+		return nil
+	} else {
+		fmt.Printf("KVM hot reboot for %s failed (%v, output: %s), falling back to stop+start\n",
+			name, err, strings.TrimSpace(string(out)))
+	}
 	if err := m.StopContainer(id); err != nil {
 		return err
 	}
 	time.Sleep(1 * time.Second)
 	return m.StartContainer(id)
+}
+
+// settleAfterHotReboot waits for the guest to come back after a virsh reboot and
+// re-applies the network-dependent runtime state in case the DHCP lease changed.
+func (m *Manager) settleAfterHotReboot(id int, name string) {
+	c := config.FindContainer(id)
+	if c == nil {
+		return
+	}
+	isWindows := IsWindowsImage(c.Template)
+	config.UpdateContainerStatus(id, "running")
+
+	attempts := 60 // Linux: up to 2 minutes; Windows: best effort 30s
+	if isWindows {
+		attempts = 15
+	}
+	var ip string
+	for i := 0; i < attempts; i++ {
+		if got, err := m.GetContainerIP(name); err == nil && got != "" {
+			ip = got
+			break
+		}
+		time.Sleep(2 * time.Second)
+	}
+	if ip == "" {
+		fmt.Printf("Warning: KVM %s rebooted but no IPv4 address was detected; keeping previous state\n", name)
+		return
+	}
+	if c := config.FindContainer(id); c != nil {
+		if c.IP != ip {
+			c.IP = ip
+			config.SaveConfig()
+		}
+	}
+	if err := lxc.NewManager().ApplyPortMappings(id); err != nil {
+		fmt.Printf("Warning: failed to re-apply port mappings after reboot for %s: %v\n", name, err)
+	}
+	if err := lxc.ApplyFirewallRules(id); err != nil {
+		fmt.Printf("Warning: failed to re-apply firewall rules after reboot for %s: %v\n", name, err)
+	}
 }
 
 func (m *Manager) DestroyContainer(id int) error {
@@ -3828,8 +3887,13 @@ func (m *Manager) syncRunningNetworks() {
 			continue
 		}
 		status, err := m.GetContainerStatus(c.VirshName())
-		if err == nil && status != "" && c.Status != status {
+		// A divergence between the persisted status and the live libvirt state means
+		// the change happened outside the panel (e.g. poweroff inside the guest).
+		// Re-persist RestoreOnHostBoot too, so a later host power loss does not
+		// auto-start a VM the user already shut down.
+		if err == nil && status != "" && (c.Status != status || c.RestoreOnHostBoot != (status == "running")) {
 			c.Status = status
+			c.RestoreOnHostBoot = status == "running"
 			config.SaveConfig()
 		}
 		if status != "running" && c.Status != "running" {

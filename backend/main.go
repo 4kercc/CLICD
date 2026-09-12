@@ -87,6 +87,9 @@ func main() {
 		kvmManager.StartNetworkSyncMonitor()
 		kvmManager.StartIPv6Guard()
 
+		// Reconcile persisted status/restore flags with the real LXC state every minute
+		manager.StartStatusReconciler()
+
 		// Start scheduled snapshot scanners.
 		manager.StartSnapshotScheduler()
 		kvmManager.StartSnapshotScheduler()
