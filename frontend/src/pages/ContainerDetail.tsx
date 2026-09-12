@@ -92,6 +92,8 @@ import {
   syncAllContainerSnapshots,
   getStorageSyncProgress,
   StorageSyncProgress,
+  testContainerPorts,
+  PortTestResult,
   resetTraffic,
   updateTrafficLimit,
   updateResourceLimit,
@@ -267,6 +269,9 @@ export default function ContainerDetail() {
     status?: 'transferring' | 'completed' | 'failed'
     error?: string
   } | null>(null)
+  const [portTestBusy, setPortTestBusy] = useState(false)
+  const [portTestResults, setPortTestResults] = useState<PortTestResult[] | null>(null)
+  const [portTestInternalIP, setPortTestInternalIP] = useState('')
 
   const fetchContainer = useCallback(async () => {
     if (!containerIdentifier) return
@@ -463,6 +468,21 @@ export default function ContainerDetail() {
       return false
     }
     return true
+  }
+
+  const runPortTest = async () => {
+    if (!containerIdentifier || portTestBusy) return
+    setPortTestBusy(true)
+    try {
+      const res = await testContainerPorts(containerIdentifier)
+      setPortTestResults(res.data.data?.results || [])
+      setPortTestInternalIP(res.data.data?.internal_ip || '')
+    } catch (err: unknown) {
+      const error = err as { response?: { data?: { message?: string } } }
+      dialog.alert('连通性测试失败', error.response?.data?.message || '请稍后重试')
+    } finally {
+      setPortTestBusy(false)
+    }
   }
 
   const handleAction = async (action: string) => {
@@ -2865,12 +2885,23 @@ export default function ContainerDetail() {
       )}
 
       {showNat && !hasIndependentIPv4 && (
-        <Modal title="NAT 规则" onClose={() => { setShowNat(false); setDraft(emptyDraft); setShowMappingEditor(false) }} wide extra={
-          !isSubUser && canAddMapping && (
-            <button onClick={openAddMapping} className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-black text-white rounded-md text-xs hover:bg-gray-800">
-              <Plus className="w-3.5 h-3.5" />添加 NAT 规则
+        <Modal title="NAT 规则" onClose={() => { setShowNat(false); setDraft(emptyDraft); setShowMappingEditor(false); setPortTestResults(null) }} wide extra={
+          <div className="flex items-center gap-2">
+            <button
+              onClick={runPortTest}
+              disabled={portTestBusy || mappingCount === 0}
+              title="从宿主机检测转发规则与虚拟机内部端口是否真实开放"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-gray-300 text-gray-700 rounded-md text-xs hover:bg-gray-50 disabled:opacity-50"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${portTestBusy ? 'animate-spin' : ''}`} />
+              {portTestBusy ? '检测中...' : '连通性测试'}
             </button>
-          )
+            {!isSubUser && canAddMapping && (
+              <button onClick={openAddMapping} className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-black text-white rounded-md text-xs hover:bg-gray-800">
+                <Plus className="w-3.5 h-3.5" />添加 NAT 规则
+              </button>
+            )}
+          </div>
         }>
           <div className="space-y-5">
             <div className="flex items-center justify-between gap-4">
@@ -2886,6 +2917,40 @@ export default function ContainerDetail() {
               )}
             </div>
             <MappingTable mappings={container.port_mappings || []} publicHost={publicHost} onEdit={openEditMapping} onDelete={isSubUser ? () => {} : removeMapping} isSubUser={isSubUser} />
+
+            {portTestResults && (
+              <div className="rounded-lg border border-gray-200 overflow-hidden">
+                <div className="flex items-center justify-between bg-gray-50 px-3 py-2 text-xs">
+                  <span className="font-medium text-gray-700">
+                    连通性诊断结果
+                    {portTestInternalIP && <span className="ml-2 text-gray-400">内部 IP：<span className="font-mono">{portTestInternalIP}</span></span>}
+                  </span>
+                  <button onClick={() => setPortTestResults(null)} className="text-gray-400 hover:text-gray-700" title="关闭结果">
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+                <div className="divide-y divide-gray-100">
+                  {portTestResults.map((r) => (
+                    <div key={r.index} className="flex items-start gap-3 px-3 py-2.5 text-xs">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="font-medium text-gray-800">{r.description || `Port-${r.container_port}`}</span>
+                          <span className="font-mono text-gray-500">
+                            {r.host_ip || '0.0.0.0'}:{r.host_port} → {r.container_port}/{r.protocol.toUpperCase()}
+                          </span>
+                        </div>
+                        <div className={`mt-1 ${r.status === 'ok' ? 'text-emerald-600' : r.status === 'warn' ? 'text-amber-600' : 'text-red-600'}`}>
+                          {r.status === 'ok' ? '✅ ' : r.status === 'warn' ? '⚠️ ' : '❌ '}{r.message}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <div className="bg-gray-50 px-3 py-2 text-[11px] text-gray-400">
+                  检测方式：宿主机直接探测虚拟机内部端口（绕过公网链路）。「内部端口不通」通常代表虚拟机内服务未监听或被虚拟机自身防火墙拦截；若内部端口正常但公网仍无法访问，请检查云端安全组/运营商封锁。
+                </div>
+              </div>
+            )}
           </div>
         </Modal>
       )}
