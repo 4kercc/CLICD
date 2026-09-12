@@ -1639,7 +1639,7 @@ export default function ContainerDetail() {
   const isRunning = container.status === 'running'
   const isInitializing = container.status === 'initializing'
   const isKVM = (container.virtualization || 'lxc') === 'kvm'
-  const isWindows = container.template?.includes('windows')
+  const isWindows = !!container.template && container.template.toLowerCase().includes('windows')
   const reinstallLinuxTemplate = !isWindowsTemplate(selectedTemplate)
   const canOpenVNC = isKVM && isRunning
   const isExpired = container.expires_at ? new Date(container.expires_at) < new Date() : false
@@ -1862,7 +1862,7 @@ export default function ContainerDetail() {
               </div>
               <div className="flex items-center gap-2 flex-wrap mt-2">
                 {editingTemplate && !isSubUser ? (
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex items-center gap-1.5 flex-wrap">
                     <input
                       type="text"
                       value={templateDraft}
@@ -1876,6 +1876,33 @@ export default function ContainerDetail() {
                       className="px-2 py-0.5 border border-black rounded text-[11px] text-black bg-white focus:outline-none w-36 font-mono"
                       disabled={savingTemplate}
                     />
+                    <select
+                      value=""
+                      onChange={(e) => {
+                        if (e.target.value) setTemplateDraft(e.target.value)
+                      }}
+                      title="快速选择系统类型：常见发行版可直接匹配图标与筛选；没有匹配的用 Linux / Windows 兜底"
+                      className="px-1.5 py-0.5 border border-gray-300 rounded text-[10px] text-gray-700 bg-white hover:border-gray-400 focus:outline-none max-w-36"
+                      disabled={savingTemplate}
+                    >
+                      <option value="">选择系统类型…</option>
+                      <optgroup label="常见发行版">
+                        <option value="ubuntu">Ubuntu</option>
+                        <option value="debian">Debian</option>
+                        <option value="alpine">Alpine</option>
+                        <option value="centos">CentOS</option>
+                        <option value="archlinux">Arch Linux</option>
+                        <option value="fedora">Fedora</option>
+                        <option value="rockylinux">Rocky Linux</option>
+                        <option value="windows-10">Windows 10</option>
+                        <option value="windows-11">Windows 11</option>
+                        <option value="winpe">Windows PE</option>
+                      </optgroup>
+                      <optgroup label="兜底分类">
+                        <option value="linux">Linux（通用）</option>
+                        <option value="windows">Windows（通用）</option>
+                      </optgroup>
+                    </select>
                     <button
                       onClick={handleSaveTemplate}
                       disabled={savingTemplate}
