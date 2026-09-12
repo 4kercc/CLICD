@@ -1,4 +1,4 @@
-import { ReactNode, useId } from 'react'
+import { ReactNode, useEffect, useId, useRef, useState } from 'react'
 import { RefreshCw } from 'lucide-react'
 import { useTheme } from '../contexts/ThemeContext'
 
@@ -204,13 +204,33 @@ function LineAreaChart({
   const { theme } = useTheme()
   const isDark = theme === 'dark'
   const gradientId = `resource-chart-fill-${useId().replace(/:/g, '')}`
+  const wrapRef = useRef<HTMLDivElement | null>(null)
+  const [renderWidth, setRenderWidth] = useState(0)
 
-  const width = 520
+  // Measure the container so the SVG renders 1:1 in pixels: text stays
+  // undistorted (preserveAspectRatio=none would stretch glyphs) and the
+  // layout adapts to any panel width.
+  useEffect(() => {
+    const el = wrapRef.current
+    if (!el) return
+    const update = () => setRenderWidth(el.clientWidth)
+    update()
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', update)
+      return () => window.removeEventListener('resize', update)
+    }
+    const observer = new ResizeObserver(update)
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [])
+
   const height = 150
-  const left = 50
-  const right = 10
-  const top = 8
+  const left = 66
+  const right = 14
+  const top = 18
   const bottom = 28
+  const measured = renderWidth > left + right + 40
+  const width = measured ? renderWidth : 520
   const innerWidth = width - left - right
   const innerHeight = height - top - bottom
   const now = Date.now()
@@ -242,60 +262,67 @@ function LineAreaChart({
   const area = `${left},${top + innerHeight} ${primaryLine} ${left + innerWidth},${top + innerHeight}`
 
   return (
-    <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-[140px]" preserveAspectRatio="none">
-      <defs>
-        <linearGradient id={gradientId} x1="0" x2="0" y1="0" y2="1">
-          <stop offset="0%" stopColor={gradientTop} stopOpacity="0.25" />
-          <stop offset="100%" stopColor={gradientBottom} stopOpacity="0.02" />
-        </linearGradient>
-      </defs>
+    <div ref={wrapRef} className="w-full">
+      <svg
+        viewBox={`0 0 ${width} ${height}`}
+        width={measured ? width : '100%'}
+        height={height}
+        preserveAspectRatio={measured ? undefined : 'none'}
+      >
+        <defs>
+          <linearGradient id={gradientId} x1="0" x2="0" y1="0" y2="1">
+            <stop offset="0%" stopColor={gradientTop} stopOpacity="0.25" />
+            <stop offset="100%" stopColor={gradientBottom} stopOpacity="0.02" />
+          </linearGradient>
+        </defs>
 
-      {yTicks.map((tick) => {
-        const y = top + (1 - tick) * innerHeight
-        return (
-          <g key={tick}>
-            <line x1={left} y1={y} x2={left + innerWidth} y2={y} stroke={gridStroke} strokeDasharray="3 3" />
-            <text x={left - 8} y={y + 3} textAnchor="end" fontSize="10" fill={axisStroke}>
-              {formatValue(maxValue * tick)}
-            </text>
-          </g>
-        )
-      })}
+        {unitLabel && (
+          <text x={8} y={11} fontSize="10" fill={axisStroke}>
+            {unitLabel}
+          </text>
+        )}
 
-      {xTicks.map((tick) => {
-        const x = left + tick * innerWidth
-        const ts = minTs + tick * span
-        return (
-          <g key={tick}>
-            <line x1={x} y1={top} x2={x} y2={top + innerHeight} stroke={gridStrokeV} strokeDasharray="3 3" />
-            <text x={x} y={height - 5} textAnchor={tick === 0 ? 'start' : tick === 1 ? 'end' : 'middle'} fontSize="10" fill={axisStroke}>
-              {formatTime(ts)}
-            </text>
-          </g>
-        )
-      })}
+        {yTicks.map((tick) => {
+          const y = top + (1 - tick) * innerHeight
+          return (
+            <g key={tick}>
+              <line x1={left} y1={y} x2={left + innerWidth} y2={y} stroke={gridStroke} strokeDasharray="3 3" />
+              <text x={left - 8} y={y + 3} textAnchor="end" fontSize="10" fill={axisStroke}>
+                {formatValue(maxValue * tick)}
+              </text>
+            </g>
+          )
+        })}
 
-      {unitLabel && (
-        <text x={left - 45} y={top + 10} fontSize="10" fill={axisStroke}>
-          {unitLabel}
-        </text>
-      )}
+        {xTicks.map((tick) => {
+          const x = left + tick * innerWidth
+          const ts = minTs + tick * span
+          return (
+            <g key={tick}>
+              <line x1={x} y1={top} x2={x} y2={top + innerHeight} stroke={gridStrokeV} strokeDasharray="3 3" />
+              <text x={x} y={height - 5} textAnchor={tick === 0 ? 'start' : tick === 1 ? 'end' : 'middle'} fontSize="10" fill={axisStroke}>
+                {formatTime(ts)}
+              </text>
+            </g>
+          )
+        })}
 
-      <line x1={left} y1={top} x2={left} y2={top + innerHeight} stroke={axisStroke} />
-      <line x1={left} y1={top + innerHeight} x2={left + innerWidth} y2={top + innerHeight} stroke={axisStroke} />
-      {chartSeries.length === 1 && <polygon points={area} fill={`url(#${gradientId})`} />}
-      {chartSeries.map((item, index) => (
-        <polyline
-          key={item.label || index}
-          points={buildLine(item.points, minTs, span, left, top, innerWidth, innerHeight, maxValue)}
-          fill="none"
-          stroke={item.color || (chartSeries.length === 1 ? lineStroke : chartPalette[index % chartPalette.length])}
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-      ))}
-    </svg>
+        <line x1={left} y1={top} x2={left} y2={top + innerHeight} stroke={axisStroke} />
+        <line x1={left} y1={top + innerHeight} x2={left + innerWidth} y2={top + innerHeight} stroke={axisStroke} />
+        {chartSeries.length === 1 && <polygon points={area} fill={`url(#${gradientId})`} />}
+        {chartSeries.map((item, index) => (
+          <polyline
+            key={item.label || index}
+            points={buildLine(item.points, minTs, span, left, top, innerWidth, innerHeight, maxValue)}
+            fill="none"
+            stroke={item.color || (chartSeries.length === 1 ? lineStroke : chartPalette[index % chartPalette.length])}
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        ))}
+      </svg>
+    </div>
   )
 }
 
@@ -311,7 +338,10 @@ function buildLine(
 ) {
   const coords = points.map((point) => {
     const x = left + ((point.ts - minTs) / span) * innerWidth
-    const y = top + innerHeight - (point.value / maxValue) * innerHeight
+    const rawY = top + innerHeight - (point.value / maxValue) * innerHeight
+    // Clamp into the plot area: counter resets can produce negative rates,
+    // which would otherwise draw below the axis into the time labels.
+    const y = Math.min(Math.max(rawY, top), top + innerHeight)
     return `${Number.isFinite(x) ? x : left},${Number.isFinite(y) ? y : top + innerHeight}`
   })
   if (coords.length > 1) return coords.join(' ')
