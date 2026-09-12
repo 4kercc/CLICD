@@ -1403,6 +1403,10 @@ func normalizePortSpec(port string) string {
 }
 
 func applyDefaultFirewallPolicy(tag, bridge, containerIP string) error {
+	// Rules are prepended at position 1, so list them bottom-up: the conntrack
+	// state accepts must end up ABOVE the default drops, otherwise every allowed
+	// outbound connection would lose its reply packets and every published port
+	// would additionally require an explicit out rule (PVE-style stateful firewall).
 	defaults := [][]string{
 		{
 			"-I", "FORWARD", "1",
@@ -1418,6 +1422,22 @@ func applyDefaultFirewallPolicy(tag, bridge, containerIP string) error {
 			"-j", "DROP",
 			"-m", "comment", "--comment", fmt.Sprintf("clicd-%s-fw-default-out", tag),
 		},
+		{
+			"-I", "FORWARD", "1",
+			"-o", bridge,
+			"-d", containerIP + "/32",
+			"-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED",
+			"-j", "ACCEPT",
+			"-m", "comment", "--comment", fmt.Sprintf("clicd-%s-fw-est-in", tag),
+		},
+		{
+			"-I", "FORWARD", "1",
+			"-i", bridge,
+			"-s", containerIP + "/32",
+			"-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED",
+			"-j", "ACCEPT",
+			"-m", "comment", "--comment", fmt.Sprintf("clicd-%s-fw-est-out", tag),
+		},
 	}
 	for _, args := range defaults {
 		cmd := exec.Command("iptables", args...)
@@ -1431,6 +1451,7 @@ func applyDefaultFirewallPolicy(tag, bridge, containerIP string) error {
 
 func applyDefaultFirewallIPv6Policy(tag, bridge string, containerIPs []string) error {
 	for _, containerIP := range containerIPs {
+		// Same bottom-up ordering as the IPv4 policy: state accepts above drops.
 		defaults := [][]string{
 			{
 				"-I", "FORWARD", "1",
@@ -1445,6 +1466,22 @@ func applyDefaultFirewallIPv6Policy(tag, bridge string, containerIPs []string) e
 				"-s", containerIP + "/128",
 				"-j", "DROP",
 				"-m", "comment", "--comment", fmt.Sprintf("clicd-%s-fw-default-out-v6-%s", tag, firewallCommentIPTag(containerIP)),
+			},
+			{
+				"-I", "FORWARD", "1",
+				"-o", bridge,
+				"-d", containerIP + "/128",
+				"-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED",
+				"-j", "ACCEPT",
+				"-m", "comment", "--comment", fmt.Sprintf("clicd-%s-fw-est-in-v6-%s", tag, firewallCommentIPTag(containerIP)),
+			},
+			{
+				"-I", "FORWARD", "1",
+				"-i", bridge,
+				"-s", containerIP + "/128",
+				"-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED",
+				"-j", "ACCEPT",
+				"-m", "comment", "--comment", fmt.Sprintf("clicd-%s-fw-est-out-v6-%s", tag, firewallCommentIPTag(containerIP)),
 			},
 		}
 		for _, args := range defaults {

@@ -3148,7 +3148,7 @@ func generateLinuxDomainXML(name string, vcpu int, ramMB int, diskPath, seedPath
   <devices>
     <emulator>%s</emulator>
     <disk type='file' device='disk'>
-      <driver name='qemu' type='qcow2' cache='none'/>
+      <driver name='qemu' type='qcow2' cache='none' discard='unmap'/>
       <source file='%s'/>
       <target dev='%s' bus='%s'/>%s
     </disk>
@@ -3294,7 +3294,7 @@ func generateWindowsDomainXML(name string, vcpu int, ramMB int, diskPath, winISO
   <devices>
     <emulator>/usr/bin/qemu-system-x86_64</emulator>
     <disk type='file' device='disk'>
-      <driver name='qemu' type='qcow2' cache='none'/>
+      <driver name='qemu' type='qcow2' cache='none' discard='unmap'/>
       <source file='%s'/>
       <target dev='%s' bus='%s'/>%s
     </disk>%s
