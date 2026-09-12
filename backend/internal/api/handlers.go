@@ -94,7 +94,15 @@ func HandleSingleContainer(w http.ResponseWriter, r *http.Request) {
 		id = snapshot.ContainerID
 	}
 	if isSnapshotAction {
-		if c := config.FindContainer(id); c != nil && !isContainerAllowedForRequest(r, c.UUID) {
+		if c := config.FindContainer(id); c != nil {
+			if !isContainerAllowedForRequest(r, c.UUID) {
+				jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "Access denied to this container"})
+				return
+			}
+		} else if isAccessRestrictedRequest(r) {
+			// Orphaned snapshot (container already deleted): restricted callers
+			// (sub-users, container-bound API keys) must not be able to delete or
+			// restore snapshots of containers they never owned.
 			jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "Access denied to this container"})
 			return
 		}

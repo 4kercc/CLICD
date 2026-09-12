@@ -943,10 +943,21 @@ func HandleBatchAction(w http.ResponseWriter, r *http.Request) {
 	if !requireScope(w, r, requiredScope) {
 		return
 	}
+	// Sub-user semantics must match the single-container path (SubUserMiddleware):
+	// batch requests bypass that middleware, so enforce the action whitelist and
+	// policy bans here. Currently no batch action is deletable by sub-users.
+	if isSubUserRequest(r) && req.Action == "delete" {
+		jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "Sub-users cannot delete containers"})
+		return
+	}
 	for _, id := range req.Containers {
 		c := config.FindContainer(id)
 		if c == nil || !isContainerAllowedForRequest(r, c.UUID) {
 			jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "Access denied to one or more containers"})
+			return
+		}
+		if isSubUserRequest(r) && c.PolicyBlocked {
+			jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: c.Name + " is blocked by policy"})
 			return
 		}
 		if taskType == TaskReinstall && !isTemplateAllowedForRequest(r, c, req.TemplateID) {

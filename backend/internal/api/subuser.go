@@ -75,7 +75,9 @@ func HandleSubUserCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	containerName := c.Name
 
-	// Check if sub-user already exists and return the same management password.
+	// Check if sub-user already exists and rotate its management password.
+	// Plaintext passwords are never persisted, so re-creating a link issues a
+	// fresh password and invalidates the previous one.
 	for i := range config.AppConfig.SubUsers {
 		su := &config.AppConfig.SubUsers[i]
 		for _, uuid := range su.ContainerUUIDs {
@@ -83,21 +85,16 @@ func HandleSubUserCreate(w http.ResponseWriter, r *http.Request) {
 				if su.AccessCode == "" {
 					su.AccessCode = generateRandomStr(8)
 				}
-				password := su.Password
-				message := "Sub-user link returned"
-				if password == "" {
-					password = generateRandomStr(16)
-					hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-					if err != nil {
-						jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: "Failed to generate password"})
-						return
-					}
-					su.PassHash = string(hash)
-					su.Password = password
-					su.Token = ""
-					su.TokenVersion++
-					message = "Sub-user password generated"
+				password := generateRandomStr(16)
+				hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+				if err != nil {
+					jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: "Failed to generate password"})
+					return
 				}
+				su.PassHash = string(hash)
+				su.Token = ""
+				su.TokenVersion++
+				message := "Sub-user password rotated"
 				su.ContainerNames = appendUniqueString(su.ContainerNames, containerName)
 				su.ContainerUUIDs = appendUniqueString(su.ContainerUUIDs, c.UUID)
 				if !su.ImageLimitConfigured && len(su.AllowedImageIDs) == 0 {
@@ -126,7 +123,6 @@ func HandleSubUserCreate(w http.ResponseWriter, r *http.Request) {
 	subUser := config.SubUser{
 		ID:                   "sub-" + generateRandomStr(8),
 		Username:             username,
-		Password:             password,
 		PassHash:             string(hash),
 		ContainerNames:       []string{containerName},
 		ContainerUUIDs:       []string{c.UUID},
@@ -165,6 +161,12 @@ func HandleSubUserLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	clientUA := r.Header.Get("User-Agent")
 
+	rateKey := "subuser:" + clientIP + ":" + req.Username
+	if !loginRateAllowed(rateKey) {
+		jsonResponse(w, http.StatusTooManyRequests, APIResponse{Success: false, Message: fmt.Sprintf("尝试次数过多，请 %d 秒后再试", loginRateBlockedSeconds(rateKey))})
+		return
+	}
+
 	// Find sub-user
 	for _, su := range config.AppConfig.SubUsers {
 		if su.Username == req.Username {
@@ -175,6 +177,7 @@ func HandleSubUserLogin(w http.ResponseWriter, r *http.Request) {
 					jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "No active container is assigned to this user"})
 					return
 				}
+				loginRateRecord(rateKey, true)
 				tokenStr := newSubUserToken(su.Username, containerUUIDs, time.Now().Add(24*time.Hour), su.TokenVersion)
 				config.AddLoginLog(su.Username, clientIP, clientUA, true)
 
@@ -188,6 +191,7 @@ func HandleSubUserLogin(w http.ResponseWriter, r *http.Request) {
 				})
 				return
 			} else {
+				loginRateRecord(rateKey, false)
 				config.AddLoginLog(su.Username, clientIP, clientUA, false)
 			}
 		}
@@ -219,9 +223,16 @@ func HandleSubUserAccessCode(w http.ResponseWriter, r *http.Request) {
 	}
 	clientUA := r.Header.Get("User-Agent")
 
+	rateKey := "access:" + clientIP + ":" + req.Code
+	if !loginRateAllowed(rateKey) {
+		jsonResponse(w, http.StatusTooManyRequests, APIResponse{Success: false, Message: fmt.Sprintf("尝试次数过多，请 %d 秒后再试", loginRateBlockedSeconds(rateKey))})
+		return
+	}
+
 	for _, su := range config.AppConfig.SubUsers {
 		if su.AccessCode == req.Code {
 			if err := bcrypt.CompareHashAndPassword([]byte(su.PassHash), []byte(req.Password)); err != nil {
+				loginRateRecord(rateKey, false)
 				config.AddLoginLog(su.Username, clientIP, clientUA, false)
 				jsonResponse(w, http.StatusUnauthorized, APIResponse{Success: false, Message: "Invalid password"})
 				return
@@ -233,6 +244,7 @@ func HandleSubUserAccessCode(w http.ResponseWriter, r *http.Request) {
 				jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "No active container is assigned to this link"})
 				return
 			}
+			loginRateRecord(rateKey, true)
 			tokenStr := newSubUserToken(su.Username, containerUUIDs, time.Now().Add(24*time.Hour), su.TokenVersion)
 			config.AddLoginLog(su.Username, clientIP, clientUA, true)
 
@@ -248,6 +260,7 @@ func HandleSubUserAccessCode(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	loginRateRecord(rateKey, false)
 	jsonResponse(w, http.StatusUnauthorized, APIResponse{Success: false, Message: "Invalid access code"})
 }
 
@@ -751,7 +764,6 @@ type SubUserListItem struct {
 	ContainerName        string   `json:"container_name"`
 	ContainerUUID        string   `json:"container_uuid"`
 	AccessCode           string   `json:"access_code"`
-	Password             string   `json:"password,omitempty"`
 	CreatedAt            string   `json:"created_at"`
 	LastLogin            string   `json:"last_login"`
 	LastLoginIP          string   `json:"last_login_ip"`
@@ -779,7 +791,6 @@ func HandleSubUserList(w http.ResponseWriter, r *http.Request) {
 			ImageLimitConfigured: su.ImageLimitConfigured,
 			CurrentImageIDs:      subUserCurrentImageIDs(&su),
 			AccessCode:           su.AccessCode,
-			Password:             su.Password,
 			CreatedAt:            su.CreatedAt,
 		}
 
@@ -849,7 +860,6 @@ func HandleSubUserAction(w http.ResponseWriter, r *http.Request) {
 		password := generateRandomStr(16)
 		if hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost); err == nil {
 			target.PassHash = string(hash)
-			target.Password = password
 			target.Token = ""
 			target.TokenVersion++ // invalidate all existing tokens
 			config.SaveConfig()
@@ -898,7 +908,7 @@ func HandleSubUserAction(w http.ResponseWriter, r *http.Request) {
 		target.ImageLimitConfigured = true
 		target.TokenVersion++
 		config.SaveConfig()
-		jsonResponse(w, http.StatusOK, APIResponse{Success: true, Data: newSubUserResponse(*target, target.Password)})
+		jsonResponse(w, http.StatusOK, APIResponse{Success: true, Data: newSubUserResponse(*target, "")})
 
 	default:
 		jsonResponse(w, http.StatusNotFound, APIResponse{Success: false, Message: "Action not found"})

@@ -1525,6 +1525,11 @@ func migrateSubUsers() bool {
 				changed = true
 			}
 		}
+		if su.Password != "" {
+			// Plaintext passwords are no longer stored; drop any residual value.
+			su.Password = ""
+			changed = true
+		}
 		if su.Token != "" {
 			su.Token = ""
 			changed = true

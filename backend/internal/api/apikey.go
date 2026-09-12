@@ -101,7 +101,24 @@ func listApiKeys(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Data: keys})
 }
 
+// requireApiKeyAdminAccess blocks API-key-authenticated callers that lack the
+// admin:access scope from managing API keys. Admin sessions always pass.
+// This is defense in depth on top of the AdminMiddleware route gate: without
+// it, any key holding apikey:create could mint an unbound "*" key and take
+// over the panel.
+func requireApiKeyAdminAccess(w http.ResponseWriter, r *http.Request) bool {
+	actx, ok := authContextFromRequest(r)
+	if ok && actx.Type == authTypeAPIKey && !scopeAllowed(actx.Scopes, "admin:access") {
+		jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "Administrator permission required to manage API keys"})
+		return false
+	}
+	return true
+}
+
 func createApiKey(w http.ResponseWriter, r *http.Request) {
+	if !requireApiKeyAdminAccess(w, r) {
+		return
+	}
 	var req apiKeyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Name) == "" {
 		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Name is required"})
@@ -157,6 +174,9 @@ func createApiKey(w http.ResponseWriter, r *http.Request) {
 }
 
 func updateApiKey(w http.ResponseWriter, r *http.Request) {
+	if !requireApiKeyAdminAccess(w, r) {
+		return
+	}
 	keyID := apiKeyIDFromPath(r.URL.Path)
 	if keyID == "" {
 		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Key ID required"})
@@ -197,6 +217,9 @@ func updateApiKey(w http.ResponseWriter, r *http.Request) {
 }
 
 func deleteApiKey(w http.ResponseWriter, r *http.Request) {
+	if !requireApiKeyAdminAccess(w, r) {
+		return
+	}
 	keyID := apiKeyIDFromPath(r.URL.Path)
 	if keyID == "" {
 		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Key ID required"})
@@ -337,7 +360,11 @@ func validateApiKeyDetails(rawKey, clientIP string) (*config.ApiKeyConfig, bool)
 		}
 	}
 	if len(k.Scopes) == 0 {
-		k.Scopes = []string{"*"}
+		// Legacy keys without explicit scopes previously inherited "*"
+		// (full admin). Grant the read-only default set instead so an old
+		// key can never silently gain admin powers; a warning is logged once.
+		k.Scopes = append([]string(nil), defaultApiKeyScopes...)
+		fmt.Printf("SECURITY: API key %q (%s) has no scopes configured; granting read-only defaults instead of full access. Re-create the key with explicit scopes if it needs more.\n", k.Name, k.ID)
 	}
 	return k, true
 }

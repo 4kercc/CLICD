@@ -268,13 +268,21 @@ func HandleLogin(w http.ResponseWriter, r *http.Request) {
 	ip := clientIP(r)
 	ua := r.Header.Get("User-Agent")
 
+	rateKey := "admin:" + ip + ":" + req.Username
+	if !loginRateAllowed(rateKey) {
+		jsonResponse(w, http.StatusTooManyRequests, APIResponse{Success: false, Message: fmt.Sprintf("尝试次数过多，请 %d 秒后再试", loginRateBlockedSeconds(rateKey))})
+		return
+	}
+
 	if req.Username != config.AppConfig.AdminUser {
+		loginRateRecord(rateKey, false)
 		RecordLoginLog(req.Username, ip, ua, false)
 		jsonResponse(w, http.StatusUnauthorized, APIResponse{Success: false, Message: "Invalid credentials"})
 		return
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(config.AppConfig.AdminPassHash), []byte(req.Password)); err != nil {
+		loginRateRecord(rateKey, false)
 		RecordLoginLog(req.Username, ip, ua, false)
 		jsonResponse(w, http.StatusUnauthorized, APIResponse{Success: false, Message: "Invalid credentials"})
 		return
@@ -294,12 +302,14 @@ func HandleLogin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !ValidateTOTP(config.AppConfig.AdminTOTPSecret, req.TOTPCode) {
+			loginRateRecord(rateKey, false)
 			RecordLoginLog(req.Username, ip, ua, false)
 			jsonResponse(w, http.StatusUnauthorized, APIResponse{Success: false, Message: "Invalid two-factor authentication code"})
 			return
 		}
 	}
 
+	loginRateRecord(rateKey, true)
 	RecordLoginLog(req.Username, ip, ua, true)
 
 	// Generate JWT token
