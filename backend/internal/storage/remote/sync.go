@@ -187,6 +187,66 @@ func localFileNames(localDir string) []string {
 	return names
 }
 
+// remoteRecordMu serializes snapshot/backup record mutations performed by
+// concurrent per-pool sync goroutines.
+var remoteRecordMu sync.Mutex
+
+// recordRemoteCopy persists a successful offsite copy. The legacy single-value
+// fields stay in sync (last successful writer) for backward compatibility.
+func recordRemoteCopy(kind, id, poolID, remotePath string) {
+	remoteRecordMu.Lock()
+	defer remoteRecordMu.Unlock()
+	switch kind {
+	case "snapshot":
+		if s := config.FindSnapshot(id); s != nil {
+			s.RemoteSynced = true
+			s.RemoteStoragePoolID = poolID
+			s.RemotePath = remotePath
+			upsertRemoteCopy(&s.RemoteCopies, poolID, remotePath)
+			_ = config.SaveConfig()
+		}
+	case "backup":
+		if b := config.FindBackup(id); b != nil {
+			b.RemoteSynced = true
+			b.RemoteStoragePoolID = poolID
+			b.RemotePath = remotePath
+			upsertRemoteCopy(&b.RemoteCopies, poolID, remotePath)
+			_ = config.SaveConfig()
+		}
+	}
+}
+
+func upsertRemoteCopy(copies *[]config.RemoteCopy, poolID, remotePath string) {
+	for i := range *copies {
+		if (*copies)[i].PoolID == poolID {
+			(*copies)[i].RemotePath = remotePath
+			return
+		}
+	}
+	*copies = append(*copies, config.RemoteCopy{PoolID: poolID, RemotePath: remotePath})
+}
+
+// remoteCopyTargets returns the unique (poolID, remotePath) pairs holding a
+// copy of an item, merging the multi-copy list with the legacy single fields.
+func remoteCopyTargets(copies []config.RemoteCopy, legacyPoolID, legacyPath string) [][2]string {
+	seen := map[string]bool{}
+	targets := [][2]string{}
+	add := func(poolID, remotePath string) {
+		poolID = strings.TrimSpace(poolID)
+		remotePath = strings.TrimSpace(remotePath)
+		if poolID == "" || remotePath == "" || seen[poolID] {
+			return
+		}
+		seen[poolID] = true
+		targets = append(targets, [2]string{poolID, remotePath})
+	}
+	for _, rc := range copies {
+		add(rc.PoolID, rc.RemotePath)
+	}
+	add(legacyPoolID, legacyPath)
+	return targets
+}
+
 // DeleteSnapshotFromRemoteStorage deletes the remote copy of a snapshot from its
 // recorded remote storage pool. It should be called BEFORE the local files are
 // removed, so the remote file list can be enumerated from the local directory.
@@ -194,7 +254,8 @@ func DeleteSnapshotFromRemoteStorage(snapshot *config.Snapshot) error {
 	if snapshot == nil {
 		return fmt.Errorf("snapshot is nil")
 	}
-	return deleteRemoteCopy(snapshot.Path, snapshot.RemoteStoragePoolID, snapshot.RemotePath, "snapshot", snapshot.ID)
+	return deleteAllRemoteCopies(snapshot.Path, "snapshot", snapshot.ID,
+		remoteCopyTargets(snapshot.RemoteCopies, snapshot.RemoteStoragePoolID, snapshot.RemotePath))
 }
 
 // DeleteBackupFromRemoteStorage deletes the remote copy of a backup from its
@@ -203,7 +264,35 @@ func DeleteBackupFromRemoteStorage(backup *config.Backup) error {
 	if backup == nil {
 		return fmt.Errorf("backup is nil")
 	}
-	return deleteRemoteCopy(backup.Path, backup.RemoteStoragePoolID, backup.RemotePath, "backup", backup.ID)
+	return deleteAllRemoteCopies(backup.Path, "backup", backup.ID,
+		remoteCopyTargets(backup.RemoteCopies, backup.RemoteStoragePoolID, backup.RemotePath))
+}
+
+// deleteAllRemoteCopies deletes the item from every recorded remote pool.
+// All pools are attempted even when one fails; an error is returned when no
+// target existed or every deletion failed.
+func deleteAllRemoteCopies(localDir, kind, id string, targets [][2]string) error {
+	if len(targets) == 0 {
+		return fmt.Errorf("no remote storage record for %s %s", kind, id)
+	}
+	var firstErr error
+	deleted := 0
+	for _, target := range targets {
+		if err := deleteRemoteCopy(localDir, target[0], target[1], kind, id); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		deleted++
+	}
+	if deleted == 0 {
+		return firstErr
+	}
+	if firstErr != nil {
+		return fmt.Errorf("deleted %d remote %s copies but some failed: %w", deleted, kind, firstErr)
+	}
+	return nil
 }
 
 func deleteRemoteCopy(localDir, poolID, remoteBasePath, kind, id string) error {
@@ -227,9 +316,9 @@ func deleteRemoteCopy(localDir, poolID, remoteBasePath, kind, id string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	// Prefer a one-shot tree delete (single ssh session / collection DELETE):
-	// per-file deletion dials a new connection per file and would take hours
-	// for LXC rootfs trees.
+	// Prefer a one-shot tree delete (single ssh session / collection DELETE /
+	// Drive folder delete): per-file deletion dials a new connection per file
+	// and would take hours for LXC rootfs trees.
 	if dd, ok := client.(DeleteDir); ok {
 		if err := dd.DeleteDir(ctx, remoteBasePath); err != nil {
 			fmt.Printf("Failed to delete remote %s copy %s on pool %s: %v\n", kind, id, pool.Name, err)
@@ -433,12 +522,7 @@ func SyncSingleSnapshotToPool(snap *config.Snapshot, pool *config.StoragePool) e
 	}
 
 	if err == nil {
-		if s := config.FindSnapshot(snap.ID); s != nil {
-			s.RemoteSynced = true
-			s.RemoteStoragePoolID = pool.ID
-			s.RemotePath = remoteBasePath
-			_ = config.SaveConfig()
-		}
+		recordRemoteCopy("snapshot", snap.ID, pool.ID, remoteBasePath)
 		SetProgress(SyncProgress{
 			ID: snap.ID,
 			Type: "snapshot_upload",
@@ -512,12 +596,7 @@ func SyncSingleBackupToPool(bkp *config.Backup, pool *config.StoragePool) error 
 	err = uploadWalk(ctx, client, bkp.Path, remoteBasePath, bkp.ID, "backup_upload", totalSize, &transferred, startTime)
 
 	if err == nil {
-		if b := config.FindBackup(bkp.ID); b != nil {
-			b.RemoteSynced = true
-			b.RemoteStoragePoolID = pool.ID
-			b.RemotePath = remoteBasePath
-			_ = config.SaveConfig()
-		}
+		recordRemoteCopy("backup", bkp.ID, pool.ID, remoteBasePath)
 		SetProgress(SyncProgress{
 			ID: bkp.ID,
 			Type: "backup_upload",
@@ -542,6 +621,8 @@ func SyncSingleBackupToPool(bkp *config.Backup, pool *config.StoragePool) error 
 }
 
 // EnsureLocalSnapshotFromRemote downloads remote snapshot files if local copy is missing or remote source is requested.
+// Multiple recorded copies are tried in order; the first pool that serves a
+// complete disk image wins.
 func EnsureLocalSnapshotFromRemote(snapshot *config.Snapshot) error {
 	if snapshot == nil {
 		return fmt.Errorf("snapshot is nil")
@@ -550,29 +631,10 @@ func EnsureLocalSnapshotFromRemote(snapshot *config.Snapshot) error {
 	releaseLock := acquireSyncLock(snapshot.ID)
 	defer releaseLock()
 
-	if snapshot.RemoteStoragePoolID == "" || snapshot.RemotePath == "" {
+	targets := remoteCopyTargets(snapshot.RemoteCopies, snapshot.RemoteStoragePoolID, snapshot.RemotePath)
+	if len(targets) == 0 {
 		return fmt.Errorf("no remote storage record for snapshot %s", snapshot.ID)
 	}
-	var pool *config.StoragePool
-	for _, p := range config.AppConfig.StoragePools {
-		if p.ID == snapshot.RemoteStoragePoolID {
-			pool = &p
-			break
-		}
-	}
-	if pool == nil {
-		return fmt.Errorf("remote storage pool %s not found", snapshot.RemoteStoragePoolID)
-	}
-	client, err := NewClient(pool.Type, pool.Config)
-	if err != nil {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-	defer cancel()
-
-	_ = os.MkdirAll(snapshot.Path, 0700)
-	files := []string{"disk.qcow2", "domain.xml", "config", "rootfs.tar.gz"}
-	totalFiles := len(files)
 
 	SetProgress(SyncProgress{
 		ID: snapshot.ID,
@@ -581,11 +643,79 @@ func EnsureLocalSnapshotFromRemote(snapshot *config.Snapshot) error {
 		Percent: 10,
 	})
 
+	var firstErr error
+	for _, target := range targets {
+		pool, client, err := clientForPool(target[0])
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		err = downloadSnapshotFilesFromPool(ctx, client, pool, snapshot, target[1])
+		cancel()
+		if err == nil {
+			SetProgress(SyncProgress{
+				ID: snapshot.ID,
+				Type: "snapshot_download",
+				Stage: "completed",
+				Percent: 100,
+			})
+			return nil
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+		fmt.Printf("Snapshot %s restore from pool %s failed, trying next copy: %v\n", snapshot.ID, pool.Name, err)
+	}
+
+	SetProgress(SyncProgress{
+		ID: snapshot.ID,
+		Type: "snapshot_download",
+		Stage: "failed",
+		Percent: 100,
+		Error: func() string {
+			if firstErr != nil {
+				return firstErr.Error()
+			}
+			return ""
+		}(),
+	})
+	if firstErr == nil {
+		firstErr = fmt.Errorf("no remote copy could serve snapshot %s", snapshot.ID)
+	}
+	return firstErr
+}
+
+func clientForPool(poolID string) (*config.StoragePool, StorageClient, error) {
+	var pool *config.StoragePool
+	for _, p := range config.AppConfig.StoragePools {
+		if p.ID == poolID {
+			pool = &p
+			break
+		}
+	}
+	if pool == nil {
+		return nil, nil, fmt.Errorf("remote storage pool %s not found", poolID)
+	}
+	client, err := NewClient(pool.Type, pool.Config)
+	if err != nil {
+		return nil, nil, fmt.Errorf("remote client init error for %s: %w", pool.Name, err)
+	}
+	return pool, client, nil
+}
+
+func downloadSnapshotFilesFromPool(ctx context.Context, client StorageClient, pool *config.StoragePool, snapshot *config.Snapshot, remotePath string) error {
+	_ = os.MkdirAll(snapshot.Path, 0700)
+	files := []string{"disk.qcow2", "domain.xml", "config", "rootfs.tar.gz"}
+	totalFiles := len(files)
+
 	// Download standard files. Metadata files are optional (may not exist remotely),
-	// but the disk image must succeed and, for backups, match the recorded checksum.
+	// but the disk image must succeed.
 	var criticalErr error
 	for idx, filename := range files {
-		remoteFile := filepath.ToSlash(filepath.Join(snapshot.RemotePath, filename))
+		remoteFile := filepath.ToSlash(filepath.Join(remotePath, filename))
 		localFile := filepath.Join(snapshot.Path, filename)
 
 		SetProgress(SyncProgress{
@@ -602,24 +732,6 @@ func EnsureLocalSnapshotFromRemote(snapshot *config.Snapshot) error {
 			continue
 		}
 	}
-
-	SetProgress(SyncProgress{
-		ID: snapshot.ID,
-		Type: "snapshot_download",
-		Stage: func() string {
-			if criticalErr != nil {
-				return "failed"
-			}
-			return "completed"
-		}(),
-		Percent: 100,
-		Error: func() string {
-			if criticalErr != nil {
-				return criticalErr.Error()
-			}
-			return ""
-		}(),
-	})
 	if criticalErr != nil {
 		fmt.Printf("Failed to restore snapshot %s from remote storage %s: %v\n", snapshot.ID, pool.Name, criticalErr)
 		return criticalErr
@@ -628,6 +740,8 @@ func EnsureLocalSnapshotFromRemote(snapshot *config.Snapshot) error {
 }
 
 // EnsureLocalBackupFromRemote downloads remote backup files if local copy is missing or remote source is requested.
+// Multiple recorded copies are tried in order; the first pool that serves a
+// complete, checksum-verified disk image wins.
 func EnsureLocalBackupFromRemote(backup *config.Backup) error {
 	if backup == nil {
 		return fmt.Errorf("backup is nil")
@@ -636,29 +750,10 @@ func EnsureLocalBackupFromRemote(backup *config.Backup) error {
 	releaseLock := acquireSyncLock(backup.ID)
 	defer releaseLock()
 
-	if backup.RemoteStoragePoolID == "" || backup.RemotePath == "" {
+	targets := remoteCopyTargets(backup.RemoteCopies, backup.RemoteStoragePoolID, backup.RemotePath)
+	if len(targets) == 0 {
 		return fmt.Errorf("no remote storage record for backup %s", backup.ID)
 	}
-	var pool *config.StoragePool
-	for _, p := range config.AppConfig.StoragePools {
-		if p.ID == backup.RemoteStoragePoolID {
-			pool = &p
-			break
-		}
-	}
-	if pool == nil {
-		return fmt.Errorf("remote storage pool %s not found", backup.RemoteStoragePoolID)
-	}
-	client, err := NewClient(pool.Type, pool.Config)
-	if err != nil {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
-	defer cancel()
-
-	_ = os.MkdirAll(backup.Path, 0700)
-	files := []string{"disk.qcow2", "domain.xml", "unattend.iso", "seed.iso"}
-	totalFiles := len(files)
 
 	SetProgress(SyncProgress{
 		ID: backup.ID,
@@ -667,11 +762,61 @@ func EnsureLocalBackupFromRemote(backup *config.Backup) error {
 		Percent: 10,
 	})
 
+	var firstErr error
+	for _, target := range targets {
+		pool, client, err := clientForPool(target[0])
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
+		err = downloadBackupFilesFromPool(ctx, client, pool, backup, target[1])
+		cancel()
+		if err == nil {
+			SetProgress(SyncProgress{
+				ID: backup.ID,
+				Type: "backup_download",
+				Stage: "completed",
+				Percent: 100,
+			})
+			return nil
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+		fmt.Printf("Backup %s restore from pool %s failed, trying next copy: %v\n", backup.ID, pool.Name, err)
+	}
+
+	SetProgress(SyncProgress{
+		ID: backup.ID,
+		Type: "backup_download",
+		Stage: "failed",
+		Percent: 100,
+		Error: func() string {
+			if firstErr != nil {
+				return firstErr.Error()
+			}
+			return ""
+		}(),
+	})
+	if firstErr == nil {
+		firstErr = fmt.Errorf("no remote copy could serve backup %s", backup.ID)
+	}
+	return firstErr
+}
+
+func downloadBackupFilesFromPool(ctx context.Context, client StorageClient, pool *config.StoragePool, backup *config.Backup, remotePath string) error {
+	_ = os.MkdirAll(backup.Path, 0700)
+	files := []string{"disk.qcow2", "domain.xml", "unattend.iso", "seed.iso"}
+	totalFiles := len(files)
+
 	// Download standard files. Metadata files are optional (may not exist remotely),
 	// but the disk image must succeed and match the recorded checksum.
 	var criticalErr error
 	for idx, filename := range files {
-		remoteFile := filepath.ToSlash(filepath.Join(backup.RemotePath, filename))
+		remoteFile := filepath.ToSlash(filepath.Join(remotePath, filename))
 		localFile := filepath.Join(backup.Path, filename)
 
 		SetProgress(SyncProgress{
@@ -688,24 +833,6 @@ func EnsureLocalBackupFromRemote(backup *config.Backup) error {
 			continue
 		}
 	}
-
-	SetProgress(SyncProgress{
-		ID: backup.ID,
-		Type: "backup_download",
-		Stage: func() string {
-			if criticalErr != nil {
-				return "failed"
-			}
-			return "completed"
-		}(),
-		Percent: 100,
-		Error: func() string {
-			if criticalErr != nil {
-				return criticalErr.Error()
-			}
-			return ""
-		}(),
-	})
 	if criticalErr != nil {
 		fmt.Printf("Failed to restore backup %s from remote storage %s: %v\n", backup.ID, pool.Name, criticalErr)
 		return criticalErr

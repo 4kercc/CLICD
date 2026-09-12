@@ -742,6 +742,14 @@ type SubUser struct {
 	TokenVersion         int      `json:"token_version"`
 }
 
+// RemoteCopy records one offsite copy of a snapshot/backup on a specific
+// remote storage pool. Several pools may hold copies of the same item when
+// multiple pools have sync enabled.
+type RemoteCopy struct {
+	PoolID     string `json:"pool_id"`
+	RemotePath string `json:"remote_path"`
+}
+
 // Backup represents a full offline/online backup archive
 type Backup struct {
 	ID                  string `json:"id"`
@@ -758,6 +766,7 @@ type Backup struct {
 	RemoteSynced        bool   `json:"remote_synced,omitempty"`
 	RemoteStoragePoolID string `json:"remote_storage_pool_id,omitempty"`
 	RemotePath          string `json:"remote_path,omitempty"`
+	RemoteCopies        []RemoteCopy `json:"remote_copies,omitempty"`
 }
 
 // Snapshot represents a lightweight COW snapshot
@@ -774,6 +783,7 @@ type Snapshot struct {
 	RemoteSynced        bool   `json:"remote_synced,omitempty"`
 	RemoteStoragePoolID string `json:"remote_storage_pool_id,omitempty"`
 	RemotePath          string `json:"remote_path,omitempty"`
+	RemoteCopies        []RemoteCopy `json:"remote_copies,omitempty"`
 }
 
 const (

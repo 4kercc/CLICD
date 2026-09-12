@@ -116,7 +116,13 @@ func HandleStorageTest(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: fmt.Sprintf("连接失败: %v", err)})
 		return
 	}
-	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: "远程存储连接测试成功！"})
+	message := "远程存储连接测试成功！"
+	if describer, ok := client.(remote.ConnectionDescriber); ok {
+		if detail, err := describer.DescribeConnection(ctx); err == nil && detail != "" {
+			message = "连接成功：" + detail
+		}
+	}
+	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: message})
 }
 
 // HandleStorageSyncAll triggers a full scan and sync of all snapshots and backups to remote storage pools.

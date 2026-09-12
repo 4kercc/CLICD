@@ -432,7 +432,8 @@ func ensureSchema() error {
 				size_bytes INTEGER,
 				remote_synced INTEGER,
 				remote_storage_pool_id TEXT,
-				remote_path TEXT
+				remote_path TEXT,
+				remote_copies TEXT
 			)`,
 			`CREATE TABLE IF NOT EXISTS backups (
 				id TEXT PRIMARY KEY,
@@ -445,7 +446,11 @@ func ensureSchema() error {
 				size_bytes INTEGER,
 				format TEXT,
 				compressed INTEGER,
-				checksum TEXT
+				checksum TEXT,
+				remote_synced INTEGER,
+				remote_storage_pool_id TEXT,
+				remote_path TEXT,
+				remote_copies TEXT
 			)`,
 	}
 	for _, stmt := range stmts {
@@ -530,9 +535,11 @@ func ensureSchemaMigrations() error {
 				{"snapshots", "remote_synced", "INTEGER NOT NULL DEFAULT 0"},
 				{"snapshots", "remote_storage_pool_id", "TEXT NOT NULL DEFAULT ''"},
 				{"snapshots", "remote_path", "TEXT NOT NULL DEFAULT ''"},
+				{"snapshots", "remote_copies", "TEXT NOT NULL DEFAULT ''"},
 				{"backups", "remote_synced", "INTEGER NOT NULL DEFAULT 0"},
 				{"backups", "remote_storage_pool_id", "TEXT NOT NULL DEFAULT ''"},
 				{"backups", "remote_path", "TEXT NOT NULL DEFAULT ''"},
+				{"backups", "remote_copies", "TEXT NOT NULL DEFAULT ''"},
 			} {
 		wasAdded, err := ensureColumn(column.table, column.name, column.def)
 		if err != nil {
@@ -1075,8 +1082,8 @@ func saveEnabledImages(tx *sql.Tx) error {
 
 func saveSnapshots(tx *sql.Tx) error {
 	for _, snapshot := range AppConfig.Snapshots {
-		if _, err := tx.Exec(`INSERT INTO snapshots(id, container_id, container_name, lxc_name, created_at, created_by, scheduled, path, size_bytes, remote_synced, remote_storage_pool_id, remote_path)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, snapshot.ID, snapshot.ContainerID, snapshot.ContainerName, snapshot.LXCName, snapshot.CreatedAt, snapshot.CreatedBy, boolInt(snapshot.Scheduled), snapshot.Path, snapshot.SizeBytes, boolInt(snapshot.RemoteSynced), snapshot.RemoteStoragePoolID, snapshot.RemotePath); err != nil {
+		if _, err := tx.Exec(`INSERT INTO snapshots(id, container_id, container_name, lxc_name, created_at, created_by, scheduled, path, size_bytes, remote_synced, remote_storage_pool_id, remote_path, remote_copies)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, snapshot.ID, snapshot.ContainerID, snapshot.ContainerName, snapshot.LXCName, snapshot.CreatedAt, snapshot.CreatedBy, boolInt(snapshot.Scheduled), snapshot.Path, snapshot.SizeBytes, boolInt(snapshot.RemoteSynced), snapshot.RemoteStoragePoolID, snapshot.RemotePath, encodeRemoteCopies(snapshot.RemoteCopies)); err != nil {
 			return err
 		}
 	}
@@ -1085,8 +1092,8 @@ func saveSnapshots(tx *sql.Tx) error {
 
 func saveBackups(tx *sql.Tx) error {
 	for _, backup := range AppConfig.Backups {
-		if _, err := tx.Exec(`INSERT INTO backups(id, container_id, container_name, lxc_name, created_at, created_by, path, size_bytes, format, compressed, checksum, remote_synced, remote_storage_pool_id, remote_path)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, backup.ID, backup.ContainerID, backup.ContainerName, backup.LXCName, backup.CreatedAt, backup.CreatedBy, backup.Path, backup.SizeBytes, backup.Format, boolInt(backup.Compressed), backup.Checksum, boolInt(backup.RemoteSynced), backup.RemoteStoragePoolID, backup.RemotePath); err != nil {
+		if _, err := tx.Exec(`INSERT INTO backups(id, container_id, container_name, lxc_name, created_at, created_by, path, size_bytes, format, compressed, checksum, remote_synced, remote_storage_pool_id, remote_path, remote_copies)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, backup.ID, backup.ContainerID, backup.ContainerName, backup.LXCName, backup.CreatedAt, backup.CreatedBy, backup.Path, backup.SizeBytes, backup.Format, boolInt(backup.Compressed), backup.Checksum, boolInt(backup.RemoteSynced), backup.RemoteStoragePoolID, backup.RemotePath, encodeRemoteCopies(backup.RemoteCopies)); err != nil {
 			return err
 		}
 	}
@@ -1531,7 +1538,7 @@ func loadEnabledImages() ([]string, error) {
 }
 
 func loadSnapshots() ([]Snapshot, error) {
-	rows, err := db.Query(`SELECT id, container_id, container_name, lxc_name, created_at, created_by, scheduled, path, size_bytes, remote_synced, remote_storage_pool_id, remote_path FROM snapshots ORDER BY created_at, id`)
+	rows, err := db.Query(`SELECT id, container_id, container_name, lxc_name, created_at, created_by, scheduled, path, size_bytes, remote_synced, remote_storage_pool_id, remote_path, remote_copies FROM snapshots ORDER BY created_at, id`)
 	if err != nil {
 		return nil, err
 	}
@@ -1540,21 +1547,22 @@ func loadSnapshots() ([]Snapshot, error) {
 	for rows.Next() {
 		var snapshot Snapshot
 		var scheduled, remoteSynced int
-		var remoteStoragePoolID, remotePath sql.NullString
-		if err := rows.Scan(&snapshot.ID, &snapshot.ContainerID, &snapshot.ContainerName, &snapshot.LXCName, &snapshot.CreatedAt, &snapshot.CreatedBy, &scheduled, &snapshot.Path, &snapshot.SizeBytes, &remoteSynced, &remoteStoragePoolID, &remotePath); err != nil {
+		var remoteStoragePoolID, remotePath, remoteCopies sql.NullString
+		if err := rows.Scan(&snapshot.ID, &snapshot.ContainerID, &snapshot.ContainerName, &snapshot.LXCName, &snapshot.CreatedAt, &snapshot.CreatedBy, &scheduled, &snapshot.Path, &snapshot.SizeBytes, &remoteSynced, &remoteStoragePoolID, &remotePath, &remoteCopies); err != nil {
 			return nil, err
 		}
 		snapshot.Scheduled = scheduled != 0
 		snapshot.RemoteSynced = remoteSynced != 0
 		snapshot.RemoteStoragePoolID = remoteStoragePoolID.String
 		snapshot.RemotePath = remotePath.String
+		snapshot.RemoteCopies = decodeRemoteCopies(remoteCopies.String)
 		result = append(result, snapshot)
 	}
 	return result, rows.Err()
 }
 
 func loadBackups() ([]Backup, error) {
-	rows, err := db.Query(`SELECT id, container_id, container_name, lxc_name, created_at, created_by, path, size_bytes, format, compressed, checksum, remote_synced, remote_storage_pool_id, remote_path FROM backups ORDER BY created_at, id`)
+	rows, err := db.Query(`SELECT id, container_id, container_name, lxc_name, created_at, created_by, path, size_bytes, format, compressed, checksum, remote_synced, remote_storage_pool_id, remote_path, remote_copies FROM backups ORDER BY created_at, id`)
 	if err != nil {
 		return nil, err
 	}
@@ -1563,8 +1571,8 @@ func loadBackups() ([]Backup, error) {
 	for rows.Next() {
 		var backup Backup
 		var compressed, remoteSynced int
-		var format, checksum, remoteStoragePoolID, remotePath sql.NullString
-		if err := rows.Scan(&backup.ID, &backup.ContainerID, &backup.ContainerName, &backup.LXCName, &backup.CreatedAt, &backup.CreatedBy, &backup.Path, &backup.SizeBytes, &format, &compressed, &checksum, &remoteSynced, &remoteStoragePoolID, &remotePath); err != nil {
+		var format, checksum, remoteStoragePoolID, remotePath, remoteCopies sql.NullString
+		if err := rows.Scan(&backup.ID, &backup.ContainerID, &backup.ContainerName, &backup.LXCName, &backup.CreatedAt, &backup.CreatedBy, &backup.Path, &backup.SizeBytes, &format, &compressed, &checksum, &remoteSynced, &remoteStoragePoolID, &remotePath, &remoteCopies); err != nil {
 			return nil, err
 		}
 		backup.Format = format.String
@@ -1573,9 +1581,32 @@ func loadBackups() ([]Backup, error) {
 		backup.RemoteSynced = remoteSynced != 0
 		backup.RemoteStoragePoolID = remoteStoragePoolID.String
 		backup.RemotePath = remotePath.String
+		backup.RemoteCopies = decodeRemoteCopies(remoteCopies.String)
 		result = append(result, backup)
 	}
 	return result, rows.Err()
+}
+
+func encodeRemoteCopies(copies []RemoteCopy) string {
+	if len(copies) == 0 {
+		return ""
+	}
+	data, err := json.Marshal(copies)
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+func decodeRemoteCopies(value string) []RemoteCopy {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	var copies []RemoteCopy
+	if err := json.Unmarshal([]byte(value), &copies); err != nil {
+		return nil
+	}
+	return copies
 }
 
 func loadLegacyJSONConfig(path string) (*ClicdConfig, bool, error) {

@@ -38,9 +38,20 @@ func NewClient(storageType string, config map[string]string) (StorageClient, err
 		return NewWebDAVClient(config)
 	case "minio", "s3":
 		return NewMinIOClient(config)
+	case "onedrive":
+		return NewOneDriveClient(config)
+	case "googledrive", "google_drive", "gdrive":
+		return NewGoogleDriveClient(config)
 	default:
 		return nil, fmt.Errorf("unsupported remote storage type: %s", storageType)
 	}
+}
+
+// ConnectionDescriber is an optional StorageClient capability returning a
+// human-readable connection summary (account, quota) shown after a successful
+// storage connectivity test.
+type ConnectionDescriber interface {
+	DescribeConnection(ctx context.Context) (string, error)
 }
 
 // =========================================================================
