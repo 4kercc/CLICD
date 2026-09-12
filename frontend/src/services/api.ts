@@ -939,6 +939,22 @@ export const updateSnapshotSchedule = (id: ContainerIdentifier, enabled: boolean
     { timeout: 600000 }
   )
 
+export interface PortTestResult {
+  index: number
+  description: string
+  protocol: string
+  host_ip?: string
+  host_port: number
+  container_port: number
+  dnat_ok: boolean
+  internal_ok: boolean | null
+  status: 'ok' | 'warn' | 'error'
+  message: string
+}
+
+export const testContainerPorts = (id: ContainerIdentifier) =>
+  api.get<APIResponse<{ internal_ip: string; results: PortTestResult[] }>>(`/containers/${id}/port-test`, { timeout: 30000 })
+
 export const updateContainerName = (id: ContainerIdentifier, name: string) =>
   api.put<APIResponse<Container>>(`/containers/${id}/rename`, { name })
 

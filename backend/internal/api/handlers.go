@@ -1,10 +1,13 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -247,6 +250,11 @@ func HandleSingleContainer(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		updateFirewall(w, r, id)
+	case action == "port-test" && r.Method == http.MethodGet:
+		if !requireScope(w, r, "container:network") {
+			return
+		}
+		testContainerPortMappings(w, r, id)
 	case r.Method == http.MethodGet:
 		if !requireScope(w, r, "container:read") {
 			return
@@ -828,6 +836,99 @@ func handleGuestAgentStatus(w http.ResponseWriter, r *http.Request, id int) {
 		Data: map[string]interface{}{
 			"connected": connected,
 			"fs_info":   fsInfo,
+		},
+	})
+}
+
+// testContainerPortMappings verifies each NAT mapping end-to-end from the host side:
+// 1) the iptables DNAT rule is actually present;
+// 2) the internal guest port accepts a TCP connection (catches services not
+//    listening and guest firewalls such as Windows Defender dropping inbound).
+func testContainerPortMappings(w http.ResponseWriter, r *http.Request, containerID int) {
+	c := config.FindContainer(containerID)
+	if c == nil {
+		jsonResponse(w, http.StatusNotFound, APIResponse{Success: false, Message: "Container not found"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	dnatOut, dnatErr := exec.CommandContext(ctx, "iptables", "-t", "nat", "-S", "PREROUTING").Output()
+	haveDnatSnapshot := dnatErr == nil
+	dnatLines := strings.Split(string(dnatOut), "\n")
+
+	internalIP := strings.TrimSpace(c.IP)
+	results := make([]map[string]interface{}, 0, len(c.PortMappings))
+	for i, pm := range c.PortMappings {
+		res := map[string]interface{}{
+			"index":          i,
+			"description":    pm.Description,
+			"protocol":       pm.Protocol,
+			"host_ip":        pm.HostIP,
+			"host_port":      pm.HostPort,
+			"container_port": pm.ContainerPort,
+		}
+
+		dnatOk := false
+		if haveDnatSnapshot {
+			needle := fmt.Sprintf("--dport %d ", pm.HostPort)
+			comment := fmt.Sprintf("clicd-c%d-", containerID)
+			for _, line := range dnatLines {
+				if strings.Contains(line, needle) && strings.Contains(line, comment) {
+					dnatOk = true
+					break
+				}
+			}
+		}
+		res["dnat_ok"] = dnatOk
+
+		proto := strings.ToLower(strings.TrimSpace(pm.Protocol))
+		if proto == "udp" || proto == "icmp" {
+			res["internal_ok"] = nil
+			res["status"] = "warn"
+			res["message"] = "转发规则" + map[bool]string{true: "已下发", false: "未找到"}[dnatOk] + "；UDP/ICMP 无法用 TCP 探测，请用实际业务验证"
+			results = append(results, res)
+			continue
+		}
+
+		if internalIP == "" {
+			res["internal_ok"] = nil
+			res["status"] = "warn"
+			res["message"] = "暂未获取到虚拟机内网 IP（可能刚开机），请稍后重试"
+			results = append(results, res)
+			continue
+		}
+
+		addr := net.JoinHostPort(internalIP, strconv.Itoa(pm.ContainerPort))
+		conn, dialErr := net.DialTimeout("tcp", addr, 3*time.Second)
+		if dialErr == nil {
+			conn.Close()
+			res["internal_ok"] = true
+			if dnatOk {
+				res["status"] = "ok"
+				res["message"] = "链路正常：转发规则已下发，虚拟机端口开放"
+			} else {
+				res["status"] = "warn"
+				res["message"] = "虚拟机端口开放，但未找到对应 DNAT 规则，请删除后重建该映射"
+			}
+		} else {
+			res["internal_ok"] = false
+			if !dnatOk {
+				res["status"] = "error"
+				res["message"] = "转发规则未下发且虚拟机端口不通，请删除后重建该映射"
+			} else {
+				res["status"] = "error"
+				res["message"] = "宿主机转发规则正常，但虚拟机内部端口不通：服务未监听或被虚拟机防火墙拦截（如 Windows 防火墙/公用网络配置）"
+			}
+		}
+		results = append(results, res)
+	}
+
+	jsonResponse(w, http.StatusOK, APIResponse{
+		Success: true,
+		Data: map[string]interface{}{
+			"internal_ip": internalIP,
+			"results":     results,
 		},
 	})
 }
