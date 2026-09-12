@@ -1747,33 +1747,32 @@ func (m *Manager) CreateBackup(id int, createdBy string, storagePoolID ...string
 		return config.Backup{}, err
 	}
 
-	wasRunning, err := m.prepareVMForColdCopy(id, name)
-	if err != nil {
-		_ = os.RemoveAll(backupDir)
-		return config.Backup{}, err
-	}
-	if wasRunning {
-		defer func() {
-			if err := m.StartContainer(id); err != nil {
-				fmt.Printf("Warning: failed to restart %s after backup: %v\n", name, err)
-			}
-		}()
-	}
+	status, _ := m.GetContainerStatus(name)
+	if status == "running" {
+		// Online backup: no shutdown, no restart. The VM keeps serving while the
+		// disk is captured (see createOnlineBackup for the consistency strategy).
+		if err := m.createOnlineBackup(c, name, instanceDir, backupDir); err != nil {
+			_ = os.RemoveAll(backupDir)
+			return config.Backup{}, err
+		}
+	} else {
+		// Cold offline path: VM is stopped, plain copy is safe.
 
-	// Copy config & domain.xml
-	if err := copyTree(instanceDir, backupDir); err != nil {
-		_ = os.RemoveAll(backupDir)
-		return config.Backup{}, err
-	}
+		// Copy config & domain.xml
+		if err := copyTree(instanceDir, backupDir); err != nil {
+			_ = os.RemoveAll(backupDir)
+			return config.Backup{}, err
+		}
 
-	// Flatten and compress disk into backupDir/disk.qcow2
-	srcDisk := filepath.Join(instanceDir, "disk.qcow2")
-	dstDisk := filepath.Join(backupDir, "disk.qcow2")
-	_ = os.Remove(dstDisk)
-	cmd := exec.Command("qemu-img", "convert", "-c", "-p", "-O", "qcow2", srcDisk, dstDisk)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		_ = os.RemoveAll(backupDir)
-		return config.Backup{}, fmt.Errorf("failed to create compressed backup disk: %v, output: %s", err, string(out))
+		// Flatten and compress disk into backupDir/disk.qcow2
+		srcDisk := filepath.Join(instanceDir, "disk.qcow2")
+		dstDisk := filepath.Join(backupDir, "disk.qcow2")
+		_ = os.Remove(dstDisk)
+		cmd := exec.Command("qemu-img", "convert", "-c", "-p", "-O", "qcow2", srcDisk, dstDisk)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			_ = os.RemoveAll(backupDir)
+			return config.Backup{}, fmt.Errorf("failed to create compressed backup disk: %v, output: %s", err, string(out))
+		}
 	}
 
 	backup := config.Backup{
@@ -1792,6 +1791,62 @@ func (m *Manager) CreateBackup(id int, createdBy string, storagePoolID ...string
 	config.AddBackup(backup)
 	kvmSnapshotMu.Unlock()
 	return backup, nil
+}
+
+// createOnlineBackup backs up a running VM without shutting it down, mirroring the
+// live-snapshot strategy in CreateSnapshot:
+//   - With Guest Agent: fsfreeze holds the whole copy window (application-consistent)
+//     while `qemu-img convert -U` reads the image under the shared QEMU lock.
+//   - Without agent: an atomic external disk snapshot turns the original file into a
+//     quiet read-only backing; it is flattened+compressed while the VM keeps writing
+//     into the overlay, then an active blockcommit pivots the delta back.
+func (m *Manager) createOnlineBackup(c *config.Container, name, instanceDir, backupDir string) error {
+	// Copy config and non-disk metadata (cheap, read-only)
+	for _, file := range []string{"domain.xml", "meta-data", "user-data", "network-config", "seed.iso", "unattend.iso"} {
+		src := filepath.Join(instanceDir, file)
+		if _, err := os.Stat(src); err == nil {
+			_ = copyFile(src, filepath.Join(backupDir, file))
+		}
+	}
+
+	srcDisk := filepath.Join(instanceDir, "disk.qcow2")
+	dstDisk := filepath.Join(backupDir, "disk.qcow2")
+	_ = os.Remove(dstDisk)
+
+	frozen := false
+	if qemuGuestPing(name) == nil {
+		if _, err := virshCombinedOutput(10*time.Second, "qemu-agent-command", name, `{"execute":"guest-fsfreeze-freeze"}`); err == nil {
+			frozen = true
+		}
+	}
+	if frozen {
+		defer func() {
+			_, _ = virshCombinedOutput(10*time.Second, "qemu-agent-command", name, `{"execute":"guest-fsfreeze-thaw"}`)
+		}()
+	} else {
+		dev := kvmDiskTargetDev(c)
+		overlayPath := filepath.Join(instanceDir, fmt.Sprintf(".%s-backup-%d.qcow2", name, time.Now().UnixNano()))
+		snapName := fmt.Sprintf("clicd-bkp-%d", time.Now().UnixNano())
+		diskspec := fmt.Sprintf("%s,snapshot=external,file=%s", dev, overlayPath)
+		if _, err := virshCombinedOutput(30*time.Second, "snapshot-create-as", name, snapName, "--disk-only", "--atomic", "--no-metadata", "--diskspec", diskspec); err != nil {
+			return fmt.Errorf("online backup needs qemu-guest-agent or external snapshot support: %v", err)
+		}
+		defer func() {
+			// Merge the live delta back into the original disk and pivot.
+			if _, err := virshCombinedOutput(120*time.Second, "blockcommit", name, dev, "--active", "--pivot"); err != nil {
+				fmt.Printf("Warning: blockcommit pivot failed for %s (VM keeps writing into %s; run 'virsh blockjob %s %s --abort' if needed): %v\n", name, overlayPath, name, dev, err)
+				_, _ = virshCombinedOutput(30*time.Second, "blockjob", name, dev, "--abort")
+				return
+			}
+			_ = os.Remove(overlayPath)
+		}()
+	}
+
+	cmd := exec.Command("qemu-img", "convert", "-c", "-p", "-U", "-O", "qcow2", srcDisk, dstDisk)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to create compressed backup disk: %v, output: %s", err, string(out))
+	}
+	return nil
 }
 
 // RestoreBackup restores a KVM instance from a full backup
