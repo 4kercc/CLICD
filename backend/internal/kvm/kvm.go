@@ -1478,12 +1478,88 @@ func (m *Manager) SetSnapshotSchedule(id int, enabled bool, intervalHours int, s
 func (m *Manager) StartSnapshotScheduler() {
 	go func() {
 		m.runDueSnapshotSchedules()
+		m.runDueBackupSchedules()
 		ticker := time.NewTicker(time.Minute)
 		defer ticker.Stop()
 		for range ticker.C {
 			m.runDueSnapshotSchedules()
+			m.runDueBackupSchedules()
 		}
 	}()
+}
+
+// SetBackupSchedule configures the periodic full-backup job of a KVM VM.
+// Mirrors SetSnapshotSchedule; retention is enforced via maxCopies rotation.
+func (m *Manager) SetBackupSchedule(id int, enabled bool, intervalHours int, scheduleTime string, maxCopies int, createdBy string) (*config.Container, error) {
+	c := config.FindContainer(id)
+	if c == nil {
+		return nil, fmt.Errorf("container not found: %d", id)
+	}
+	if !c.IsKVM() {
+		return nil, fmt.Errorf("scheduled backups are only supported for KVM instances")
+	}
+	if intervalHours < 24 {
+		return nil, fmt.Errorf("backup schedule interval cannot be less than 24 hours")
+	}
+	if _, err := parseScheduleClock(scheduleTime); err != nil {
+		return nil, err
+	}
+	if maxCopies < 0 {
+		maxCopies = 0
+	}
+	c.BackupScheduleEnabled = enabled
+	c.BackupScheduleIntervalHours = intervalHours
+	c.BackupScheduleTime = scheduleTime
+	c.BackupScheduleMaxCopies = maxCopies
+	c.BackupScheduleCreatedBy = createdBy
+	if enabled {
+		c.BackupScheduleNextRun = nextSnapshotRun(time.Now(), intervalHours, scheduleTime).Format(time.RFC3339)
+	} else {
+		c.BackupScheduleNextRun = ""
+	}
+	if err := config.SaveConfig(); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// runDueBackupSchedules creates due scheduled full backups with retention.
+func (m *Manager) runDueBackupSchedules() {
+	now := time.Now()
+	containers := append([]config.Container(nil), config.AppConfig.Containers...)
+	for _, c := range containers {
+		if !c.IsKVM() || !c.BackupScheduleEnabled {
+			continue
+		}
+		nextRun, err := time.Parse(time.RFC3339, c.BackupScheduleNextRun)
+		if err != nil || c.BackupScheduleNextRun == "" {
+			nextRun = now
+		}
+		if now.Before(nextRun) {
+			continue
+		}
+		createdBy := c.BackupScheduleCreatedBy
+		if createdBy == "" {
+			createdBy = "admin"
+		}
+		if _, err := m.CreateBackup(c.ID, createdBy, c.BackupScheduleMaxCopies); err != nil {
+			fmt.Printf("Warning: scheduled KVM backup failed for %s: %v\n", c.Name, err)
+			continue
+		}
+		if current := config.FindContainer(c.ID); current != nil {
+			interval := current.BackupScheduleIntervalHours
+			if interval < 24 {
+				interval = 24
+			}
+			next := nextRun.Add(time.Duration(interval) * time.Hour)
+			for !next.After(now) {
+				next = next.Add(time.Duration(interval) * time.Hour)
+			}
+			current.BackupScheduleLastRun = now.Format(time.RFC3339)
+			current.BackupScheduleNextRun = next.Format(time.RFC3339)
+			config.SaveConfig()
+		}
+	}
 }
 
 func (m *Manager) runDueSnapshotSchedules() {
@@ -1708,8 +1784,10 @@ func (m *Manager) convertDiskToOverlay(c *config.Container, diskPath string) err
 	return nil
 }
 
-// CreateBackup creates a full compressed independent backup archive of a KVM instance
-func (m *Manager) CreateBackup(id int, createdBy string, storagePoolID ...string) (config.Backup, error) {
+// CreateBackup creates a full compressed independent backup archive of a KVM instance.
+// rotateLimit > 0 enables retention: before creating the backup, the oldest ones are
+// deleted until fewer than rotateLimit remain (used by scheduled backups).
+func (m *Manager) CreateBackup(id int, createdBy string, rotateLimit int, storagePoolID ...string) (config.Backup, error) {
 	releaseLock := acquireVMLock(id)
 	defer releaseLock()
 
@@ -1719,6 +1797,23 @@ func (m *Manager) CreateBackup(id int, createdBy string, storagePoolID ...string
 	}
 	if !c.IsKVM() {
 		return config.Backup{}, fmt.Errorf("container is not a KVM VM: %d", id)
+	}
+	if rotateLimit > 0 {
+		// Global lock only for rotation (shared backup-list mutation), never
+		// across the long disk copy below.
+		kvmSnapshotMu.Lock()
+		for {
+			existing := config.ContainerBackups(id)
+			if len(existing) < rotateLimit {
+				break
+			}
+			sortBackupsOldestFirst(existing)
+			if err := m.deleteBackupLocked(existing[0]); err != nil {
+				kvmSnapshotMu.Unlock()
+				return config.Backup{}, err
+			}
+		}
+		kvmSnapshotMu.Unlock()
 	}
 
 	name := c.VirshName()
@@ -1747,6 +1842,7 @@ func (m *Manager) CreateBackup(id int, createdBy string, storagePoolID ...string
 		return config.Backup{}, err
 	}
 
+	dstDisk := filepath.Join(backupDir, "disk.qcow2")
 	status, _ := m.GetContainerStatus(name)
 	if status == "running" {
 		// Online backup: no shutdown, no restart. The VM keeps serving while the
@@ -1766,7 +1862,6 @@ func (m *Manager) CreateBackup(id int, createdBy string, storagePoolID ...string
 
 		// Flatten and compress disk into backupDir/disk.qcow2
 		srcDisk := filepath.Join(instanceDir, "disk.qcow2")
-		dstDisk := filepath.Join(backupDir, "disk.qcow2")
 		_ = os.Remove(dstDisk)
 		cmd := exec.Command("qemu-img", "convert", "-c", "-p", "-O", "qcow2", srcDisk, dstDisk)
 		if out, err := cmd.CombinedOutput(); err != nil {
@@ -1787,10 +1882,38 @@ func (m *Manager) CreateBackup(id int, createdBy string, storagePoolID ...string
 		Format:        "qcow2",
 		Compressed:    true,
 	}
+	if checksum, err := sha256File(dstDisk); err == nil {
+		backup.Checksum = checksum
+	} else {
+		fmt.Printf("Warning: failed to compute backup checksum for %s: %v\n", backupID, err)
+	}
 	kvmSnapshotMu.Lock()
 	config.AddBackup(backup)
 	kvmSnapshotMu.Unlock()
 	return backup, nil
+}
+
+// sha256File computes the hex SHA256 of a file with a streaming 1MB buffer.
+func sha256File(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	buf := make([]byte, 1024*1024)
+	if _, err := io.CopyBuffer(h, f, buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func sortBackupsOldestFirst(backups []config.Backup) {
+	sort.SliceStable(backups, func(i, j int) bool {
+		ti, _ := time.Parse("2006-01-02 15:04:05", backups[i].CreatedAt)
+		tj, _ := time.Parse("2006-01-02 15:04:05", backups[j].CreatedAt)
+		return ti.Before(tj)
+	})
 }
 
 // createOnlineBackup backs up a running VM without shutting it down, mirroring the
@@ -1919,8 +2042,14 @@ func (m *Manager) DeleteBackup(id string) error {
 
 	kvmSnapshotMu.Lock()
 	defer kvmSnapshotMu.Unlock()
+	return m.deleteBackupLocked(*backup)
+}
+
+func (m *Manager) deleteBackupLocked(backup config.Backup) error {
 	if backup.Path != "" {
-		_ = os.RemoveAll(backup.Path)
+		if err := os.RemoveAll(backup.Path); err != nil {
+			return fmt.Errorf("failed to delete backup files: %v", err)
+		}
 	}
 	config.RemoveBackup(backup.ID)
 	return nil

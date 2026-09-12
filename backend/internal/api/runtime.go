@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"clicd/internal/config"
@@ -172,8 +173,10 @@ func deleteSnapshotByRuntime(snapshotID string) error {
 func restoreSnapshotByRuntime(snapshotID string) error {
 	snapshot := config.FindSnapshot(snapshotID)
 	if snapshot != nil {
-		if snapshot.RemoteSynced && snapshot.RemotePath != "" {
-			_ = remote.EnsureLocalSnapshotFromRemote(snapshot)
+		if snapshot.RemoteSynced && snapshot.RemotePath != "" && remoteSnapshotDiskMissing(snapshot.Path) {
+			if err := remote.EnsureLocalSnapshotFromRemote(snapshot); err != nil {
+				return fmt.Errorf("failed to fetch snapshot from remote storage: %w", err)
+			}
 		}
 		if c := config.FindContainer(snapshot.ContainerID); c != nil && c.IsKVM() {
 			return kvmManager.RestoreSnapshot(snapshotID)
@@ -196,9 +199,17 @@ func setSnapshotScheduleByRuntime(id int, enabled bool, intervalHours int, sched
 func createBackupByRuntime(id int, createdBy string, storagePoolID ...string) (config.Backup, error) {
 	c := config.FindContainer(id)
 	if c != nil && c.IsKVM() {
-		return kvmManager.CreateBackup(id, createdBy, storagePoolID...)
+		return kvmManager.CreateBackup(id, createdBy, 0, storagePoolID...)
 	}
 	return config.Backup{}, fmt.Errorf("backup is currently supported for KVM instances")
+}
+
+func setBackupScheduleByRuntime(id int, enabled bool, intervalHours int, scheduleTime string, maxCopies int, createdBy string) (*config.Container, error) {
+	c := config.FindContainer(id)
+	if c != nil && c.IsKVM() {
+		return kvmManager.SetBackupSchedule(id, enabled, intervalHours, scheduleTime, maxCopies, createdBy)
+	}
+	return nil, fmt.Errorf("scheduled backups are only supported for KVM instances")
 }
 
 func deleteBackupByRuntime(backupID string) error {
@@ -212,12 +223,26 @@ func deleteBackupByRuntime(backupID string) error {
 func restoreBackupByRuntime(backupID string) error {
 	backup := config.FindBackup(backupID)
 	if backup != nil {
-		if backup.RemoteSynced && backup.RemotePath != "" {
-			_ = remote.EnsureLocalBackupFromRemote(backup)
+		if backup.RemoteSynced && backup.RemotePath != "" && remoteSnapshotDiskMissing(backup.Path) {
+			if err := remote.EnsureLocalBackupFromRemote(backup); err != nil {
+				return fmt.Errorf("failed to fetch backup from remote storage: %w", err)
+			}
 		}
 		return kvmManager.RestoreBackup(backupID)
 	}
 	return fmt.Errorf("backup not found: %s", backupID)
+}
+
+// remoteSnapshotDiskMissing reports whether the local disk image of a
+// snapshot/backup is absent, i.e. a remote pull is required before restore.
+func remoteSnapshotDiskMissing(path string) bool {
+	if path == "" {
+		return true
+	}
+	if _, err := os.Stat(filepath.Join(path, "disk.qcow2")); err == nil {
+		return false
+	}
+	return true
 }
 
 func resizeDiskByRuntime(id int, newSizeGB int) error {

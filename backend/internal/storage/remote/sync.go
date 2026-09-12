@@ -2,7 +2,10 @@ package remote
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -84,6 +87,66 @@ func calculateDirSize(dir string) int64 {
 	return total
 }
 
+// uploadWithRetry retries transient upload failures with a short linear backoff;
+// the shared sync context bounds the total time.
+func uploadWithRetry(ctx context.Context, client StorageClient, localPath, remotePath string, attempts int) error {
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := client.UploadFile(ctx, localPath, remotePath); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Duration(i+1) * 5 * time.Second):
+		}
+	}
+	return lastErr
+}
+
+// sha256File computes the hex SHA256 of a file with a streaming 1MB buffer.
+func sha256File(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	buf := make([]byte, 1024*1024)
+	if _, err := io.CopyBuffer(h, f, buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// downloadRemoteFile fetches one file and verifies critical disk images.
+// A failed download removes any partial local file so a restore never uses
+// truncated data; disk.qcow2 additionally verifies the recorded checksum.
+func downloadRemoteFile(ctx context.Context, client StorageClient, remoteFile, localFile, filename, checksum string) error {
+	err := client.DownloadFile(ctx, remoteFile, localFile)
+	if err != nil {
+		_ = os.Remove(localFile)
+		return fmt.Errorf("download %s failed: %w", filename, err)
+	}
+	if filename == "disk.qcow2" && checksum != "" {
+		sum, sumErr := sha256File(localFile)
+		if sumErr != nil {
+			_ = os.Remove(localFile)
+			return fmt.Errorf("verify %s failed: %w", filename, sumErr)
+		}
+		if sum != checksum {
+			_ = os.Remove(localFile)
+			return fmt.Errorf("checksum mismatch for %s: remote copy is corrupted", filename)
+		}
+	}
+	return nil
+}
+
 // SyncSnapshotToRemoteStorage uploads a newly created snapshot to configured remote storage pools.
 func SyncSnapshotToRemoteStorage(snapshot *config.Snapshot) {
 	if snapshot == nil || snapshot.Path == "" {
@@ -145,7 +208,7 @@ func SyncSingleSnapshotToPool(snap *config.Snapshot, pool *config.StoragePool) e
 			Percent: int(float64(transferred) / float64(maxInt64(1, totalSize)) * 100),
 		})
 
-		if uploadErr := client.UploadFile(ctx, path, remoteFile); uploadErr != nil {
+		if uploadErr := uploadWithRetry(ctx, client, path, remoteFile, 3); uploadErr != nil {
 			return uploadErr
 		}
 		transferred += info.Size()
@@ -263,7 +326,7 @@ func SyncSingleBackupToPool(bkp *config.Backup, pool *config.StoragePool) error 
 			Percent: int(float64(transferred) / float64(maxInt64(1, totalSize)) * 100),
 		})
 
-		if uploadErr := client.UploadFile(ctx, path, remoteFile); uploadErr != nil {
+		if uploadErr := uploadWithRetry(ctx, client, path, remoteFile, 3); uploadErr != nil {
 			return uploadErr
 		}
 		transferred += info.Size()
@@ -357,7 +420,9 @@ func EnsureLocalSnapshotFromRemote(snapshot *config.Snapshot) error {
 		Percent: 10,
 	})
 
-	// Download standard files
+	// Download standard files. Metadata files are optional (may not exist remotely),
+	// but the disk image must succeed and, for backups, match the recorded checksum.
+	var criticalErr error
 	for idx, filename := range files {
 		remoteFile := filepath.ToSlash(filepath.Join(snapshot.RemotePath, filename))
 		localFile := filepath.Join(snapshot.Path, filename)
@@ -369,15 +434,35 @@ func EnsureLocalSnapshotFromRemote(snapshot *config.Snapshot) error {
 			CurrentFile: filename,
 			Percent: int(float64(idx+1) / float64(totalFiles) * 90),
 		})
-		_ = client.DownloadFile(ctx, remoteFile, localFile)
+		if err := downloadRemoteFile(ctx, client, remoteFile, localFile, filename, ""); err != nil {
+			if filename == "disk.qcow2" {
+				criticalErr = err
+			}
+			continue
+		}
 	}
 
 	SetProgress(SyncProgress{
 		ID: snapshot.ID,
 		Type: "snapshot_download",
-		Stage: "completed",
+		Stage: func() string {
+			if criticalErr != nil {
+				return "failed"
+			}
+			return "completed"
+		}(),
 		Percent: 100,
+		Error: func() string {
+			if criticalErr != nil {
+				return criticalErr.Error()
+			}
+			return ""
+		}(),
 	})
+	if criticalErr != nil {
+		fmt.Printf("Failed to restore snapshot %s from remote storage %s: %v\n", snapshot.ID, pool.Name, criticalErr)
+		return criticalErr
+	}
 	return nil
 }
 
@@ -421,6 +506,9 @@ func EnsureLocalBackupFromRemote(backup *config.Backup) error {
 		Percent: 10,
 	})
 
+	// Download standard files. Metadata files are optional (may not exist remotely),
+	// but the disk image must succeed and match the recorded checksum.
+	var criticalErr error
 	for idx, filename := range files {
 		remoteFile := filepath.ToSlash(filepath.Join(backup.RemotePath, filename))
 		localFile := filepath.Join(backup.Path, filename)
@@ -432,15 +520,35 @@ func EnsureLocalBackupFromRemote(backup *config.Backup) error {
 			CurrentFile: filename,
 			Percent: int(float64(idx+1) / float64(totalFiles) * 90),
 		})
-		_ = client.DownloadFile(ctx, remoteFile, localFile)
+		if err := downloadRemoteFile(ctx, client, remoteFile, localFile, filename, backup.Checksum); err != nil {
+			if filename == "disk.qcow2" {
+				criticalErr = err
+			}
+			continue
+		}
 	}
 
 	SetProgress(SyncProgress{
 		ID: backup.ID,
 		Type: "backup_download",
-		Stage: "completed",
+		Stage: func() string {
+			if criticalErr != nil {
+				return "failed"
+			}
+			return "completed"
+		}(),
 		Percent: 100,
+		Error: func() string {
+			if criticalErr != nil {
+				return criticalErr.Error()
+			}
+			return ""
+		}(),
 	})
+	if criticalErr != nil {
+		fmt.Printf("Failed to restore backup %s from remote storage %s: %v\n", backup.ID, pool.Name, criticalErr)
+		return criticalErr
+	}
 	return nil
 }
 

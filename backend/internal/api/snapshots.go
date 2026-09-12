@@ -351,16 +351,21 @@ func HandleBackups(w http.ResponseWriter, r *http.Request) {
 
 func handleContainerBackups(w http.ResponseWriter, r *http.Request, containerID int, action string) {
 	switch {
-	case action == "backups" && r.Method == http.MethodGet:
-		if !requireScope(w, r, "snapshot:read") {
-			return
-		}
-		listContainerBackups(w, r, containerID)
-		case action == "backups" && r.Method == http.MethodPost:
-			if !requireScope(w, r, "snapshot:create") {
+		case action == "backups" && r.Method == http.MethodGet:
+			if !requireScope(w, r, "snapshot:read") {
 				return
 			}
-			createContainerBackup(w, r, containerID)
+			listContainerBackups(w, r, containerID)
+			case action == "backups" && r.Method == http.MethodPost:
+				if !requireScope(w, r, "snapshot:create") {
+					return
+				}
+				createContainerBackup(w, r, containerID)
+			case action == "backups/schedule" && r.Method == http.MethodPost:
+				if !requireScope(w, r, "snapshot:schedule") {
+					return
+				}
+				updateBackupSchedule(w, r, containerID)
 		case action == "backups/sync-all" && r.Method == http.MethodPost:
 			if !requireScope(w, r, "snapshot:create") {
 				return
@@ -399,6 +404,68 @@ func listContainerBackups(w http.ResponseWriter, r *http.Request, containerID in
 	sortBackupsNewestFirst(backups)
 	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Data: map[string]interface{}{
 		"backups": backups,
+		"schedule": map[string]interface{}{
+			"enabled":        c.BackupScheduleEnabled,
+			"interval_hours": c.BackupScheduleIntervalHours,
+			"time":           c.BackupScheduleTime,
+			"max_copies":     c.BackupScheduleMaxCopies,
+			"last_run":       c.BackupScheduleLastRun,
+			"next_run":       c.BackupScheduleNextRun,
+			"created_by":     c.BackupScheduleCreatedBy,
+		},
+	}})
+}
+
+func updateBackupSchedule(w http.ResponseWriter, r *http.Request, containerID int) {
+	if isSubUserRequest(r) {
+		jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "Sub-users cannot configure backup schedules"})
+		return
+	}
+	var req struct {
+		Enabled       bool   `json:"enabled"`
+		IntervalHours int    `json:"interval_hours"`
+		Time          string `json:"time"`
+		MaxCopies     int    `json:"max_copies"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Invalid request body"})
+		return
+	}
+	if req.IntervalHours <= 0 {
+		req.IntervalHours = 24
+	}
+	if req.IntervalHours < 24 {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Backup schedule interval cannot be less than 24 hours"})
+		return
+	}
+	if req.Time == "" {
+		req.Time = "04:00"
+	}
+	if req.MaxCopies <= 0 {
+		// Retention defaults to 3 so scheduled backups cannot silently fill the disk.
+		req.MaxCopies = 3
+	}
+	if req.Enabled {
+		if _, err := config.SelectStoragePoolForContent(config.StorageContentBackups, "", 0); err != nil {
+			jsonResponse(w, http.StatusConflict, APIResponse{Success: false, Message: err.Error()})
+			return
+		}
+	}
+	user := requestUser(r)
+	c, err := setBackupScheduleByRuntime(containerID, req.Enabled, req.IntervalHours, req.Time, req.MaxCopies, user)
+	if err != nil {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: err.Error()})
+		return
+	}
+
+	if req.Enabled {
+		config.AddAuditLog("backup.schedule", c.Name, "enabled", user)
+	} else {
+		config.AddAuditLog("backup.schedule", c.Name, "disabled", user)
+	}
+
+	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Data: map[string]interface{}{
+		"container": c,
 	}})
 }
 

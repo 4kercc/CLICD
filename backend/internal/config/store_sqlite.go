@@ -239,6 +239,13 @@ func ensureSchema() error {
 				snapshot_schedule_last_run TEXT,
 				snapshot_schedule_next_run TEXT,
 				snapshot_schedule_created_by TEXT,
+				backup_schedule_enabled INTEGER,
+				backup_schedule_interval_hours INTEGER,
+				backup_schedule_time TEXT,
+				backup_schedule_max_copies INTEGER NOT NULL DEFAULT 0,
+				backup_schedule_last_run TEXT,
+				backup_schedule_next_run TEXT,
+				backup_schedule_created_by TEXT,
 			policy_blocked INTEGER,
 				policy_blocked_reason TEXT,
 				policy_blocked_at TEXT,
@@ -434,7 +441,8 @@ func ensureSchema() error {
 				path TEXT,
 				size_bytes INTEGER,
 				format TEXT,
-				compressed INTEGER
+				compressed INTEGER,
+				checksum TEXT
 			)`,
 	}
 	for _, stmt := range stmts {
@@ -508,6 +516,14 @@ func ensureSchemaMigrations() error {
 			{"containers", "nic_model", "TEXT NOT NULL DEFAULT ''"},
 				{"containers", "disk_bus", "TEXT NOT NULL DEFAULT ''"},
 				{"containers", "snapshot_schedule_max_copies", "INTEGER NOT NULL DEFAULT 0"},
+				{"containers", "backup_schedule_enabled", "INTEGER NOT NULL DEFAULT 0"},
+				{"containers", "backup_schedule_interval_hours", "INTEGER NOT NULL DEFAULT 0"},
+				{"containers", "backup_schedule_time", "TEXT NOT NULL DEFAULT ''"},
+				{"containers", "backup_schedule_max_copies", "INTEGER NOT NULL DEFAULT 0"},
+				{"containers", "backup_schedule_last_run", "TEXT NOT NULL DEFAULT ''"},
+				{"containers", "backup_schedule_next_run", "TEXT NOT NULL DEFAULT ''"},
+				{"containers", "backup_schedule_created_by", "TEXT NOT NULL DEFAULT ''"},
+				{"backups", "checksum", "TEXT NOT NULL DEFAULT ''"},
 			} {
 		wasAdded, err := ensureColumn(column.table, column.name, column.def)
 		if err != nil {
@@ -832,10 +848,13 @@ func saveContainers(tx *sql.Tx) error {
 				snapshot_schedule_enabled, snapshot_schedule_interval_hours, snapshot_schedule_time,
 				snapshot_schedule_max_copies,
 				snapshot_schedule_last_run, snapshot_schedule_next_run, snapshot_schedule_created_by,
+				backup_schedule_enabled, backup_schedule_interval_hours, backup_schedule_time,
+				backup_schedule_max_copies,
+				backup_schedule_last_run, backup_schedule_next_run, backup_schedule_created_by,
 					policy_blocked, policy_blocked_reason, policy_blocked_at,
 					firewall_enabled, firewall_default_action, firewall_rules, allowed_image_ids, image_limit_configured,
 					boot_order, boot_media, firmware, nic_model, disk_bus
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 					c.ID, c.UUID, c.Name, c.Virtualization, c.LXCName, c.KVMName, c.DiskImage, c.StoragePoolID, c.StoragePath, c.MACAddress, c.Template,
 					c.VCPU, c.RAMMB, c.DiskGB, c.NetworkBWMbps, c.NetworkDownMbps, c.NetworkUpMbps,
 					c.MonthlyTrafficGB, c.TrafficMode, c.TrafficInGB,
@@ -847,6 +866,9 @@ func saveContainers(tx *sql.Tx) error {
 					boolInt(c.SnapshotScheduleEnabled), c.SnapshotScheduleIntervalHours, c.SnapshotScheduleTime,
 					c.SnapshotScheduleMaxCopies,
 					c.SnapshotScheduleLastRun, c.SnapshotScheduleNextRun, c.SnapshotScheduleCreatedBy,
+					boolInt(c.BackupScheduleEnabled), c.BackupScheduleIntervalHours, c.BackupScheduleTime,
+					c.BackupScheduleMaxCopies,
+					c.BackupScheduleLastRun, c.BackupScheduleNextRun, c.BackupScheduleCreatedBy,
 					boolInt(c.PolicyBlocked), c.PolicyBlockedReason, c.PolicyBlockedAt,
 				boolInt(c.FirewallEnabled), normalizeFirewallDefaultAction(c.FirewallDefaultAction), marshalFirewallRules(c.FirewallRules), allowedImageIDs, boolInt(c.ImageLimitConfigured),
 				c.BootOrder, c.BootMedia, c.Firmware, c.NICModel, c.DiskBus,
@@ -1054,8 +1076,8 @@ func saveSnapshots(tx *sql.Tx) error {
 
 func saveBackups(tx *sql.Tx) error {
 	for _, backup := range AppConfig.Backups {
-		if _, err := tx.Exec(`INSERT INTO backups(id, container_id, container_name, lxc_name, created_at, created_by, path, size_bytes, format, compressed)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, backup.ID, backup.ContainerID, backup.ContainerName, backup.LXCName, backup.CreatedAt, backup.CreatedBy, backup.Path, backup.SizeBytes, backup.Format, boolInt(backup.Compressed)); err != nil {
+		if _, err := tx.Exec(`INSERT INTO backups(id, container_id, container_name, lxc_name, created_at, created_by, path, size_bytes, format, compressed, checksum)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, backup.ID, backup.ContainerID, backup.ContainerName, backup.LXCName, backup.CreatedAt, backup.CreatedBy, backup.Path, backup.SizeBytes, backup.Format, boolInt(backup.Compressed), backup.Checksum); err != nil {
 			return err
 		}
 	}
@@ -1075,6 +1097,9 @@ func loadContainers() ([]Container, error) {
 		snapshot_schedule_enabled, snapshot_schedule_interval_hours, snapshot_schedule_time,
 		snapshot_schedule_max_copies,
 		snapshot_schedule_last_run, snapshot_schedule_next_run, snapshot_schedule_created_by,
+		backup_schedule_enabled, backup_schedule_interval_hours, backup_schedule_time,
+		backup_schedule_max_copies,
+		backup_schedule_last_run, backup_schedule_next_run, backup_schedule_created_by,
 			policy_blocked, policy_blocked_reason, policy_blocked_at,
 			firewall_enabled, firewall_default_action, firewall_rules, allowed_image_ids, image_limit_configured,
 			boot_order, boot_media, firmware, nic_model, disk_bus
@@ -1087,7 +1112,7 @@ func loadContainers() ([]Container, error) {
 		result := []Container{}
 		for rows.Next() {
 			var c Container
-			var scheduleEnabled, policyBlocked, firewallEnabled, imageLimitConfigured, restoreOnHostBoot int
+			var scheduleEnabled, policyBlocked, firewallEnabled, imageLimitConfigured, restoreOnHostBoot, backupScheduleEnabled int
 			var firewallDefaultAction string
 			var firewallRulesJSON, allowedImageIDs sql.NullString
 			var storagePoolID, storagePath sql.NullString
@@ -1107,6 +1132,9 @@ func loadContainers() ([]Container, error) {
 					&scheduleEnabled, &c.SnapshotScheduleIntervalHours, &c.SnapshotScheduleTime,
 					&c.SnapshotScheduleMaxCopies,
 					&c.SnapshotScheduleLastRun, &c.SnapshotScheduleNextRun, &c.SnapshotScheduleCreatedBy,
+					&backupScheduleEnabled, &c.BackupScheduleIntervalHours, &c.BackupScheduleTime,
+					&c.BackupScheduleMaxCopies,
+					&c.BackupScheduleLastRun, &c.BackupScheduleNextRun, &c.BackupScheduleCreatedBy,
 					&policyBlocked, &c.PolicyBlockedReason, &c.PolicyBlockedAt,
 				&firewallEnabled, &firewallDefaultAction, &firewallRulesJSON, &allowedImageIDs, &imageLimitConfigured,
 				&bootOrder, &bootMedia, &firmware, &nicModel, &diskBus,
@@ -1123,6 +1151,7 @@ func loadContainers() ([]Container, error) {
 			}
 			c.LANIPv4Gateway = lanIPv4Gateway.String
 			c.SnapshotScheduleEnabled = scheduleEnabled != 0
+			c.BackupScheduleEnabled = backupScheduleEnabled != 0
 			c.RestoreOnHostBoot = restoreOnHostBoot != 0
 			c.PolicyBlocked = policyBlocked != 0
 			c.FirewallEnabled = firewallEnabled != 0
@@ -1512,7 +1541,7 @@ func loadSnapshots() ([]Snapshot, error) {
 }
 
 func loadBackups() ([]Backup, error) {
-	rows, err := db.Query(`SELECT id, container_id, container_name, lxc_name, created_at, created_by, path, size_bytes, format, compressed FROM backups ORDER BY created_at, id`)
+	rows, err := db.Query(`SELECT id, container_id, container_name, lxc_name, created_at, created_by, path, size_bytes, format, compressed, checksum FROM backups ORDER BY created_at, id`)
 	if err != nil {
 		return nil, err
 	}
@@ -1521,12 +1550,13 @@ func loadBackups() ([]Backup, error) {
 	for rows.Next() {
 		var backup Backup
 		var compressed int
-		var format sql.NullString
-		if err := rows.Scan(&backup.ID, &backup.ContainerID, &backup.ContainerName, &backup.LXCName, &backup.CreatedAt, &backup.CreatedBy, &backup.Path, &backup.SizeBytes, &format, &compressed); err != nil {
+		var format, checksum sql.NullString
+		if err := rows.Scan(&backup.ID, &backup.ContainerID, &backup.ContainerName, &backup.LXCName, &backup.CreatedAt, &backup.CreatedBy, &backup.Path, &backup.SizeBytes, &format, &compressed, &checksum); err != nil {
 			return nil, err
 		}
 		backup.Format = format.String
 		backup.Compressed = compressed != 0
+		backup.Checksum = checksum.String
 		result = append(result, backup)
 	}
 	return result, rows.Err()

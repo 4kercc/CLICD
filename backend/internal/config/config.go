@@ -166,6 +166,13 @@ type Container struct {
 	SnapshotScheduleLastRun       string                 `json:"snapshot_schedule_last_run"`
 	SnapshotScheduleNextRun       string                 `json:"snapshot_schedule_next_run"`
 	SnapshotScheduleCreatedBy     string                 `json:"snapshot_schedule_created_by"`
+	BackupScheduleEnabled         bool                   `json:"backup_schedule_enabled"`
+	BackupScheduleIntervalHours   int                    `json:"backup_schedule_interval_hours"`
+	BackupScheduleTime            string                 `json:"backup_schedule_time"`
+	BackupScheduleMaxCopies       int                    `json:"backup_schedule_max_copies,omitempty"`
+	BackupScheduleLastRun         string                 `json:"backup_schedule_last_run"`
+	BackupScheduleNextRun         string                 `json:"backup_schedule_next_run"`
+	BackupScheduleCreatedBy       string                 `json:"backup_schedule_created_by"`
 		PolicyBlocked                 bool                   `json:"policy_blocked"`
 		PolicyBlockedReason           string                 `json:"policy_blocked_reason,omitempty"`
 		PolicyBlockedAt               string                 `json:"policy_blocked_at,omitempty"`
@@ -747,6 +754,7 @@ type Backup struct {
 	SizeBytes           int64  `json:"size_bytes"`
 	Format              string `json:"format"` // "qcow2", "tar.gz"
 	Compressed          bool   `json:"compressed"`
+	Checksum            string `json:"checksum,omitempty"` // SHA256 of the primary disk image, for integrity verification
 	RemoteSynced        bool   `json:"remote_synced,omitempty"`
 	RemoteStoragePoolID string `json:"remote_storage_pool_id,omitempty"`
 	RemotePath          string `json:"remote_path,omitempty"`
@@ -1299,6 +1307,9 @@ func migrateLoadedConfig() bool {
 	if ensureContainerSnapshotScheduleDefaults() {
 		changed = true
 	}
+	if ensureContainerBackupScheduleDefaults() {
+		changed = true
+	}
 	if migrateSubUsers() {
 		changed = true
 	}
@@ -1329,6 +1340,21 @@ func ensureContainerSnapshotScheduleDefaults() bool {
 		}
 		if AppConfig.Containers[i].SnapshotScheduleEnabled && AppConfig.Containers[i].SnapshotScheduleTime == "" {
 			AppConfig.Containers[i].SnapshotScheduleTime = "03:00"
+			changed = true
+		}
+	}
+	return changed
+}
+
+func ensureContainerBackupScheduleDefaults() bool {
+	changed := false
+	for i := range AppConfig.Containers {
+		if AppConfig.Containers[i].BackupScheduleEnabled && AppConfig.Containers[i].BackupScheduleIntervalHours < 24 {
+			AppConfig.Containers[i].BackupScheduleIntervalHours = 24
+			changed = true
+		}
+		if AppConfig.Containers[i].BackupScheduleEnabled && AppConfig.Containers[i].BackupScheduleTime == "" {
+			AppConfig.Containers[i].BackupScheduleTime = "04:00"
 			changed = true
 		}
 	}
@@ -1681,11 +1707,12 @@ func AllocateContainerID() int {
 // RemoveContainer removes a container from config by ID
 func RemoveContainer(id int) bool {
 	for i, c := range AppConfig.Containers {
-		if c.ID == id {
-			removeSubUserContainerAccess(c.Name, c.UUID)
-			removeContainerSnapshotMetadata(id)
-			// Clear snapshot schedule for this container
-			clearContainerSnapshotSchedule(&AppConfig.Containers[i])
+			if c.ID == id {
+				removeSubUserContainerAccess(c.Name, c.UUID)
+				removeContainerSnapshotMetadata(id)
+				// Clear snapshot/backup schedules for this container
+				clearContainerSnapshotSchedule(&AppConfig.Containers[i])
+				clearContainerBackupSchedule(&AppConfig.Containers[i])
 			AppConfig.Containers = append(AppConfig.Containers[:i], AppConfig.Containers[i+1:]...)
 			SaveConfig()
 			return true
@@ -1702,6 +1729,16 @@ func clearContainerSnapshotSchedule(c *Container) {
 	c.SnapshotScheduleLastRun = ""
 	c.SnapshotScheduleNextRun = ""
 	c.SnapshotScheduleCreatedBy = ""
+}
+
+func clearContainerBackupSchedule(c *Container) {
+	c.BackupScheduleEnabled = false
+	c.BackupScheduleIntervalHours = 0
+	c.BackupScheduleTime = ""
+	c.BackupScheduleMaxCopies = 0
+	c.BackupScheduleLastRun = ""
+	c.BackupScheduleNextRun = ""
+	c.BackupScheduleCreatedBy = ""
 }
 
 func AddSnapshot(snapshot Snapshot) {
