@@ -1277,20 +1277,25 @@ func (m *Manager) CreateSnapshot(id int, createdBy string, scheduled bool, rotat
 			diskspec := fmt.Sprintf("%s,snapshot=external,file=%s", dev, overlayPath)
 			if _, err := virshCombinedOutput(30*time.Second, "snapshot-create-as", name, snapName, "--disk-only", "--atomic", "--no-metadata", "--diskspec", diskspec); err == nil {
 				externalOverlay = overlayPath
-			} else {
-				fmt.Printf("Warning: external disk snapshot failed for %s, falling back to direct copy (crash-consistent only): %v\n", name, err)
-			}
-			if externalOverlay != "" {
-				defer func() {
-					// Merge the live delta back into the original disk and pivot.
-					if _, err := virshCombinedOutput(120*time.Second, "blockcommit", name, dev, "--active", "--pivot"); err != nil {
-						fmt.Printf("Warning: blockcommit pivot failed for %s (VM keeps writing into %s; run 'virsh blockjob %s %s --abort' if needed): %v\n", name, externalOverlay, name, dev, err)
-						_, _ = virshCombinedOutput(30*time.Second, "blockjob", name, dev, "--abort")
-						return
-					}
-					_ = os.Remove(externalOverlay)
-				}()
-			}
+		} else {
+			fmt.Printf("Warning: external disk snapshot failed for %s, falling back to direct copy (crash-consistent only): %v\n", name, err)
+		}
+		if externalOverlay != "" {
+			defer func() {
+				// Merge the live delta back into the VM's own disk and pivot.
+				// --base MUST be pinned to the instance disk: without it virsh
+				// defaults to the deepest backing file, which for template-based
+				// overlays is the SHARED read-only template base image (block-commit
+				// then either fails on AppArmor deny rules or, worse, would merge
+				// this VM's data into the image every VM on the host is based on).
+				if _, err := virshCombinedOutput(120*time.Second, "blockcommit", name, dev, "--base", diskPath, "--active", "--wait", "--pivot"); err != nil {
+					fmt.Printf("Warning: blockcommit pivot failed for %s (VM keeps writing into %s; run 'virsh blockjob %s %s --abort' if needed): %v\n", name, externalOverlay, name, dev, err)
+					_, _ = virshCombinedOutput(30*time.Second, "blockjob", name, dev, "--abort")
+					return
+				}
+				_ = os.Remove(externalOverlay)
+			}()
+		}
 		}
 
 		// Copy config and non-disk metadata
@@ -1955,8 +1960,13 @@ func (m *Manager) createOnlineBackup(c *config.Container, name, instanceDir, bac
 			return fmt.Errorf("online backup needs qemu-guest-agent or external snapshot support: %v", err)
 		}
 		defer func() {
-			// Merge the live delta back into the original disk and pivot.
-			if _, err := virshCombinedOutput(120*time.Second, "blockcommit", name, dev, "--active", "--pivot"); err != nil {
+			// Merge the live delta back into the VM's own disk and pivot.
+			// --base MUST be pinned to the instance disk: without it virsh defaults
+			// to the deepest backing file, which for template-based overlays is the
+			// SHARED read-only template base image (block-commit then either fails
+			// on AppArmor deny rules or, worse, would merge this VM's data into the
+			// image every VM on the host is based on).
+			if _, err := virshCombinedOutput(120*time.Second, "blockcommit", name, dev, "--base", srcDisk, "--active", "--wait", "--pivot"); err != nil {
 				fmt.Printf("Warning: blockcommit pivot failed for %s (VM keeps writing into %s; run 'virsh blockjob %s %s --abort' if needed): %v\n", name, overlayPath, name, dev, err)
 				_, _ = virshCombinedOutput(30*time.Second, "blockjob", name, dev, "--abort")
 				return
