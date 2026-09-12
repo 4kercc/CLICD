@@ -858,6 +858,7 @@ func testContainerPortMappings(w http.ResponseWriter, r *http.Request, container
 	dnatLines := strings.Split(string(dnatOut), "\n")
 
 	internalIP := strings.TrimSpace(c.IP)
+	isRunning := strings.EqualFold(strings.TrimSpace(c.Status), "running")
 	results := make([]map[string]interface{}, 0, len(c.PortMappings))
 	for i, pm := range c.PortMappings {
 		res := map[string]interface{}{
@@ -881,6 +882,14 @@ func testContainerPortMappings(w http.ResponseWriter, r *http.Request, container
 			}
 		}
 		res["dnat_ok"] = dnatOk
+
+		if !isRunning {
+			res["internal_ok"] = nil
+			res["status"] = "warn"
+			res["message"] = "虚拟机/容器当前未运行：转发规则已随关机自动清理，开机后将自动恢复下发"
+			results = append(results, res)
+			continue
+		}
 
 		proto := strings.ToLower(strings.TrimSpace(pm.Protocol))
 		if proto == "udp" || proto == "icmp" {
