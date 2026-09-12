@@ -1,6 +1,7 @@
 package kvm
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -30,6 +31,7 @@ import (
 	"clicd/internal/config"
 	"clicd/internal/lxc"
 	"clicd/internal/safehttp"
+	"clicd/internal/storage/remote"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -1178,7 +1180,16 @@ func (m *Manager) ensureDomainDefinition(c *config.Container) error {
 	return nil
 }
 
-func (m *Manager) CreateSnapshot(id int, createdBy string, scheduled bool, rotateLimit int, storagePoolID ...string) (config.Snapshot, error) {
+func (m *Manager) CreateSnapshot(id int, createdBy string, scheduled bool, rotateLimit int, storagePoolID ...string) (snapshot config.Snapshot, err error) {
+	progressID := fmt.Sprintf("create-snap-%d", id)
+	defer func() {
+		if err != nil {
+			remote.SetCreateProgress(progressID, "snapshot_create", "failed", "", 0, 0, 0)
+		} else {
+			remote.SetCreateProgress(progressID, "snapshot_create", "completed", snapshot.Path, 100, snapshot.SizeBytes, snapshot.SizeBytes)
+		}
+	}()
+
 	releaseLock := acquireVMLock(id)
 	defer releaseLock()
 
@@ -1199,7 +1210,14 @@ func (m *Manager) CreateSnapshot(id int, createdBy string, scheduled bool, rotat
 				break
 			}
 			sortSnapshotsOldestFirst(existing)
-			if err := m.deleteSnapshotLocked(existing[0]); err != nil {
+			// Retention also removes the remote copy (best effort, never blocks).
+			oldest := existing[0]
+			if oldest.RemoteSynced {
+				if err := remote.DeleteSnapshotFromRemoteStorage(&oldest); err != nil {
+					fmt.Printf("Warning: failed to delete remote copy of rotated snapshot %s: %v\n", oldest.ID, err)
+				}
+			}
+			if err := m.deleteSnapshotLocked(oldest, false); err != nil {
 				kvmSnapshotMu.Unlock()
 				return config.Snapshot{}, err
 			}
@@ -1215,10 +1233,11 @@ func (m *Manager) CreateSnapshot(id int, createdBy string, scheduled bool, rotat
 	if _, err := os.Stat(instanceDir); err != nil {
 		return config.Snapshot{}, fmt.Errorf("VM storage not found: %v", err)
 	}
+	totalBytes := dirSizeBytes(instanceDir)
 	pool, err := config.SelectStoragePoolForContent(
 		config.StorageContentSnapshots,
 		firstString(storagePoolID),
-		dirSizeBytes(instanceDir),
+		totalBytes,
 	)
 	if err != nil {
 		return config.Snapshot{}, err
@@ -1307,20 +1326,23 @@ func (m *Manager) CreateSnapshot(id int, createdBy string, scheduled bool, rotat
 		}
 		// Copy the disk: -U shares the QEMU lock so convert works on live images
 		dstDisk := filepath.Join(snapshotDir, "disk.qcow2")
-		cmd := exec.Command("qemu-img", "convert", "-p", "-U", "-O", "qcow2", diskPath, dstDisk)
-		if _, err := cmd.CombinedOutput(); err != nil {
+		if err := runQemuImgConvertWithProgress([]string{"convert", "-p", "-U", "-O", "qcow2"}, diskPath, dstDisk, progressID, "snapshot_create", totalBytes); err != nil {
 			// Fallback to sparse copy
 			_ = exec.Command("cp", "--sparse=always", diskPath, dstDisk).Run()
 		}
 	} else {
 		// Cold offline snapshot
+		done := make(chan struct{})
+		go remote.TrackDirCopyProgress(progressID, "snapshot_create", snapshotDir, totalBytes, done)
 		if err := copyTree(instanceDir, snapshotDir); err != nil {
+			close(done)
 			_ = os.RemoveAll(snapshotDir)
 			return config.Snapshot{}, err
 		}
+		close(done)
 	}
 
-	snapshot := config.Snapshot{
+	snapshot = config.Snapshot{
 		ID:            snapshotID,
 		ContainerID:   c.ID,
 		ContainerName: c.Name,
@@ -1355,7 +1377,7 @@ func kvmDiskTargetDev(c *config.Container) string {
 	return "vda"
 }
 
-func (m *Manager) DeleteSnapshot(id string) error {
+func (m *Manager) DeleteSnapshot(id string, deleteRemote bool) error {
 	snapshot := config.FindSnapshot(id)
 	if snapshot == nil {
 		return fmt.Errorf("snapshot not found: %s", id)
@@ -1366,10 +1388,17 @@ func (m *Manager) DeleteSnapshot(id string) error {
 
 	kvmSnapshotMu.Lock()
 	defer kvmSnapshotMu.Unlock()
-	return m.deleteSnapshotLocked(*snapshot)
+	return m.deleteSnapshotLocked(*snapshot, deleteRemote)
 }
 
-func (m *Manager) deleteSnapshotLocked(snapshot config.Snapshot) error {
+func (m *Manager) deleteSnapshotLocked(snapshot config.Snapshot, deleteRemote bool) error {
+	// Delete the remote copy first: the local directory enumerates the file list
+	// and is gone after this call.
+	if deleteRemote && snapshot.RemoteSynced {
+		if err := remote.DeleteSnapshotFromRemoteStorage(&snapshot); err != nil {
+			return fmt.Errorf("failed to delete remote snapshot copy: %v", err)
+		}
+	}
 	if snapshot.Path != "" {
 		if err := safeSnapshotPath(snapshot.Path); err != nil {
 			return err
@@ -1792,7 +1821,16 @@ func (m *Manager) convertDiskToOverlay(c *config.Container, diskPath string) err
 // CreateBackup creates a full compressed independent backup archive of a KVM instance.
 // rotateLimit > 0 enables retention: before creating the backup, the oldest ones are
 // deleted until fewer than rotateLimit remain (used by scheduled backups).
-func (m *Manager) CreateBackup(id int, createdBy string, rotateLimit int, storagePoolID ...string) (config.Backup, error) {
+func (m *Manager) CreateBackup(id int, createdBy string, rotateLimit int, storagePoolID ...string) (backup config.Backup, err error) {
+	progressID := fmt.Sprintf("create-bkp-%d", id)
+	defer func() {
+		if err != nil {
+			remote.SetCreateProgress(progressID, "backup_create", "failed", "", 0, 0, 0)
+		} else {
+			remote.SetCreateProgress(progressID, "backup_create", "completed", backup.Path, 100, backup.SizeBytes, backup.SizeBytes)
+		}
+	}()
+
 	releaseLock := acquireVMLock(id)
 	defer releaseLock()
 
@@ -1813,7 +1851,15 @@ func (m *Manager) CreateBackup(id int, createdBy string, rotateLimit int, storag
 				break
 			}
 			sortBackupsOldestFirst(existing)
-			if err := m.deleteBackupLocked(existing[0]); err != nil {
+			// Retention also removes the remote copy so offsite storage cannot
+			// fill up silently; failures are logged but never block rotation.
+			oldest := existing[0]
+			if oldest.RemoteSynced {
+				if err := remote.DeleteBackupFromRemoteStorage(&oldest); err != nil {
+					fmt.Printf("Warning: failed to delete remote copy of rotated backup %s: %v\n", oldest.ID, err)
+				}
+			}
+			if err := m.deleteBackupLocked(oldest, false); err != nil {
 				kvmSnapshotMu.Unlock()
 				return config.Backup{}, err
 			}
@@ -1830,10 +1876,11 @@ func (m *Manager) CreateBackup(id int, createdBy string, rotateLimit int, storag
 		return config.Backup{}, fmt.Errorf("VM storage not found: %v", err)
 	}
 
+	totalBytes := dirSizeBytes(instanceDir)
 	pool, err := config.SelectStoragePoolForContent(
 		config.StorageContentBackups,
 		firstString(storagePoolID),
-		dirSizeBytes(instanceDir),
+		totalBytes,
 	)
 	if err != nil {
 		return config.Backup{}, err
@@ -1852,7 +1899,7 @@ func (m *Manager) CreateBackup(id int, createdBy string, rotateLimit int, storag
 	if status == "running" {
 		// Online backup: no shutdown, no restart. The VM keeps serving while the
 		// disk is captured (see createOnlineBackup for the consistency strategy).
-		if err := m.createOnlineBackup(c, name, instanceDir, backupDir); err != nil {
+		if err := m.createOnlineBackup(c, name, instanceDir, backupDir, progressID, totalBytes); err != nil {
 			_ = os.RemoveAll(backupDir)
 			return config.Backup{}, err
 		}
@@ -1868,14 +1915,13 @@ func (m *Manager) CreateBackup(id int, createdBy string, rotateLimit int, storag
 		// Flatten and compress disk into backupDir/disk.qcow2
 		srcDisk := filepath.Join(instanceDir, "disk.qcow2")
 		_ = os.Remove(dstDisk)
-		cmd := exec.Command("qemu-img", "convert", "-c", "-p", "-O", "qcow2", srcDisk, dstDisk)
-		if out, err := cmd.CombinedOutput(); err != nil {
+		if err := runQemuImgConvertWithProgress([]string{"convert", "-c", "-p", "-O", "qcow2"}, srcDisk, dstDisk, progressID, "backup_create", totalBytes); err != nil {
 			_ = os.RemoveAll(backupDir)
-			return config.Backup{}, fmt.Errorf("failed to create compressed backup disk: %v, output: %s", err, string(out))
+			return config.Backup{}, err
 		}
 	}
 
-	backup := config.Backup{
+	backup = config.Backup{
 		ID:            backupID,
 		ContainerID:   c.ID,
 		ContainerName: c.Name,
@@ -1913,6 +1959,87 @@ func sha256File(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
+// runQemuImgConvertWithProgress runs `qemu-img <args> src dst`, streaming the -p
+// progress lines ("    (42.18/100%)") into the shared progress store so the panel
+// can show a live progress bar during snapshot/backup creation.
+func runQemuImgConvertWithProgress(args []string, srcDisk, dstDisk, progressID, progressType string, totalBytes int64) error {
+	cmd := exec.Command("qemu-img", append(args, srcDisk, dstDisk)...)
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		out, runErr := cmd.CombinedOutput()
+		return fmt.Errorf("%v, output: %s", runErr, string(out))
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	var logTail strings.Builder
+	scanner := bufio.NewScanner(stderr)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	scanner.Split(qemuImgProgressSplit)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		logTail.WriteString(line + "\n")
+		if pct, ok := parseQemuImgPercent(line); ok {
+			remote.SetProgress(remote.SyncProgress{
+				ID:               progressID,
+				Type:             progressType,
+				Stage:            "transferring",
+				CurrentFile:      srcDisk,
+				Percent:          pct,
+				TransferredBytes: totalBytes * int64(pct) / 100,
+				TotalBytes:       totalBytes,
+			})
+		}
+	}
+	if err := cmd.Wait(); err != nil {
+		tail := logTail.String()
+		if len(tail) > 400 {
+			tail = tail[len(tail)-400:]
+		}
+		return fmt.Errorf("%v, output: %s", err, strings.TrimSpace(tail))
+	}
+	return nil
+}
+
+func qemuImgProgressSplit(data []byte, atEOF bool) (int, []byte, error) {
+	if atEOF && len(data) == 0 {
+		return 0, nil, nil
+	}
+	for i := 0; i < len(data); i++ {
+		if data[i] == '\r' || data[i] == '\n' {
+			return i + 1, data[:i], nil
+		}
+	}
+	if atEOF {
+		return len(data), data, nil
+	}
+	return 0, nil, nil
+}
+
+func parseQemuImgPercent(line string) (int, bool) {
+	// progress lines look like "    (42.18/100%)"
+	i := strings.Index(line, "/100%)")
+	if i < 0 {
+		return 0, false
+	}
+	start := strings.LastIndex(line[:i], "(")
+	if start < 0 {
+		return 0, false
+	}
+	value := strings.TrimSpace(line[start+1 : i])
+	if dot := strings.Index(value, "."); dot >= 0 {
+		value = value[:dot]
+	}
+	pct, err := strconv.Atoi(value)
+	if err != nil || pct < 0 || pct > 100 {
+		return 0, false
+	}
+	return pct, true
+}
+
 func sortBackupsOldestFirst(backups []config.Backup) {
 	sort.SliceStable(backups, func(i, j int) bool {
 		ti, _ := time.Parse("2006-01-02 15:04:05", backups[i].CreatedAt)
@@ -1928,7 +2055,8 @@ func sortBackupsOldestFirst(backups []config.Backup) {
 //   - Without agent: an atomic external disk snapshot turns the original file into a
 //     quiet read-only backing; it is flattened+compressed while the VM keeps writing
 //     into the overlay, then an active blockcommit pivots the delta back.
-func (m *Manager) createOnlineBackup(c *config.Container, name, instanceDir, backupDir string) error {
+func (m *Manager) createOnlineBackup(c *config.Container, name, instanceDir, backupDir, progressID string, totalBytes int64) error {
+	remote.SetCreateProgress(progressID, "backup_create", "transferring", "", 0, 0, totalBytes)
 	// Copy config and non-disk metadata (cheap, read-only)
 	for _, file := range []string{"domain.xml", "meta-data", "user-data", "network-config", "seed.iso", "unattend.iso"} {
 		src := filepath.Join(instanceDir, file)
@@ -1975,9 +2103,8 @@ func (m *Manager) createOnlineBackup(c *config.Container, name, instanceDir, bac
 		}()
 	}
 
-	cmd := exec.Command("qemu-img", "convert", "-c", "-p", "-U", "-O", "qcow2", srcDisk, dstDisk)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to create compressed backup disk: %v, output: %s", err, string(out))
+	if err := runQemuImgConvertWithProgress([]string{"convert", "-c", "-p", "-U", "-O", "qcow2"}, srcDisk, dstDisk, progressID, "backup_create", totalBytes); err != nil {
+		return err
 	}
 	return nil
 }
@@ -2041,7 +2168,7 @@ func (m *Manager) RestoreBackup(id string) error {
 }
 
 // DeleteBackup removes a backup record and files
-func (m *Manager) DeleteBackup(id string) error {
+func (m *Manager) DeleteBackup(id string, deleteRemote bool) error {
 	backup := config.FindBackup(id)
 	if backup == nil {
 		return fmt.Errorf("backup not found: %s", id)
@@ -2052,10 +2179,16 @@ func (m *Manager) DeleteBackup(id string) error {
 
 	kvmSnapshotMu.Lock()
 	defer kvmSnapshotMu.Unlock()
-	return m.deleteBackupLocked(*backup)
+	return m.deleteBackupLocked(*backup, deleteRemote)
 }
 
-func (m *Manager) deleteBackupLocked(backup config.Backup) error {
+func (m *Manager) deleteBackupLocked(backup config.Backup, deleteRemote bool) error {
+	// Delete the remote copy first (the local file list is needed for enumeration).
+	if deleteRemote && backup.RemoteSynced {
+		if err := remote.DeleteBackupFromRemoteStorage(&backup); err != nil {
+			return fmt.Errorf("failed to delete remote backup copy: %v", err)
+		}
+	}
 	if backup.Path != "" {
 		if err := os.RemoveAll(backup.Path); err != nil {
 			return fmt.Errorf("failed to delete backup files: %v", err)

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"clicd/internal/config"
+	"clicd/internal/storage/remote"
 )
 
 var (
@@ -28,7 +29,16 @@ func acquireLXCLock(id int) func() {
 	}
 }
 
-func (m *Manager) CreateSnapshot(id int, createdBy string, scheduled bool, rotateLimit int, storagePoolID ...string) (config.Snapshot, error) {
+func (m *Manager) CreateSnapshot(id int, createdBy string, scheduled bool, rotateLimit int, storagePoolID ...string) (snapshot config.Snapshot, err error) {
+	progressID := fmt.Sprintf("create-snap-%d", id)
+	defer func() {
+		if err != nil {
+			remote.SetCreateProgress(progressID, "snapshot_create", "failed", "", 0, 0, 0)
+		} else {
+			remote.SetCreateProgress(progressID, "snapshot_create", "completed", snapshot.Path, 100, snapshot.SizeBytes, snapshot.SizeBytes)
+		}
+	}()
+
 	releaseLock := acquireLXCLock(id)
 	defer releaseLock()
 
@@ -46,7 +56,14 @@ func (m *Manager) CreateSnapshot(id int, createdBy string, scheduled bool, rotat
 				break
 			}
 			sortSnapshotsOldestFirst(existing)
-			if err := m.deleteSnapshotLocked(existing[0]); err != nil {
+			// Retention also removes the remote copy (best effort, never blocks).
+			oldest := existing[0]
+			if oldest.RemoteSynced {
+				if err := remote.DeleteSnapshotFromRemoteStorage(&oldest); err != nil {
+					fmt.Printf("Warning: failed to delete remote copy of rotated snapshot %s: %v\n", oldest.ID, err)
+				}
+			}
+			if err := m.deleteSnapshotLocked(oldest, false); err != nil {
 				snapshotMu.Unlock()
 				return config.Snapshot{}, err
 			}
@@ -59,10 +76,11 @@ func (m *Manager) CreateSnapshot(id int, createdBy string, scheduled bool, rotat
 	if _, err := os.Stat(containerDir); err != nil {
 		return config.Snapshot{}, fmt.Errorf("container storage not found: %v", err)
 	}
+	totalBytes := dirSizeBytes(containerDir)
 	pool, err := config.SelectStoragePoolForContent(
 		config.StorageContentSnapshots,
 		firstString(storagePoolID),
-		dirSizeBytes(containerDir),
+		totalBytes,
 	)
 	if err != nil {
 		return config.Snapshot{}, err
@@ -89,11 +107,15 @@ func (m *Manager) CreateSnapshot(id int, createdBy string, scheduled bool, rotat
 		// under the container dir, otherwise the copy would capture mountpoints.
 		if freezeErr := freezeContainer(lxcName); freezeErr == nil {
 			defer unfreezeContainer(lxcName)
+			done := make(chan struct{})
+			go remote.TrackDirCopyProgress(progressID, "snapshot_create", snapshotDir, totalBytes, done)
 			if err := copyTree(containerDir, snapshotDir); err != nil {
+				close(done)
 				os.RemoveAll(snapshotDir)
 				return config.Snapshot{}, err
 			}
-			snapshot := m.buildSnapshotRecord(c, lxcName, snapshotID, snapshotDir, now, createdBy, scheduled)
+			close(done)
+			snapshot = m.buildSnapshotRecord(c, lxcName, snapshotID, snapshotDir, now, createdBy, scheduled)
 			snapshotMu.Lock()
 			config.AddSnapshot(snapshot)
 			snapshotMu.Unlock()
@@ -117,12 +139,16 @@ func (m *Manager) CreateSnapshot(id int, createdBy string, scheduled bool, rotat
 		}()
 	}
 
+	done := make(chan struct{})
+	go remote.TrackDirCopyProgress(progressID, "snapshot_create", snapshotDir, totalBytes, done)
 	if err := copyTree(containerDir, snapshotDir); err != nil {
+		close(done)
 		os.RemoveAll(snapshotDir)
 		return config.Snapshot{}, err
 	}
+	close(done)
 
-	snapshot := m.buildSnapshotRecord(c, lxcName, snapshotID, snapshotDir, now, createdBy, scheduled)
+	snapshot = m.buildSnapshotRecord(c, lxcName, snapshotID, snapshotDir, now, createdBy, scheduled)
 	snapshotMu.Lock()
 	config.AddSnapshot(snapshot)
 	snapshotMu.Unlock()
@@ -194,7 +220,7 @@ func hostMountsUnder(dir string) bool {
 	return false
 }
 
-func (m *Manager) DeleteSnapshot(id string) error {
+func (m *Manager) DeleteSnapshot(id string, deleteRemote bool) error {
 	snapshot := config.FindSnapshot(id)
 	if snapshot == nil {
 		return fmt.Errorf("snapshot not found: %s", id)
@@ -205,10 +231,17 @@ func (m *Manager) DeleteSnapshot(id string) error {
 
 	snapshotMu.Lock()
 	defer snapshotMu.Unlock()
-	return m.deleteSnapshotLocked(*snapshot)
+	return m.deleteSnapshotLocked(*snapshot, deleteRemote)
 }
 
-func (m *Manager) deleteSnapshotLocked(snapshot config.Snapshot) error {
+func (m *Manager) deleteSnapshotLocked(snapshot config.Snapshot, deleteRemote bool) error {
+	// Delete the remote copy first: the local directory enumerates the file list
+	// and is gone after this call.
+	if deleteRemote && snapshot.RemoteSynced {
+		if err := remote.DeleteSnapshotFromRemoteStorage(&snapshot); err != nil {
+			return fmt.Errorf("failed to delete remote snapshot copy: %v", err)
+		}
+	}
 	if snapshot.Path != "" {
 		if err := safeSnapshotPath(snapshot.Path); err != nil {
 			return err

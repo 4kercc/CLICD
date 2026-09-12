@@ -157,17 +157,17 @@ func createSnapshotByRuntime(id int, createdBy string, scheduled bool, rotateLim
 	return lxcManager.CreateSnapshot(id, createdBy, scheduled, rotateLimit, storagePoolID...)
 }
 
-func deleteSnapshotByRuntime(snapshotID string) error {
+func deleteSnapshotByRuntime(snapshotID string, deleteRemote bool) error {
 	snapshot := config.FindSnapshot(snapshotID)
 	if snapshot != nil {
 		if c := config.FindContainer(snapshot.ContainerID); c != nil && c.IsKVM() {
-			return kvmManager.DeleteSnapshot(snapshotID)
+			return kvmManager.DeleteSnapshot(snapshotID, deleteRemote)
 		}
 		if strings.Contains(snapshot.Path, string(os.PathSeparator)+"kvm"+string(os.PathSeparator)) {
-			return kvmManager.DeleteSnapshot(snapshotID)
+			return kvmManager.DeleteSnapshot(snapshotID, deleteRemote)
 		}
 	}
-	return lxcManager.DeleteSnapshot(snapshotID)
+	return lxcManager.DeleteSnapshot(snapshotID, deleteRemote)
 }
 
 func restoreSnapshotByRuntime(snapshotID string) error {
@@ -212,10 +212,10 @@ func setBackupScheduleByRuntime(id int, enabled bool, intervalHours int, schedul
 	return nil, fmt.Errorf("scheduled backups are only supported for KVM instances")
 }
 
-func deleteBackupByRuntime(backupID string) error {
+func deleteBackupByRuntime(backupID string, deleteRemote bool) error {
 	backup := config.FindBackup(backupID)
 	if backup != nil {
-		return kvmManager.DeleteBackup(backupID)
+		return kvmManager.DeleteBackup(backupID, deleteRemote)
 	}
 	return fmt.Errorf("backup not found: %s", backupID)
 }

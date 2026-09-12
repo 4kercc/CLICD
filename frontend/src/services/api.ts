@@ -920,8 +920,12 @@ export const getContainerSnapshots = (id: ContainerIdentifier) =>
 export const createContainerSnapshot = (id: ContainerIdentifier, options?: CreateSnapshotOptions) =>
   api.post<APIResponse<Snapshot>>(`/containers/${id}/snapshots`, options || {}, { timeout: 600000 })
 
-export const deleteContainerSnapshot = (id: ContainerIdentifier, snapshotId: string) =>
-  api.delete<APIResponse>(`/containers/${id}/snapshots/${snapshotId}`, { timeout: 600000 })
+export const deleteContainerSnapshot = (id: ContainerIdentifier, snapshotId: string, options?: { delete_remote?: boolean }) => {
+  const params = new URLSearchParams()
+  if (options?.delete_remote) params.set('delete_remote', 'true')
+  const qs = params.toString()
+  return api.delete<APIResponse>(`/containers/${id}/snapshots/${snapshotId}${qs ? `?${qs}` : ''}`, { timeout: 600000 })
+}
 
 export const restoreContainerSnapshot = (id: ContainerIdentifier, snapshotId: string, options?: { source?: 'local' | 'remote' }) =>
   api.post<APIResponse>(`/containers/${id}/snapshots/${snapshotId}/restore`, options || {}, { timeout: 600000 })
@@ -1019,8 +1023,12 @@ export const updateBackupSchedule = (id: ContainerIdentifier, enabled: boolean, 
     { timeout: 600000 }
   )
 
-export const deleteContainerBackup = (id: ContainerIdentifier, backupId: string) =>
-  api.delete<APIResponse>(`/containers/${id}/backups/${backupId}`, { timeout: 600000 })
+export const deleteContainerBackup = (id: ContainerIdentifier, backupId: string, options?: { delete_remote?: boolean }) => {
+  const params = new URLSearchParams()
+  if (options?.delete_remote) params.set('delete_remote', 'true')
+  const qs = params.toString()
+  return api.delete<APIResponse>(`/containers/${id}/backups/${backupId}${qs ? `?${qs}` : ''}`, { timeout: 600000 })
+}
 
 export const restoreContainerBackup = (id: ContainerIdentifier, backupId: string, options?: { source?: 'local' | 'remote' }) =>
   api.post<APIResponse>(`/containers/${id}/backups/${backupId}/restore`, options || {}, { timeout: 1800000 })

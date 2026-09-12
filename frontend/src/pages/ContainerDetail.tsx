@@ -240,6 +240,9 @@ export default function ContainerDetail() {
   const [backupSchedule, setBackupSchedule] = useState<BackupSchedule | null>(null)
   const [showBackupSchedule, setShowBackupSchedule] = useState(false)
   const [backupScheduleDraft, setBackupScheduleDraft] = useState({ intervalHours: 24, time: '04:00', maxCopies: 3 })
+  const [createProgress, setCreateProgress] = useState<StorageSyncProgress | null>(null)
+  const [deleteConfirm, setDeleteConfirm] = useState<{ open: boolean; type: 'snapshot' | 'backup'; id: string; label: string; remoteSynced: boolean }>({ open: false, type: 'snapshot', id: '', label: '', remoteSynced: false })
+  const [deleteConfirmRemote, setDeleteConfirmRemote] = useState(true)
   const [showHardwareModal, setShowHardwareModal] = useState(false)
   const [hardwareDraft, setHardwareDraft] = useState({ boot_order: 'disk', boot_media: '', nic_model: 'virtio', disk_bus: 'virtio' })
   const [savingHardware, setSavingHardware] = useState(false)
@@ -1093,14 +1096,15 @@ export default function ContainerDetail() {
       await dialog.alert('快照配额已满', '已达到管理员设置的快照配额，请先删除旧快照。')
       return
     }
-    if (container?.status === 'running') {
-      const confirmed = await dialog.confirm(
-        '拍摄快照',
-        `拍摄快照需要先关机，完成后会自动重启容器 ${container.name}。是否继续？`
-      )
-      if (!confirmed) return
-    }
     setSnapshotBusy('create')
+    setCreateProgress(null)
+    const progressTimer = setInterval(async () => {
+      try {
+        const res = await getStorageSyncProgress(`create-snap-${container?.id}`)
+        const p = res.data.data as StorageSyncProgress | undefined
+        if (p && p.stage) setCreateProgress(p)
+      } catch { /* progress polling is best-effort */ }
+    }, 1200)
     try {
       await createContainerSnapshot(containerIdentifier, { storage_pool_id: snapshotStoragePoolID || undefined })
       await Promise.all([fetchSnapshots(), fetchContainer()])
@@ -1108,6 +1112,8 @@ export default function ContainerDetail() {
       const error = err as { response?: { data?: { message?: string } } }
       await dialog.alert('创建快照失败', error.response?.data?.message || '请稍后重试。')
     } finally {
+      clearInterval(progressTimer)
+      setCreateProgress(null)
       setSnapshotBusy('')
     }
   }
@@ -1199,20 +1205,9 @@ export default function ContainerDetail() {
     }
   }
 
-  const handleDeleteSnapshot = async (snapshot: Snapshot) => {
-    if (!containerIdentifier) return
-    if (!(await ensureSubUserCanOperate())) return
-    if (!(await dialog.confirm('删除快照', `确定删除 ${snapshot.created_at} 的快照吗？`))) return
-    setSnapshotBusy(snapshot.id)
-    try {
-      await deleteContainerSnapshot(containerIdentifier, snapshot.id)
-      await fetchSnapshots()
-    } catch (err: unknown) {
-      const error = err as { response?: { data?: { message?: string } } }
-      await dialog.alert('删除快照失败', error.response?.data?.message || '请稍后重试。')
-    } finally {
-      setSnapshotBusy('')
-    }
+  const handleDeleteSnapshot = (snapshot: Snapshot) => {
+    setDeleteConfirm({ open: true, type: 'snapshot', id: snapshot.id, label: snapshot.created_at, remoteSynced: !!snapshot.remote_synced })
+    setDeleteConfirmRemote(true)
   }
 
   const pollTransferProgress = (targetId: string, initialTitle: string, initialSubTitle: string) => {
@@ -1449,6 +1444,14 @@ export default function ContainerDetail() {
     if (!containerIdentifier) return
     if (!(await ensureSubUserCanOperate())) return
     setBackupBusy('create')
+    setCreateProgress(null)
+    const progressTimer = setInterval(async () => {
+      try {
+        const res = await getStorageSyncProgress(`create-bkp-${container?.id}`)
+        const p = res.data.data as StorageSyncProgress | undefined
+        if (p && p.stage) setCreateProgress(p)
+      } catch { /* progress polling is best-effort */ }
+    }, 1200)
     try {
       await createContainerBackup(containerIdentifier)
       await fetchBackups()
@@ -1457,21 +1460,43 @@ export default function ContainerDetail() {
       const error = err as { response?: { data?: { message?: string } } }
       dialog.alert('创建备份失败', error.response?.data?.message || '请稍后重试。')
     } finally {
+      clearInterval(progressTimer)
+      setCreateProgress(null)
       setBackupBusy('')
     }
   }
 
-  const handleDeleteBackup = async (backupId: string) => {
-    if (!containerIdentifier || !(await dialog.confirm('删除备份', '确定要彻底删除该全量备份文件吗？'))) return
-    setBackupBusy(backupId)
-    try {
-      await deleteContainerBackup(containerIdentifier, backupId)
-      await fetchBackups()
-    } catch (err: unknown) {
-      const error = err as { response?: { data?: { message?: string } } }
-      dialog.alert('删除失败', error.response?.data?.message || '请稍后重试。')
-    } finally {
-      setBackupBusy('')
+  const handleDeleteBackup = (backup: Backup) => {
+    setDeleteConfirm({ open: true, type: 'backup', id: backup.id, label: backup.created_at, remoteSynced: !!backup.remote_synced })
+    setDeleteConfirmRemote(true)
+  }
+
+  const confirmDeleteAction = async () => {
+    if (!containerIdentifier) return
+    const dc = deleteConfirm
+    setDeleteConfirm({ ...dc, open: false })
+    if (dc.type === 'snapshot') {
+      setSnapshotBusy(dc.id)
+      try {
+        await deleteContainerSnapshot(containerIdentifier, dc.id, { delete_remote: deleteConfirmRemote })
+        await fetchSnapshots()
+      } catch (err: unknown) {
+        const error = err as { response?: { data?: { message?: string } } }
+        await dialog.alert('删除快照失败', error.response?.data?.message || '请稍后重试。')
+      } finally {
+        setSnapshotBusy('')
+      }
+    } else {
+      setBackupBusy(dc.id)
+      try {
+        await deleteContainerBackup(containerIdentifier, dc.id, { delete_remote: deleteConfirmRemote })
+        await fetchBackups()
+      } catch (err: unknown) {
+        const error = err as { response?: { data?: { message?: string } } }
+        dialog.alert('删除失败', error.response?.data?.message || '请稍后重试。')
+      } finally {
+        setBackupBusy('')
+      }
     }
   }
 
@@ -2562,6 +2587,23 @@ export default function ContainerDetail() {
               </div>
             )}
 
+            {snapshotBusy === 'create' && createProgress && createProgress.stage === 'transferring' && (
+              <div className="rounded-lg border border-blue-100 bg-blue-50 p-3">
+                <div className="flex items-center justify-between text-xs text-blue-700">
+                  <span>正在创建快照，请稍候…（运行中的容器会被短暂冻结，无需关机）</span>
+                  <span className="font-mono">{createProgress.percent ?? 0}%</span>
+                </div>
+                <div className="mt-2 h-2 overflow-hidden rounded-full bg-blue-100">
+                  <div className="h-full rounded-full bg-blue-500 transition-all" style={{ width: `${Math.max(2, Math.min(99, createProgress.percent ?? 0))}%` }} />
+                </div>
+                <div className="mt-1 text-[11px] text-blue-500">
+                  {createProgress.transferred_bytes != null && createProgress.total_bytes
+                    ? `${(createProgress.transferred_bytes / (1024 * 1024 * 1024)).toFixed(2)} GB / ${(createProgress.total_bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
+                    : '正在估算进度…'}
+                </div>
+              </div>
+            )}
+
             <SnapshotTable
               snapshots={snapshots}
               busy={snapshotBusy}
@@ -3317,6 +3359,22 @@ export default function ContainerDetail() {
                 )}
               </div>
             )}
+            {backupBusy === 'create' && createProgress && createProgress.stage === 'transferring' && (
+              <div className="rounded-lg border border-blue-100 bg-blue-50 p-3">
+                <div className="flex items-center justify-between text-xs text-blue-700">
+                  <span>正在创建全量备份，无需关机，请稍候…</span>
+                  <span className="font-mono">{createProgress.percent ?? 0}%</span>
+                </div>
+                <div className="mt-2 h-2 overflow-hidden rounded-full bg-blue-100">
+                  <div className="h-full rounded-full bg-blue-500 transition-all" style={{ width: `${Math.max(2, Math.min(99, createProgress.percent ?? 0))}%` }} />
+                </div>
+                <div className="mt-1 text-[11px] text-blue-500">
+                  {createProgress.transferred_bytes != null && createProgress.total_bytes
+                    ? `${(createProgress.transferred_bytes / (1024 * 1024 * 1024)).toFixed(2)} GB / ${(createProgress.total_bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
+                    : '正在估算进度…'}
+                </div>
+              </div>
+            )}
             <div className="overflow-x-auto rounded-lg border border-gray-200">
               <table className="w-full text-left text-xs">
                 <thead className="bg-gray-50 text-gray-500">
@@ -3356,7 +3414,7 @@ export default function ContainerDetail() {
                             还原
                           </button>
                           <button
-                            onClick={() => handleDeleteBackup(b.id)}
+                            onClick={() => handleDeleteBackup(b)}
                             disabled={!!backupBusy}
                             className="p-1 text-gray-400 hover:text-red-600 rounded hover:bg-red-50"
                           >
@@ -3441,6 +3499,50 @@ export default function ContainerDetail() {
                   {backupBusy === 'schedule' ? '保存中...' : '保存'}
                 </button>
               </div>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* Delete Snapshot/Backup Confirm Modal */}
+      {deleteConfirm.open && (
+        <Modal
+          title={deleteConfirm.type === 'snapshot' ? '删除快照' : '删除全量备份'}
+          onClose={() => setDeleteConfirm({ open: false, type: 'snapshot', id: '', label: '', remoteSynced: false })}
+        >
+          <div className="space-y-4">
+            <div className="text-sm text-gray-700">
+              确定删除 {deleteConfirm.label} 的{deleteConfirm.type === 'snapshot' ? '快照' : '全量备份'}吗？删除后不可恢复。
+            </div>
+            {deleteConfirm.remoteSynced && (
+              <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-amber-100 bg-amber-50 p-3 text-sm text-amber-800">
+                <input
+                  type="checkbox"
+                  checked={deleteConfirmRemote}
+                  onChange={(e) => setDeleteConfirmRemote(e.target.checked)}
+                  className="mt-0.5 h-4 w-4"
+                />
+                <span>
+                  同时删除远程存储上的副本
+                  <span className="mt-0.5 block text-[11px] text-amber-600">
+                    该{deleteConfirm.type === 'snapshot' ? '快照' : '备份'}已同步到远端存储。取消勾选则仅删除本机文件，远端副本将保留。
+                  </span>
+                </span>
+              </label>
+            )}
+            <div className="flex justify-end gap-2 pt-1">
+              <button
+                onClick={() => setDeleteConfirm({ open: false, type: 'snapshot', id: '', label: '', remoteSynced: false })}
+                className="px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded-md"
+              >
+                取消
+              </button>
+              <button
+                onClick={confirmDeleteAction}
+                className="px-4 py-2 text-sm bg-red-600 text-white rounded-md hover:bg-red-700"
+              >
+                删除
+              </button>
             </div>
           </div>
         </Modal>

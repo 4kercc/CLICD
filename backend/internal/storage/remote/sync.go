@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -145,6 +146,141 @@ func downloadRemoteFile(ctx context.Context, client StorageClient, remoteFile, l
 		}
 	}
 	return nil
+}
+
+// knownRemoteCopyFiles is the fallback file enumeration for remote deletion when
+// the local snapshot/backup directory is already gone.
+var knownRemoteCopyFiles = []string{
+	"disk.qcow2", "domain.xml", "meta-data", "user-data", "network-config",
+	"seed.iso", "unattend.iso", "config", "rootfs.tar.gz",
+}
+
+// localFileNames enumerates file names under localDir (flat copy layout).
+func localFileNames(localDir string) []string {
+	if localDir == "" {
+		return nil
+	}
+	names := []string{}
+	_ = filepath.Walk(localDir, func(p string, info os.FileInfo, err error) error {
+		if err == nil && !info.IsDir() {
+			if rel, relErr := filepath.Rel(localDir, p); relErr == nil {
+				names = append(names, filepath.ToSlash(rel))
+			}
+		}
+		return nil
+	})
+	return names
+}
+
+// DeleteSnapshotFromRemoteStorage deletes the remote copy of a snapshot from its
+// recorded remote storage pool. It should be called BEFORE the local files are
+// removed, so the remote file list can be enumerated from the local directory.
+func DeleteSnapshotFromRemoteStorage(snapshot *config.Snapshot) error {
+	if snapshot == nil {
+		return fmt.Errorf("snapshot is nil")
+	}
+	return deleteRemoteCopy(snapshot.Path, snapshot.RemoteStoragePoolID, snapshot.RemotePath, "snapshot", snapshot.ID)
+}
+
+// DeleteBackupFromRemoteStorage deletes the remote copy of a backup from its
+// recorded remote storage pool.
+func DeleteBackupFromRemoteStorage(backup *config.Backup) error {
+	if backup == nil {
+		return fmt.Errorf("backup is nil")
+	}
+	return deleteRemoteCopy(backup.Path, backup.RemoteStoragePoolID, backup.RemotePath, "backup", backup.ID)
+}
+
+func deleteRemoteCopy(localDir, poolID, remoteBasePath, kind, id string) error {
+	if poolID == "" || remoteBasePath == "" {
+		return fmt.Errorf("no remote storage record for %s %s", kind, id)
+	}
+	var pool *config.StoragePool
+	for _, p := range config.AppConfig.StoragePools {
+		if p.ID == poolID {
+			pool = &p
+			break
+		}
+	}
+	if pool == nil {
+		return fmt.Errorf("remote storage pool %s not found", poolID)
+	}
+	client, err := NewClient(pool.Type, pool.Config)
+	if err != nil {
+		return fmt.Errorf("remote client init error for %s: %w", pool.Name, err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	names := localFileNames(localDir)
+	if len(names) == 0 {
+		names = knownRemoteCopyFiles
+	}
+	remoteBasePath = strings.Trim(remoteBasePath, "/")
+	var firstErr error
+	for _, name := range names {
+		remoteFile := remoteBasePath + "/" + name
+		if err := client.DeleteFile(ctx, remoteFile); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("delete %s failed: %w", remoteFile, err)
+		}
+	}
+	// Remove the remote directory itself: SFTP uses rm -rf, WebDAV deletes the
+	// collection; for object stores this is a harmless no-op on a "directory" key.
+	if err := client.DeleteFile(ctx, remoteBasePath); err != nil && firstErr == nil {
+		firstErr = fmt.Errorf("delete %s failed: %w", remoteBasePath, err)
+	}
+	if firstErr != nil {
+		fmt.Printf("Failed to delete remote %s copy %s on pool %s: %v\n", kind, id, pool.Name, firstErr)
+		return firstErr
+	}
+	fmt.Printf("Deleted remote %s copy %s on pool %s\n", kind, id, pool.Name)
+	return nil
+}
+
+// TrackDirCopyProgress polls the destination directory size every 1.5s and
+// reports copy progress for snapshot/backup creation operations until done is
+// closed. Callers report the final "completed"/"failed" stage themselves.
+func TrackDirCopyProgress(progressID, progressType, dstDir string, totalBytes int64, done <-chan struct{}) {
+	ticker := time.NewTicker(1500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+			used := calculateDirSize(dstDir)
+			pct := 0
+			if totalBytes > 0 {
+				pct = int(float64(used) / float64(totalBytes) * 100)
+				if pct > 99 {
+					pct = 99
+				}
+			}
+			SetProgress(SyncProgress{
+				ID:               progressID,
+				Type:             progressType,
+				Stage:            "transferring",
+				CurrentFile:      dstDir,
+				TransferredBytes: used,
+				TotalBytes:       totalBytes,
+				Percent:          pct,
+			})
+		}
+	}
+}
+
+// SetCreateProgress is a small helper for snapshot/backup creation flows to
+// report lifecycle stages under the shared progress store.
+func SetCreateProgress(progressID, progressType, stage, currentFile string, percent, transferred, total int64) {
+	SetProgress(SyncProgress{
+		ID:               progressID,
+		Type:             progressType,
+		Stage:            stage,
+		CurrentFile:      currentFile,
+		Percent:          int(percent),
+		TransferredBytes: transferred,
+		TotalBytes:       total,
+	})
 }
 
 // SyncSnapshotToRemoteStorage uploads a newly created snapshot to configured remote storage pools.

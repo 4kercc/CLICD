@@ -225,12 +225,17 @@ func deleteContainerSnapshot(w http.ResponseWriter, r *http.Request, containerID
 		return
 	}
 	user := requestUser(r)
-	if err := deleteSnapshotByRuntime(snapshotID); err != nil {
+	deleteRemote := r.URL.Query().Get("delete_remote") == "true" || r.URL.Query().Get("delete_remote") == "1"
+	if err := deleteSnapshotByRuntime(snapshotID, deleteRemote); err != nil {
 		jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: err.Error()})
 		return
 	}
 	config.AddAuditLog("snapshot.delete", snapshot.ContainerName, snapshot.ID, user)
-	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: "Snapshot deleted"})
+	message := "Snapshot deleted"
+	if deleteRemote && snapshot.RemoteSynced {
+		message = "Snapshot and its remote copy deleted"
+	}
+	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: message})
 }
 
 func restoreContainerSnapshot(w http.ResponseWriter, r *http.Request, containerID int, snapshotID string) {
@@ -503,12 +508,17 @@ func deleteContainerBackup(w http.ResponseWriter, r *http.Request, containerID i
 		return
 	}
 	user := requestUser(r)
-	if err := deleteBackupByRuntime(backupID); err != nil {
+	deleteRemote := r.URL.Query().Get("delete_remote") == "true" || r.URL.Query().Get("delete_remote") == "1"
+	if err := deleteBackupByRuntime(backupID, deleteRemote); err != nil {
 		jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: err.Error()})
 		return
 	}
 	config.AddAuditLog("backup.delete", backup.ContainerName, backup.ID, user)
-	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: "Backup deleted"})
+	message := "Backup deleted"
+	if deleteRemote && backup.RemoteSynced {
+		message = "Backup and its remote copy deleted"
+	}
+	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: message})
 }
 
 func restoreContainerBackup(w http.ResponseWriter, r *http.Request, containerID int, backupID string) {
