@@ -1117,10 +1117,23 @@ func (m *Manager) ApplyContainerLimits(c *config.Container) error {
 		if c.BootMedia != "" {
 			winISO = c.BootMedia
 		}
+		// Never reference an ISO file that is not on disk: libvirt refuses to
+		// start the domain ("Cannot access storage file") and a missing system
+		// ISO is a normal state for installed VMs booting from disk.
+		if winISO != "" {
+			if _, err := os.Stat(winISO); err != nil {
+				winISO = ""
+			}
+		}
 		unattendISO := existingWindowsUnattendISO(m.instanceDir(c.VirshName()))
 		xml = generateWindowsDomainXML(c.VirshName(), int(c.VCPU), c.RAMMB, c.DiskImage, winISO, unattendISO, c.MACAddress, c.IOReadMBps, c.IOWriteMBps, c.NetworkDownMbps, c.NetworkUpMbps, bootOrder, nicModel, diskBus)
 	} else {
 		seedPath := filepath.Join(m.instanceDir(c.VirshName()), "seed.iso")
+		// Only attach the cloud-init seed cdrom when the file exists; a missing
+		// seed.iso must not brick VM starts (libvirt fails on absent sources).
+		if _, err := os.Stat(seedPath); err != nil {
+			seedPath = ""
+		}
 		xml = generateLinuxDomainXML(c.VirshName(), int(c.VCPU), c.RAMMB, c.DiskImage, seedPath, c.MACAddress, c.IOReadMBps, c.IOWriteMBps, c.NetworkDownMbps, c.NetworkUpMbps, isKVMDesktopTemplate(c.Template), bootOrder, nicModel, diskBus)
 	}
 	xmlPath := filepath.Join(m.instanceDir(c.VirshName()), "domain.xml")
@@ -1164,10 +1177,23 @@ func (m *Manager) ensureDomainDefinition(c *config.Container) error {
 		if c.BootMedia != "" {
 			winISO = c.BootMedia
 		}
+		// Never reference an ISO file that is not on disk: libvirt refuses to
+		// start the domain ("Cannot access storage file") and a missing system
+		// ISO is a normal state for installed VMs booting from disk.
+		if winISO != "" {
+			if _, err := os.Stat(winISO); err != nil {
+				winISO = ""
+			}
+		}
 		unattendISO := existingWindowsUnattendISO(m.instanceDir(c.VirshName()))
 		xml = generateWindowsDomainXML(c.VirshName(), int(c.VCPU), c.RAMMB, c.DiskImage, winISO, unattendISO, c.MACAddress, c.IOReadMBps, c.IOWriteMBps, c.NetworkDownMbps, c.NetworkUpMbps, bootOrder, nicModel, diskBus)
 	} else {
 		seedPath := filepath.Join(m.instanceDir(c.VirshName()), "seed.iso")
+		// Only attach the cloud-init seed cdrom when the file exists; a missing
+		// seed.iso must not brick VM starts (libvirt fails on absent sources).
+		if _, err := os.Stat(seedPath); err != nil {
+			seedPath = ""
+		}
 		xml = generateLinuxDomainXML(c.VirshName(), int(c.VCPU), c.RAMMB, c.DiskImage, seedPath, c.MACAddress, c.IOReadMBps, c.IOWriteMBps, c.NetworkDownMbps, c.NetworkUpMbps, isKVMDesktopTemplate(c.Template), bootOrder, nicModel, diskBus)
 	}
 	if err := os.WriteFile(xmlPath, []byte(xml), 0644); err != nil {

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"clicd/internal/config"
 )
@@ -259,9 +260,16 @@ func (image Image) IsWindows11() bool {
 }
 
 // IsWindowsImage returns true if the image uses Windows unattended installation.
+// Custom template labels (e.g. a VM whose template was renamed to "windows" via
+// the panel) are not in the image registry; classify them by name so they keep
+// Windows hardware/ISO handling instead of being regenerated as Linux domains
+// that reference a missing seed.iso.
 func IsWindowsImage(id string) bool {
 	img := FindImage(id)
-	return img != nil && img.IsWindows()
+	if img != nil {
+		return img.IsWindows()
+	}
+	return strings.Contains(strings.ToLower(strings.TrimSpace(id)), "windows")
 }
 
 func IsWindows11Image(id string) bool {
