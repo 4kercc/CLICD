@@ -94,6 +94,7 @@ import {
   StorageSyncProgress,
   testContainerPorts,
   PortTestResult,
+  updateNATQuota,
   resetTraffic,
   updateTrafficLimit,
   updateResourceLimit,
@@ -272,6 +273,9 @@ export default function ContainerDetail() {
   const [portTestBusy, setPortTestBusy] = useState(false)
   const [portTestResults, setPortTestResults] = useState<PortTestResult[] | null>(null)
   const [portTestInternalIP, setPortTestInternalIP] = useState('')
+  const [showNATQuotaEdit, setShowNATQuotaEdit] = useState(false)
+  const [natQuotaDraft, setNatQuotaDraft] = useState(0)
+  const [savingNATQuota, setSavingNATQuota] = useState(false)
 
   const fetchContainer = useCallback(async () => {
     if (!containerIdentifier) return
@@ -482,6 +486,29 @@ export default function ContainerDetail() {
       dialog.alert('连通性测试失败', error.response?.data?.message || '请稍后重试')
     } finally {
       setPortTestBusy(false)
+    }
+  }
+
+  const openNATQuotaEdit = () => {
+    if (isSubUser || !container) return
+    setNatQuotaDraft(container.port_mapping_limit || 0)
+    setShowNATQuotaEdit(true)
+  }
+
+  const saveNATQuota = async () => {
+    if (!container) return
+    const next = Math.max(0, Math.min(999, Math.round(natQuotaDraft || 0)))
+    setSavingNATQuota(true)
+    try {
+      await updateNATQuota(container.id, next)
+      await fetchContainer()
+      setShowNATQuotaEdit(false)
+      dialog.alert('保存成功', next > 0 ? `已分配 ${next} 条 NAT 端口配额，可在「NAT 规则」中添加映射` : '已清空 NAT 端口配额')
+    } catch (err: unknown) {
+      const error = err as { response?: { data?: { message?: string } } }
+      dialog.alert('保存失败', error.response?.data?.message || '请稍后重试')
+    } finally {
+      setSavingNATQuota(false)
     }
   }
 
@@ -1823,7 +1850,16 @@ export default function ContainerDetail() {
                 {hasIndependentIPv4 ? (
                   <InfoTag color="amber">独立 IPv4 {assignedIPv4List[0]}</InfoTag>
                 ) : (
-                  <InfoTag color="amber">IPv4 NAT {hasNATQuota ? `${mappingCount} 条` : '未分配'}</InfoTag>
+                  <span
+                    onDoubleClick={openNATQuotaEdit}
+                    className={!isSubUser ? 'cursor-pointer' : ''}
+                    title={!isSubUser ? '双击可分配/调整 NAT 端口配额' : undefined}
+                  >
+                    <InfoTag color="amber">
+                      IPv4 NAT {hasNATQuota ? `${mappingCount} 条` : '未分配'}
+                      {!isSubUser && <Pencil className="w-2.5 h-2.5 inline ml-1 opacity-60" />}
+                    </InfoTag>
+                  </span>
                 )}
                 <InfoTag color="violet">{isWindows ? 'RDP' : 'SSH'} {publicEndpoint}</InfoTag>
                 {isPolicyBlocked && <InfoTag color="red">策略封禁</InfoTag>}
@@ -2911,9 +2947,19 @@ export default function ContainerDetail() {
                 ) : (
                   <span>未分配 NAT 端口配额</span>
                 )}
+                {!isSubUser && hasNATQuota && !canAddMapping && (
+                  <span className="ml-2 text-amber-600">已达配额上限</span>
+                )}
               </div>
-              {!isSubUser && hasNATQuota && !canAddMapping && (
-                <div className="text-xs text-amber-600">已达到管理员分配的 NAT 端口配额</div>
+              {!isSubUser && (
+                <button
+                  onClick={openNATQuotaEdit}
+                  className="inline-flex items-center gap-1 rounded border border-gray-300 bg-white px-2 py-1 text-[11px] text-gray-700 hover:bg-gray-50"
+                  title="分配/调整 NAT 端口配额"
+                >
+                  <Pencil className="w-3 h-3" />
+                  修改配额
+                </button>
               )}
             </div>
             <MappingTable mappings={container.port_mappings || []} publicHost={publicHost} onEdit={openEditMapping} onDelete={isSubUser ? () => {} : removeMapping} isSubUser={isSubUser} />
@@ -2951,6 +2997,36 @@ export default function ContainerDetail() {
                 </div>
               </div>
             )}
+          </div>
+        </Modal>
+      )}
+
+      {showNATQuotaEdit && (
+        <Modal title="分配 NAT 端口配额" onClose={() => setShowNATQuotaEdit(false)}>
+          <div className="space-y-4">
+            <Field label="NAT 端口配额（条）">
+              <input
+                type="number"
+                min={0}
+                max={999}
+                value={natQuotaDraft}
+                onChange={(e) => setNatQuotaDraft(Math.max(0, Math.min(999, parseInt(e.target.value || '0', 10) || 0)))}
+                className={inputClass}
+              />
+            </Field>
+            <div className="rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-500 leading-relaxed">
+              0 表示未分配（该虚拟机无法创建端口映射）。分配后即可在「NAT 规则」中添加映射，外部端口将从 NAT 端口池中自动分配；关机不会回收配额与映射，开机自动恢复。
+            </div>
+            <div className="flex justify-end gap-2 pt-1">
+              <button onClick={() => setShowNATQuotaEdit(false)} className="px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded-md">取消</button>
+              <button
+                onClick={saveNATQuota}
+                disabled={savingNATQuota}
+                className="px-4 py-2 text-sm bg-black text-white rounded-md hover:bg-gray-800 disabled:opacity-50"
+              >
+                {savingNATQuota ? '保存中...' : '保存'}
+              </button>
+            </div>
           </div>
         </Modal>
       )}

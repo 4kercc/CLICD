@@ -255,6 +255,13 @@ func HandleSingleContainer(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		testContainerPortMappings(w, r, id)
+	case action == "nat-quota" && r.Method == http.MethodPut:
+		// container:resize is intentionally absent from sub-user scopes: only the
+		// admin may grant NAT port quotas.
+		if !requireScope(w, r, "container:resize") {
+			return
+		}
+		updateNATQuota(w, r, id)
 	case r.Method == http.MethodGet:
 		if !requireScope(w, r, "container:read") {
 			return
@@ -499,6 +506,47 @@ func updateContainerTemplate(w http.ResponseWriter, r *http.Request, id int) {
 	user := requestUser(r)
 	config.AddAuditLog("container.update_template", c.Name, fmt.Sprintf("Updated template label to %s", template), user)
 	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: "Template updated successfully", Data: c})
+}
+
+// updateNATQuota grants or revokes the NAT port-mapping quota of a container.
+// limit 0 means "not assigned" (no mappings allowed).
+func updateNATQuota(w http.ResponseWriter, r *http.Request, id int) {
+	var req struct {
+		Limit int `json:"limit"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Invalid request"})
+		return
+	}
+	if req.Limit < 0 {
+		req.Limit = 0
+	}
+	if req.Limit > 999 {
+		req.Limit = 999
+	}
+	c := config.FindContainer(id)
+	if c == nil {
+		jsonResponse(w, http.StatusNotFound, APIResponse{Success: false, Message: "Container not found"})
+		return
+	}
+	current := c.PortMappingLimit
+	// Quota may never drop below the number of mappings already configured.
+	if req.Limit < len(c.PortMappings) {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{
+			Success: false,
+			Message: fmt.Sprintf("配额不能低于已有映射数量（当前 %d 条），请先删除多余映射", len(c.PortMappings)),
+		})
+		return
+	}
+	c.PortMappingLimit = req.Limit
+	if err := config.SaveConfig(); err != nil {
+		c.PortMappingLimit = current
+		jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: err.Error()})
+		return
+	}
+	user := requestUser(r)
+	config.AddAuditLog("container.nat_quota", c.Name, fmt.Sprintf("%d -> %d", current, req.Limit), user)
+	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: "NAT quota updated", Data: c})
 }
 
 func resetTraffic(w http.ResponseWriter, r *http.Request, id int) {

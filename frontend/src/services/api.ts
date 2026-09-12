@@ -955,6 +955,9 @@ export interface PortTestResult {
 export const testContainerPorts = (id: ContainerIdentifier) =>
   api.get<APIResponse<{ internal_ip: string; results: PortTestResult[] }>>(`/containers/${id}/port-test`, { timeout: 30000 })
 
+export const updateNATQuota = (id: ContainerIdentifier, limit: number) =>
+  api.put<APIResponse<Container>>(`/containers/${id}/nat-quota`, { limit })
+
 export const updateContainerName = (id: ContainerIdentifier, name: string) =>
   api.put<APIResponse<Container>>(`/containers/${id}/rename`, { name })
 
