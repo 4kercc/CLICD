@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Monitor, RefreshCw, Send, X } from 'lucide-react'
+import { Maximize2, Minimize2, Monitor, RefreshCw, Send, Sparkles, X, Zap } from 'lucide-react'
 import RFBModule from '@novnc/novnc/lib/rfb'
 import { createVNCTicket, getWebVNCUrl } from '../services/api'
 
@@ -14,11 +14,14 @@ interface RFBInstance extends EventTarget {
   resizeSession: boolean
   focusOnClick: boolean
   viewOnly: boolean
+  showDotCursor: boolean
+  clipViewport: boolean
   qualityLevel: number
   compressionLevel: number
   background: string
   disconnect(): void
   sendCtrlAltDel(): void
+  clipboardPasteFrom(text: string): void
 }
 
 const RFB = resolveRFBConstructor(RFBModule)
@@ -39,11 +42,16 @@ interface WebVNCViewerProps {
   onClose: () => void
 }
 
+type VNCMode = 'smooth' | 'clear'
+
 export default function WebVNCViewer({ containerName, onClose }: WebVNCViewerProps) {
+  const containerRef = useRef<HTMLDivElement>(null)
   const screenRef = useRef<HTMLDivElement>(null)
   const rfbRef = useRef<RFBInstance | null>(null)
   const [status, setStatus] = useState<'connecting' | 'connected' | 'disconnected' | 'error'>('connecting')
   const [errorMsg, setErrorMsg] = useState('')
+  const [mode, setMode] = useState<VNCMode>('smooth')
+  const [isFullscreen, setIsFullscreen] = useState(false)
 
   const cleanup = () => {
     if (rfbRef.current) {
@@ -51,6 +59,48 @@ export default function WebVNCViewer({ containerName, onClose }: WebVNCViewerPro
       rfbRef.current = null
     }
   }
+
+  const applyModeSettings = (rfb: RFBInstance, targetMode: VNCMode) => {
+    if (targetMode === 'smooth') {
+      // Smooth mode: aggressive compression + low JPEG quality = small frames,
+      // high FPS over WAN. showDotCursor renders the pointer locally with zero lag.
+      rfb.qualityLevel = 2
+      rfb.compressionLevel = 8
+    } else {
+      // Clear mode: higher quality for reading small fonts / editing text.
+      rfb.qualityLevel = 7
+      rfb.compressionLevel = 4
+    }
+  }
+
+  const switchMode = (newMode: VNCMode) => {
+    setMode(newMode)
+    if (rfbRef.current) {
+      applyModeSettings(rfbRef.current, newMode)
+    }
+  }
+
+  const toggleFullscreen = async () => {
+    const el = containerRef.current
+    if (!el) return
+    if (!document.fullscreenElement) {
+      try {
+        await el.requestFullscreen()
+        setIsFullscreen(true)
+      } catch { /* ignored */ }
+    } else {
+      try {
+        await document.exitFullscreen()
+        setIsFullscreen(false)
+      } catch { /* ignored */ }
+    }
+  }
+
+  useEffect(() => {
+    const handleFSChange = () => setIsFullscreen(!!document.fullscreenElement)
+    document.addEventListener('fullscreenchange', handleFSChange)
+    return () => document.removeEventListener('fullscreenchange', handleFSChange)
+  }, [])
 
   const ensureResizeObserver = () => {
     if ('ResizeObserver' in window) return
@@ -126,9 +176,11 @@ export default function WebVNCViewer({ containerName, onClose }: WebVNCViewerPro
       rfb.scaleViewport = true
       rfb.resizeSession = false
       rfb.focusOnClick = true
-      rfb.qualityLevel = 6
-      rfb.compressionLevel = 2
+      rfb.showDotCursor = true // Render dot cursor locally so mouse moves never wait for roundtrips
+      rfb.clipViewport = false
       rfb.background = '#050505'
+      applyModeSettings(rfb, mode)
+
       rfb.addEventListener('connect', () => setStatus('connected'))
       rfb.addEventListener('disconnect', (event) => {
         const detail = (event as CustomEvent<{ clean?: boolean }>).detail
@@ -163,7 +215,7 @@ export default function WebVNCViewer({ containerName, onClose }: WebVNCViewerPro
   }, [containerName])
 
   return (
-    <div className="flex h-full flex-col overflow-hidden rounded-lg border border-gray-200 bg-white">
+    <div ref={containerRef} className="flex h-full flex-col overflow-hidden rounded-lg border border-gray-200 bg-white">
       <div className="flex shrink-0 items-center justify-between border-b border-gray-200 bg-gray-50 px-4 py-2.5">
         <div className="flex items-center gap-2">
           <Monitor className="h-4 w-4 text-gray-600" />
@@ -174,9 +226,25 @@ export default function WebVNCViewer({ containerName, onClose }: WebVNCViewerPro
           {status === 'error' && <span className="rounded bg-red-100 px-1.5 py-0.5 text-xs text-red-700">连接失败</span>}
         </div>
         <div className="flex items-center gap-1">
+          {/* Smooth vs Clear mode toggle */}
+          <button
+            onClick={() => switchMode(mode === 'smooth' ? 'clear' : 'smooth')}
+            className={`inline-flex items-center gap-1 rounded px-2 py-1 text-xs font-medium border transition-colors ${
+              mode === 'smooth'
+                ? 'bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100'
+                : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-100'
+            }`}
+            title={mode === 'smooth' ? '当前：流畅模式 (低带宽高帧率，本地光标)；点击切换清晰模式' : '当前：清晰模式 (高画质低压缩)；点击切换流畅模式'}
+          >
+            {mode === 'smooth' ? <Zap className="h-3 w-3 text-blue-600" /> : <Sparkles className="h-3 w-3 text-amber-500" />}
+            <span>{mode === 'smooth' ? '流畅' : '清晰'}</span>
+          </button>
           <button onClick={() => rfbRef.current?.sendCtrlAltDel()} className="inline-flex items-center gap-1 rounded px-2 py-1.5 text-xs text-gray-500 hover:bg-gray-200" title="发送 Ctrl+Alt+Del">
             <Send className="h-3.5 w-3.5" />
             Ctrl+Alt+Del
+          </button>
+          <button onClick={toggleFullscreen} className="rounded p-1.5 text-gray-500 hover:bg-gray-200" title={isFullscreen ? '退出全屏' : '全屏'}>
+            {isFullscreen ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
           </button>
           <button onClick={connect} className="rounded p-1.5 text-xs text-gray-500 hover:bg-gray-200" title="重新连接">
             <RefreshCw className="h-3.5 w-3.5" />
@@ -198,3 +266,4 @@ export default function WebVNCViewer({ containerName, onClose }: WebVNCViewerPro
     </div>
   )
 }
+

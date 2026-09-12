@@ -136,6 +136,14 @@ func HandleVNCProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	defer vncConn.Close()
 
+	// Disable Nagle on the VNC TCP socket so mouse and keyboard events are
+	// dispatched to QEMU immediately rather than buffered.
+	if tcp, ok := vncConn.(*net.TCPConn); ok {
+		_ = tcp.SetNoDelay(true)
+		_ = tcp.SetKeepAlive(true)
+		_ = tcp.SetKeepAlivePeriod(30 * time.Second)
+	}
+
 	responseHeader := http.Header{}
 	if protocol := webVNCResponseProtocol(r); protocol != "" {
 		responseHeader.Set("Sec-WebSocket-Protocol", protocol)
@@ -146,6 +154,13 @@ func HandleVNCProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer ws.Close()
+
+	// Disable Nagle on the browser-facing WebSocket TCP connection too.
+	if tcp, ok := ws.UnderlyingConn().(*net.TCPConn); ok {
+		_ = tcp.SetNoDelay(true)
+		_ = tcp.SetKeepAlive(true)
+		_ = tcp.SetKeepAlivePeriod(30 * time.Second)
+	}
 
 	log.Printf("WebVNC connected for container %s as %s (sub_user=%t) -> 127.0.0.1:%d", containerName, item.Username, item.SubUser, vncPort)
 
@@ -234,7 +249,7 @@ func cleanupExpiredWebVNCTicketsLocked(now time.Time) {
 }
 
 func streamVNCToWebSocket(ws *websocket.Conn, writeMu *sync.Mutex, src io.Reader, done chan<- string) {
-	buf := make([]byte, 32*1024)
+	buf := make([]byte, 64*1024)
 	for {
 		n, err := src.Read(buf)
 		if n > 0 {
