@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { AlertCircle, CheckCircle2, Cloud, HardDrive, Plus, RefreshCw, Save, Trash2, ArrowUpRight } from 'lucide-react'
+import { AlertCircle, CheckCircle2, Cloud, HardDrive, Pencil, Plus, RefreshCw, Save, Trash2, ArrowUpRight } from 'lucide-react'
 import { getStorageInfo, updateStoragePools, testRemoteStorage, syncAllToRemoteStorage, StorageDisk, StorageInfo, StoragePool } from '../services/api'
 import { useLanguage } from '../contexts/LanguageContext'
 import { useDialog } from '../components/Dialog'
@@ -34,12 +34,13 @@ export default function Storage() {
 
   // Remote storage modal state
   const [showRemoteModal, setShowRemoteModal] = useState(false)
+  const [editingRemoteId, setEditingRemoteId] = useState<string | null>(null)
   const [testingRemote, setTestingRemote] = useState(false)
   const [remoteTestMessage, setRemoteTestMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
   const [remoteDraft, setRemoteDraft] = useState<{
     id: string
     name: string
-    type: 'sftp' | 'webdav' | 'minio'
+    type: 'sftp' | 'webdav' | 'minio' | 'onedrive' | 'googledrive'
     sync_snapshots: boolean
     sync_backups: boolean
     config: Record<string, string>
@@ -49,22 +50,44 @@ export default function Storage() {
     type: 'sftp',
     sync_snapshots: true,
     sync_backups: true,
-    config: {
-      host: '',
-      port: '22',
-      user: 'root',
-      password: '',
-      key: '',
-      base_path: '/clicd-backups',
-      url: '',
-      endpoint: '',
-      bucket: 'clicd',
-      access_key: '',
-      secret_key: '',
-      region: 'us-east-1',
-      use_ssl: 'true',
-    },
+    config: defaultRemoteConfigFor('sftp'),
   })
+
+  const openAddRemoteModal = () => {
+    setEditingRemoteId(null)
+    setRemoteDraft({
+      id: '',
+      name: '',
+      type: 'sftp',
+      sync_snapshots: true,
+      sync_backups: true,
+      config: defaultRemoteConfigFor('sftp'),
+    })
+    setRemoteTestMessage(null)
+    setShowRemoteModal(true)
+  }
+
+  const openEditRemoteModal = (rp: StoragePool) => {
+    setEditingRemoteId(rp.id)
+    const type = (['sftp', 'webdav', 'minio', 'onedrive', 'googledrive'].includes(rp.type || '') ? rp.type : 'sftp') as
+      'sftp' | 'webdav' | 'minio' | 'onedrive' | 'googledrive'
+    setRemoteDraft({
+      id: rp.id,
+      name: rp.name,
+      type,
+      sync_snapshots: !!rp.sync_snapshots,
+      sync_backups: !!rp.sync_backups,
+      config: { ...defaultRemoteConfigFor(type), ...(rp.config || {}) },
+    })
+    setRemoteTestMessage(null)
+    setShowRemoteModal(true)
+  }
+
+  const switchRemoteType = (t: 'sftp' | 'webdav' | 'minio' | 'onedrive' | 'googledrive') => {
+    // Switching protocol resets the config so fields of other protocols do not leak in.
+    setRemoteDraft({ ...remoteDraft, type: t, config: defaultRemoteConfigFor(t) })
+    setRemoteTestMessage(null)
+  }
 
   const fetchData = useCallback(async () => {
     setLoading(true)
@@ -255,29 +278,7 @@ export default function Storage() {
           <button
             onClick={() => {
               setRemoteTestMessage(null)
-              setRemoteDraft({
-                id: '',
-                name: '远端存储备份',
-                type: 'sftp',
-                sync_snapshots: true,
-                sync_backups: true,
-                config: {
-                  host: '',
-                  port: '22',
-                  user: 'root',
-                  password: '',
-                  key: '',
-                  base_path: '/clicd-backups',
-                  url: '',
-                  endpoint: '',
-                  bucket: 'clicd',
-                  access_key: '',
-                  secret_key: '',
-                  region: 'us-east-1',
-                  use_ssl: 'true',
-                },
-              })
-              setShowRemoteModal(true)
+              openAddRemoteModal()
             }}
             className="inline-flex items-center gap-1.5 rounded-md border border-blue-600 bg-blue-50 px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-100"
           >
@@ -313,12 +314,12 @@ export default function Storage() {
       {/* Remote Storage Pools */}
       {remotePools.length > 0 && (
         <div className="overflow-hidden rounded-lg border border-blue-200 bg-white shadow-sm">
-          <div className="flex items-center justify-between border-b border-blue-100 bg-blue-50/70 px-4 py-3">
-            <div className="flex items-center gap-2 font-semibold text-blue-900 text-sm">
-              <Cloud className="h-4 w-4 text-blue-600" />
-              <span>远程异地存储 (SFTP / WebDAV / MinIO S3)</span>
+            <div className="flex items-center justify-between border-b border-blue-100 bg-blue-50/70 px-4 py-3">
+              <div className="flex items-center gap-2 font-semibold text-blue-900 text-sm">
+                <Cloud className="h-4 w-4 text-blue-600" />
+                <span>远程异地存储 (SFTP / WebDAV / MinIO S3 / OneDrive / Google Drive)</span>
+              </div>
             </div>
-          </div>
           <div className="divide-y divide-gray-100">
             {remotePools.map((rp) => (
               <div key={rp.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between hover:bg-gray-50">
@@ -336,6 +337,8 @@ export default function Storage() {
                     {rp.type === 'sftp' && <span>服务器: {rp.config?.host}:{rp.config?.port || '22'} · 用户: {rp.config?.user} · 路径: {rp.config?.base_path || '/'}</span>}
                     {rp.type === 'webdav' && <span>WebDAV 地址: {rp.config?.url} · 用户: {rp.config?.user || '-'}</span>}
                     {(rp.type === 'minio' || rp.type === 's3') && <span>Endpoint: {rp.config?.endpoint} · Bucket: {rp.config?.bucket}</span>}
+                    {rp.type === 'onedrive' && <span>OneDrive · 目录: {rp.config?.root_path || '/clicd-backups'} · Tenant: {rp.config?.tenant || 'common'}</span>}
+                    {rp.type === 'googledrive' && <span>Google Drive · 目录: {rp.config?.root_folder_name || 'CLICD-Backups'}</span>}
                   </div>
                   <div className="mt-2 flex items-center gap-3 text-xs text-gray-600">
                     <label className="inline-flex items-center gap-1.5 cursor-pointer">
@@ -367,6 +370,13 @@ export default function Storage() {
                   </div>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    onClick={() => openEditRemoteModal(rp)}
+                    className="inline-flex items-center gap-1 rounded border border-gray-200 bg-white px-2.5 py-1.5 text-xs text-gray-700 hover:bg-gray-50"
+                  >
+                    <Pencil className="h-3.5 w-3.5" />
+                    编辑
+                  </button>
                   <button
                     onClick={async () => {
                       if (!(await dialog.confirm('同步至该存储', `确定将系统中现有的所有快照与全量备份同步至「${rp.name}」吗？`))) return
@@ -484,7 +494,7 @@ export default function Storage() {
       {showRemoteModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
           <div className="w-full max-w-lg rounded-xl bg-white p-6 shadow-xl space-y-4 max-h-[90vh] overflow-y-auto">
-            <h2 className="text-lg font-bold text-gray-900">添加外部远程存储 (异地灾备)</h2>
+            <h2 className="text-lg font-bold text-gray-900">{editingRemoteId ? '编辑远程存储' : '添加外部远程存储 (异地灾备)'}</h2>
 
             <div>
               <label className="block text-xs font-medium text-gray-700 mb-1">存储名称</label>
@@ -499,17 +509,17 @@ export default function Storage() {
 
             <div>
               <label className="block text-xs font-medium text-gray-700 mb-1">协议类型</label>
-              <div className="grid grid-cols-3 gap-2">
-                {(['sftp', 'webdav', 'minio'] as const).map((t) => (
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                {(['sftp', 'webdav', 'minio', 'onedrive', 'googledrive'] as const).map((t) => (
                   <button
                     key={t}
                     type="button"
-                    onClick={() => setRemoteDraft({ ...remoteDraft, type: t })}
+                    onClick={() => switchRemoteType(t)}
                     className={`rounded-lg border px-3 py-2 text-xs font-semibold uppercase ${
                       remoteDraft.type === t ? 'border-blue-600 bg-blue-50 text-blue-700' : 'border-gray-200 text-gray-600 hover:bg-gray-50'
                     }`}
                   >
-                    {t === 'minio' ? 'MinIO / S3' : t}
+                    {t === 'minio' ? 'MinIO / S3' : t === 'googledrive' ? 'Google Drive' : t}
                   </button>
                 ))}
               </div>
@@ -651,6 +661,113 @@ export default function Storage() {
               </div>
             )}
 
+            {remoteDraft.type === 'onedrive' && (
+              <div className="space-y-3 rounded-lg border border-gray-200 bg-gray-50/50 p-3 text-xs">
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-gray-600 mb-1">Client ID</label>
+                    <input
+                      value={remoteDraft.config.client_id}
+                      onChange={(e) => setRemoteDraft({ ...remoteDraft, config: { ...remoteDraft.config, client_id: e.target.value } })}
+                      placeholder="Azure 应用 client_id"
+                      className="w-full rounded border border-gray-300 px-2.5 py-1.5 bg-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-gray-600 mb-1">Client Secret</label>
+                    <input
+                      type="password"
+                      value={remoteDraft.config.client_secret}
+                      onChange={(e) => setRemoteDraft({ ...remoteDraft, config: { ...remoteDraft.config, client_secret: e.target.value } })}
+                      placeholder="Azure 应用 client_secret"
+                      className="w-full rounded border border-gray-300 px-2.5 py-1.5 bg-white"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-gray-600 mb-1">Refresh Token</label>
+                  <input
+                    type="password"
+                    value={remoteDraft.config.refresh_token}
+                    onChange={(e) => setRemoteDraft({ ...remoteDraft, config: { ...remoteDraft.config, refresh_token: e.target.value } })}
+                    placeholder="OAuth2 refresh_token"
+                    className="w-full rounded border border-gray-300 px-2.5 py-1.5 bg-white font-mono"
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-gray-600 mb-1">远端目录</label>
+                    <input
+                      value={remoteDraft.config.root_path}
+                      onChange={(e) => setRemoteDraft({ ...remoteDraft, config: { ...remoteDraft.config, root_path: e.target.value } })}
+                      placeholder="/clicd-backups"
+                      className="w-full rounded border border-gray-300 px-2.5 py-1.5 bg-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-gray-600 mb-1">Tenant（高级）</label>
+                    <input
+                      value={remoteDraft.config.tenant}
+                      onChange={(e) => setRemoteDraft({ ...remoteDraft, config: { ...remoteDraft.config, tenant: e.target.value } })}
+                      placeholder="common"
+                      className="w-full rounded border border-gray-300 px-2.5 py-1.5 bg-white"
+                    />
+                  </div>
+                </div>
+                <p className="rounded bg-blue-50 px-2.5 py-2 text-[11px] text-blue-700 leading-relaxed">
+                  💡 凭据获取：用 <code className="font-mono">rclone config</code> 配置一个 onedrive 远程（需勾选 Drive 权限），然后把 rclone.conf 里的 client_id、client_secret、refresh_token 抄到这里。Azure 应用需授予 Files.ReadWrite.All + offline_access 权限。
+                </p>
+              </div>
+            )}
+
+            {remoteDraft.type === 'googledrive' && (
+              <div className="space-y-3 rounded-lg border border-gray-200 bg-gray-50/50 p-3 text-xs">
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-gray-600 mb-1">Client ID</label>
+                    <input
+                      value={remoteDraft.config.client_id}
+                      onChange={(e) => setRemoteDraft({ ...remoteDraft, config: { ...remoteDraft.config, client_id: e.target.value } })}
+                      placeholder="Google OAuth client_id"
+                      className="w-full rounded border border-gray-300 px-2.5 py-1.5 bg-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-gray-600 mb-1">Client Secret</label>
+                    <input
+                      type="password"
+                      value={remoteDraft.config.client_secret}
+                      onChange={(e) => setRemoteDraft({ ...remoteDraft, config: { ...remoteDraft.config, client_secret: e.target.value } })}
+                      placeholder="Google OAuth client_secret"
+                      className="w-full rounded border border-gray-300 px-2.5 py-1.5 bg-white"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-gray-600 mb-1">Refresh Token</label>
+                  <input
+                    type="password"
+                    value={remoteDraft.config.refresh_token}
+                    onChange={(e) => setRemoteDraft({ ...remoteDraft, config: { ...remoteDraft.config, refresh_token: e.target.value } })}
+                    placeholder="OAuth2 refresh_token"
+                    className="w-full rounded border border-gray-300 px-2.5 py-1.5 bg-white font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-gray-600 mb-1">远端文件夹</label>
+                  <input
+                    value={remoteDraft.config.root_folder_name}
+                    onChange={(e) => setRemoteDraft({ ...remoteDraft, config: { ...remoteDraft.config, root_folder_name: e.target.value } })}
+                    placeholder="CLICD-Backups（不存在会自动创建；也可填 id:文件夹ID）"
+                    className="w-full rounded border border-gray-300 px-2.5 py-1.5 bg-white"
+                  />
+                </div>
+                <p className="rounded bg-blue-50 px-2.5 py-2 text-[11px] text-blue-700 leading-relaxed">
+                  💡 凭据获取：用 <code className="font-mono">rclone config</code> 配置一个 drive 远程（scope 选 drive），然后把 rclone.conf 里的 client_id、client_secret、refresh_token 抄到这里。Google Cloud 项目需启用 Drive API。注意：OAuth 同意屏幕处于“测试”状态时 refresh_token 约 7 天过期。
+                </p>
+              </div>
+            )}
+
             <div className="rounded-lg border border-blue-100 bg-blue-50/60 p-3 text-xs space-y-1.5">
               <div className="font-semibold text-blue-900">灾备自动同步选项：</div>
               <label className="flex items-center gap-2 text-gray-700 cursor-pointer">
@@ -701,7 +818,7 @@ export default function Storage() {
                   onClick={handleAddRemotePool}
                   className="rounded bg-black px-4 py-1.5 text-xs font-medium text-white hover:bg-gray-800"
                 >
-                  保存并启用
+                  {editingRemoteId ? '保存修改' : '保存并启用'}
                 </button>
               </div>
             </div>
@@ -823,6 +940,32 @@ function contentUsageMap(items: Array<{ content_type: string; size_bytes: number
 function usagePct(used: number, total: number) {
   if (!total || total <= 0) return 0
   return Math.max(0, Math.min(100, (used / total) * 100))
+}
+
+// defaultRemoteConfigFor presets every known config field for a protocol, so
+// switching type in the add/edit modal does not leak fields across protocols.
+function defaultRemoteConfigFor(type: 'sftp' | 'webdav' | 'minio' | 'onedrive' | 'googledrive'): Record<string, string> {
+  return {
+    host: '',
+    port: '22',
+    user: 'root',
+    password: '',
+    key: '',
+    base_path: '/clicd-backups',
+    url: '',
+    endpoint: '',
+    bucket: 'clicd',
+    access_key: '',
+    secret_key: '',
+    region: 'us-east-1',
+    use_ssl: 'true',
+    client_id: '',
+    client_secret: '',
+    refresh_token: '',
+    tenant: 'common',
+    root_path: '/clicd-backups',
+    root_folder_name: 'CLICD-Backups',
+  }
 }
 
 function formatBytes(bytes: number) {
