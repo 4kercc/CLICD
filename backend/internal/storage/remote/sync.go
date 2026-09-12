@@ -331,6 +331,12 @@ func SyncSingleSnapshotToPool(snap *config.Snapshot, pool *config.StoragePool) e
 		if walkErr != nil || info.IsDir() {
 			return walkErr
 		}
+		// Never dereference symlinks (e.g. rootfs/bin -> usr/bin in LXC rootfs):
+		// following them either fails with "is a directory" or silently uploads
+		// whole duplicated trees to the remote storage.
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil
+		}
 		relPath, _ := filepath.Rel(snap.Path, path)
 		remoteFile := filepath.ToSlash(filepath.Join(remoteBasePath, relPath))
 
@@ -448,6 +454,10 @@ func SyncSingleBackupToPool(bkp *config.Backup, pool *config.StoragePool) error 
 	err = filepath.Walk(bkp.Path, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil || info.IsDir() {
 			return walkErr
+		}
+		// Never dereference symlinks (see SyncSingleSnapshotToPool).
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil
 		}
 		relPath, _ := filepath.Rel(bkp.Path, path)
 		remoteFile := filepath.ToSlash(filepath.Join(remoteBasePath, relPath))
