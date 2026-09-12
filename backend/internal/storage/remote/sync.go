@@ -156,6 +156,13 @@ type DirUploader interface {
 	UploadDir(ctx context.Context, localDir, remotePath string) error
 }
 
+// DeleteDir is an optional StorageClient capability that removes a remote
+// directory tree in one operation (SFTP rm -rf, WebDAV collection DELETE).
+// Object stores without directory semantics must use per-file deletion.
+type DeleteDir interface {
+	DeleteDir(ctx context.Context, remotePath string) error
+}
+
 // knownRemoteCopyFiles is the fallback file enumeration for remote deletion when
 // the local snapshot/backup directory is already gone.
 var knownRemoteCopyFiles = []string{
@@ -219,6 +226,18 @@ func deleteRemoteCopy(localDir, poolID, remoteBasePath, kind, id string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
+
+	// Prefer a one-shot tree delete (single ssh session / collection DELETE):
+	// per-file deletion dials a new connection per file and would take hours
+	// for LXC rootfs trees.
+	if dd, ok := client.(DeleteDir); ok {
+		if err := dd.DeleteDir(ctx, remoteBasePath); err != nil {
+			fmt.Printf("Failed to delete remote %s copy %s on pool %s: %v\n", kind, id, pool.Name, err)
+			return fmt.Errorf("delete %s failed: %w", remoteBasePath, err)
+		}
+		fmt.Printf("Deleted remote %s copy %s on pool %s\n", kind, id, pool.Name)
+		return nil
+	}
 
 	names := localFileNames(localDir)
 	if len(names) == 0 {

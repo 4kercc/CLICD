@@ -241,8 +241,7 @@ func (c *SFTPClient) DeleteFile(ctx context.Context, remotePath string) error {
 // tar stream. The remote layout is identical to per-file UploadFile calls, but
 // trees with many small files (LXC rootfs: tens of thousands) are orders of
 // magnitude faster, and symlinks are preserved instead of dereferenced.
-func (c *SFTPClient) UploadDir(ctx context.Context, localDir, remotePath string) error {
-	cfg, err := c.sshConfig()
+func (c *SFTPClient) UploadDir(ctx context.Context, localDir, remotePath string) error {	cfg, err := c.sshConfig()
 	if err != nil {
 		return err
 	}
@@ -295,6 +294,11 @@ func (c *SFTPClient) UploadDir(ctx context.Context, localDir, remotePath string)
 		return err
 	}
 	return session.Wait()
+}
+
+// DeleteDir removes a remote directory tree in a single operation (rm -rf).
+func (c *SFTPClient) DeleteDir(ctx context.Context, remotePath string) error {
+	return c.DeleteFile(ctx, remotePath)
 }
 
 // =========================================================================
