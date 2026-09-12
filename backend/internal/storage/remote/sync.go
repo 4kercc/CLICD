@@ -148,6 +148,14 @@ func downloadRemoteFile(ctx context.Context, client StorageClient, remoteFile, l
 	return nil
 }
 
+// DirUploader is an optional StorageClient capability for implementations that
+// can upload a whole directory tree in one transport (e.g. tar over SSH). Trees
+// with many small files (LXC rootfs) would otherwise need one connection per
+// file, which is orders of magnitude slower.
+type DirUploader interface {
+	UploadDir(ctx context.Context, localDir, remotePath string) error
+}
+
 // knownRemoteCopyFiles is the fallback file enumeration for remote deletion when
 // the local snapshot/backup directory is already gone.
 var knownRemoteCopyFiles = []string{
@@ -283,6 +291,72 @@ func SetCreateProgress(progressID, progressType, stage, currentFile string, perc
 	})
 }
 
+// snapDirHasTree reports whether the local snapshot/backup directory contains
+// subdirectories (i.e. a container rootfs tree), which should be transported
+// via DirUploader when available instead of per-file uploads.
+func snapDirHasTree(localDir string) bool {
+	found := false
+	_ = filepath.Walk(localDir, func(p string, info os.FileInfo, err error) error {
+		if err == nil && info.IsDir() && p != localDir {
+			found = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return found
+}
+
+// uploadWalk uploads every regular file under localDir to remoteBasePath with
+// per-file progress updates. Symlinks are never dereferenced.
+func uploadWalk(ctx context.Context, client StorageClient, localDir, remoteBasePath, progressID, progressType string, totalSize int64, transferred *int64, startTime time.Time) error {
+	return filepath.Walk(localDir, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil || info.IsDir() {
+			return walkErr
+		}
+		// Never dereference symlinks (e.g. rootfs/bin -> usr/bin in LXC rootfs):
+		// following them either fails with "is a directory" or silently uploads
+		// whole duplicated trees to the remote storage.
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil
+		}
+		relPath, _ := filepath.Rel(localDir, path)
+		remoteFile := filepath.ToSlash(filepath.Join(remoteBasePath, relPath))
+
+		SetProgress(SyncProgress{
+			ID:               progressID,
+			Type:             progressType,
+			Stage:            "transferring",
+			CurrentFile:      relPath,
+			TransferredBytes: *transferred,
+			TotalBytes:       totalSize,
+			Percent:          int(float64(*transferred) / float64(maxInt64(1, totalSize)) * 100),
+		})
+
+		if uploadErr := uploadWithRetry(ctx, client, path, remoteFile, 3); uploadErr != nil {
+			return uploadErr
+		}
+		*transferred += info.Size()
+
+		elapsed := time.Since(startTime).Seconds()
+		var speed int64
+		if elapsed > 0 {
+			speed = int64(float64(*transferred) / elapsed)
+		}
+
+		SetProgress(SyncProgress{
+			ID:               progressID,
+			Type:             progressType,
+			Stage:            "transferring",
+			CurrentFile:      relPath,
+			TransferredBytes: *transferred,
+			TotalBytes:       totalSize,
+			Percent:          int(float64(*transferred) / float64(maxInt64(1, totalSize)) * 100),
+			SpeedBps:         speed,
+		})
+		return nil
+	})
+}
+
 // SyncSnapshotToRemoteStorage uploads a newly created snapshot to configured remote storage pools.
 func SyncSnapshotToRemoteStorage(snapshot *config.Snapshot) {
 	if snapshot == nil || snapshot.Path == "" {
@@ -327,52 +401,17 @@ func SyncSingleSnapshotToPool(snap *config.Snapshot, pool *config.StoragePool) e
 	})
 
 	remoteBasePath := fmt.Sprintf("snapshots/%d/%s", snap.ContainerID, snap.ID)
-	err = filepath.Walk(snap.Path, func(path string, info os.FileInfo, walkErr error) error {
-		if walkErr != nil || info.IsDir() {
-			return walkErr
-		}
-		// Never dereference symlinks (e.g. rootfs/bin -> usr/bin in LXC rootfs):
-		// following them either fails with "is a directory" or silently uploads
-		// whole duplicated trees to the remote storage.
-		if info.Mode()&os.ModeSymlink != 0 {
-			return nil
-		}
-		relPath, _ := filepath.Rel(snap.Path, path)
-		remoteFile := filepath.ToSlash(filepath.Join(remoteBasePath, relPath))
-
+	if du, ok := client.(DirUploader); ok && snapDirHasTree(snap.Path) {
 		SetProgress(SyncProgress{
-			ID: snap.ID,
-			Type: "snapshot_upload",
-			Stage: "transferring",
-			CurrentFile: relPath,
-			TransferredBytes: transferred,
-			TotalBytes: totalSize,
-			Percent: int(float64(transferred) / float64(maxInt64(1, totalSize)) * 100),
+			ID: snap.ID, Type: "snapshot_upload", Stage: "transferring",
+			CurrentFile: remoteBasePath + "/ (tree)", TotalBytes: totalSize, Percent: 0,
 		})
-
-		if uploadErr := uploadWithRetry(ctx, client, path, remoteFile, 3); uploadErr != nil {
-			return uploadErr
+		if err = du.UploadDir(ctx, snap.Path, remoteBasePath); err == nil {
+			transferred = totalSize
 		}
-		transferred += info.Size()
-
-		elapsed := time.Since(startTime).Seconds()
-		var speed int64
-		if elapsed > 0 {
-			speed = int64(float64(transferred) / elapsed)
-		}
-
-		SetProgress(SyncProgress{
-			ID: snap.ID,
-			Type: "snapshot_upload",
-			Stage: "transferring",
-			CurrentFile: relPath,
-			TransferredBytes: transferred,
-			TotalBytes: totalSize,
-			Percent: int(float64(transferred) / float64(maxInt64(1, totalSize)) * 100),
-			SpeedBps: speed,
-		})
-		return nil
-	})
+	} else {
+		err = uploadWalk(ctx, client, snap.Path, remoteBasePath, snap.ID, "snapshot_upload", totalSize, &transferred, startTime)
+	}
 
 	if err == nil {
 		if s := config.FindSnapshot(snap.ID); s != nil {
@@ -451,50 +490,7 @@ func SyncSingleBackupToPool(bkp *config.Backup, pool *config.StoragePool) error 
 	})
 
 	remoteBasePath := fmt.Sprintf("backups/%d/%s", bkp.ContainerID, bkp.ID)
-	err = filepath.Walk(bkp.Path, func(path string, info os.FileInfo, walkErr error) error {
-		if walkErr != nil || info.IsDir() {
-			return walkErr
-		}
-		// Never dereference symlinks (see SyncSingleSnapshotToPool).
-		if info.Mode()&os.ModeSymlink != 0 {
-			return nil
-		}
-		relPath, _ := filepath.Rel(bkp.Path, path)
-		remoteFile := filepath.ToSlash(filepath.Join(remoteBasePath, relPath))
-
-		SetProgress(SyncProgress{
-			ID: bkp.ID,
-			Type: "backup_upload",
-			Stage: "transferring",
-			CurrentFile: relPath,
-			TransferredBytes: transferred,
-			TotalBytes: totalSize,
-			Percent: int(float64(transferred) / float64(maxInt64(1, totalSize)) * 100),
-		})
-
-		if uploadErr := uploadWithRetry(ctx, client, path, remoteFile, 3); uploadErr != nil {
-			return uploadErr
-		}
-		transferred += info.Size()
-
-		elapsed := time.Since(startTime).Seconds()
-		var speed int64
-		if elapsed > 0 {
-			speed = int64(float64(transferred) / elapsed)
-		}
-
-		SetProgress(SyncProgress{
-			ID: bkp.ID,
-			Type: "backup_upload",
-			Stage: "transferring",
-			CurrentFile: relPath,
-			TransferredBytes: transferred,
-			TotalBytes: totalSize,
-			Percent: int(float64(transferred) / float64(maxInt64(1, totalSize)) * 100),
-			SpeedBps: speed,
-		})
-		return nil
-	})
+	err = uploadWalk(ctx, client, bkp.Path, remoteBasePath, bkp.ID, "backup_upload", totalSize, &transferred, startTime)
 
 	if err == nil {
 		if b := config.FindBackup(bkp.ID); b != nil {

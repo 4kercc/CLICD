@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"strconv"
@@ -234,6 +235,66 @@ func (c *SFTPClient) DeleteFile(ctx context.Context, remotePath string) error {
 
 	fullRemote := path.Join(c.BasePath, remotePath)
 	return session.Run(fmt.Sprintf("rm -rf %q", fullRemote))
+}
+
+// UploadDir uploads a whole directory tree over ONE ssh connection by piping a
+// tar stream. The remote layout is identical to per-file UploadFile calls, but
+// trees with many small files (LXC rootfs: tens of thousands) are orders of
+// magnitude faster, and symlinks are preserved instead of dereferenced.
+func (c *SFTPClient) UploadDir(ctx context.Context, localDir, remotePath string) error {
+	cfg, err := c.sshConfig()
+	if err != nil {
+		return err
+	}
+	client, err := ssh.Dial("tcp", fmt.Sprintf("%s:%d", c.Host, c.Port), cfg)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+
+	fullRemote := path.Join(c.BasePath, remotePath)
+	mkdirSession, _ := client.NewSession()
+	if mkdirSession != nil {
+		_ = mkdirSession.Run(fmt.Sprintf("mkdir -p %q", fullRemote))
+		mkdirSession.Close()
+	}
+
+	session, err := client.NewSession()
+	if err != nil {
+		return err
+	}
+	defer session.Close()
+
+	stdin, err := session.StdinPipe()
+	if err != nil {
+		return err
+	}
+	if err := session.Start(fmt.Sprintf("tar -C %q -xf -", fullRemote)); err != nil {
+		return err
+	}
+
+	localTar := exec.CommandContext(ctx, "tar", "-C", localDir, "-cf", "-", ".")
+	tarOut, err := localTar.StdoutPipe()
+	if err != nil {
+		stdin.Close()
+		return err
+	}
+	if err := localTar.Start(); err != nil {
+		stdin.Close()
+		return err
+	}
+	if _, err := io.Copy(stdin, tarOut); err != nil {
+		stdin.Close()
+		localTar.Process.Kill()
+		session.Close()
+		return err
+	}
+	stdin.Close()
+	if err := localTar.Wait(); err != nil {
+		session.Close()
+		return err
+	}
+	return session.Wait()
 }
 
 // =========================================================================
