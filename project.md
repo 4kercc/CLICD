@@ -121,6 +121,34 @@
 
 ---
 
+## 🧪 dev 分支演进记录（对照 PVE 的正常使用优化）
+
+> 以下改动位于 `dev` 分支，按优先级对照 Proxmox VE 补齐正常使用体验。
+
+### 一、 备份与快照全面免停机（对齐 PVE vzdump snapshot/suspend 模式）
+1. **KVM 在线全量备份**：运行中的虚拟机不再需要关机备份。有 Guest Agent 时 `fsfreeze` 冻结整个拷贝窗口（应用一致性）；无 Agent 时走 `snapshot-create-as --disk-only --atomic` 原子外部快照 + `blockcommit --active --pivot` 合并回原盘，磁盘统一 `qemu-img convert -c -U` 打平压缩读取。关机虚拟机保持原冷拷贝路径。
+2. **LXC 免停机快照**：运行中的容器改用 cgroup freezer（`lxc-freeze` → 拷贝 → `lxc-unfreeze`），进程仅暂停毫秒级，替代原先"关机→冷拷贝→开机"的整段停机窗口；宿主机命名空间下存在可见挂载或 freeze 失败时自动回退冷路径，解冻失败重试三次并高亮告警。
+
+### 二、 定时全量备份与备份轮转（对齐 PVE Backup Jobs + Keep Last）
+1. 每 VM 支持 `BackupSchedule`（间隔≥24h、执行时刻、保留份数），由每分钟调度器驱动；API 默认保留 3 份并按日期轮转删除最旧备份，防止磁盘被悄悄占满。
+2. 新端点 `POST /api/.../containers/{id}/backups/schedule`；备份列表响应携带 schedule 字段；前端备份面板新增「定时备份」设置与状态横幅。
+3. 每份全量备份落盘后计算并持久化 **SHA256 校验和**（`backups.checksum` 列）。
+
+### 三、 远程双写与多源恢复可靠性
+1. 快照/备份上传失败自动重试 3 次（线性退避，共享上下文限时）。
+2. 远程拉取恢复逐文件校验：`disk.qcow2` 下载失败即整体失败并删除半成品文件；有校验和的备份做 SHA256 比对，杜绝还原损坏数据。
+3. 还原时仅在本地缺盘文件时才从远程拉取，且拉取失败会向上传播错误（原先错误被静默忽略）。
+
+### 四、 生命周期可靠性（对齐 PVE Start at boot / qm reboot）
+1. **期望状态实时持久化**：KVM 15 秒网络同步循环与新增的 LXC 60 秒状态对账器（`lxc-ls` 单次探测）在发现配置与实际状态背离（如 guest 内自关机）时，同步修正 `RestoreOnHostBoot` 标志——宿主机断电/硬重启后恢复行为与真实期望一致。
+2. **KVM 热重启**：运行中的 VM 优先 `virsh reboot`（客户机内 ACPI 重启，QEMU 进程不动，秒级完成），失败回退原关机+冷启动；重启后自动等待 IP 并重放端口映射与防火墙规则。
+
+### 五、 网络与磁盘细节
+1. **有状态防火墙**：default DROP 策略自动插入 `conntrack ESTABLISHED,RELATED` 放行（iptables/ip6tables，位置在 DROP 之上、用户规则之下），回包不再需要镜像出站规则，对齐 PVE 有状态防火墙语义。
+2. **磁盘 discard=unmap**：KVM 系统盘 driver 启用 unmap，guest 内 fstrim/TRIM 可回收 qcow2/overlay 链占用，防止镜像只增不减。
+
+---
+
 ## 🛠️ 运维与部署常用指令
 
 ### 1. 一键安装与更新
