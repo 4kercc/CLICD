@@ -80,6 +80,30 @@ func (m *Manager) CreateSnapshot(id int, createdBy string, scheduled bool, rotat
 		return config.Snapshot{}, err
 	}
 
+	status, _ := m.GetContainerStatus(lxcName)
+	if status == "running" && !hostMountsUnder(containerDir) {
+		// Freeze-based live snapshot: the cgroup freezer pauses all container
+		// processes for milliseconds and they resume right after the copy, so a
+		// snapshot no longer costs a full shutdown+restart cycle (same semantics
+		// as PVE vzdump suspend mode). Only used when no host-visible mounts exist
+		// under the container dir, otherwise the copy would capture mountpoints.
+		if freezeErr := freezeContainer(lxcName); freezeErr == nil {
+			defer unfreezeContainer(lxcName)
+			if err := copyTree(containerDir, snapshotDir); err != nil {
+				os.RemoveAll(snapshotDir)
+				return config.Snapshot{}, err
+			}
+			snapshot := m.buildSnapshotRecord(c, lxcName, snapshotID, snapshotDir, now, createdBy, scheduled)
+			snapshotMu.Lock()
+			config.AddSnapshot(snapshot)
+			snapshotMu.Unlock()
+			return snapshot, nil
+		} else {
+			fmt.Printf("Warning: freeze-based snapshot unavailable for %s, falling back to stop+copy: %v\n", lxcName, freezeErr)
+		}
+	}
+
+	// Cold offline path: stop the container and detach mounts before copying.
 	wasRunning, err := m.prepareContainerForColdCopy(id, lxcName, containerDir)
 	if err != nil {
 		os.RemoveAll(snapshotDir)
@@ -98,7 +122,16 @@ func (m *Manager) CreateSnapshot(id int, createdBy string, scheduled bool, rotat
 		return config.Snapshot{}, err
 	}
 
-	snapshot := config.Snapshot{
+	snapshot := m.buildSnapshotRecord(c, lxcName, snapshotID, snapshotDir, now, createdBy, scheduled)
+	snapshotMu.Lock()
+	config.AddSnapshot(snapshot)
+	snapshotMu.Unlock()
+	return snapshot, nil
+}
+
+// buildSnapshotRecord assembles the snapshot metadata entry after the files landed.
+func (m *Manager) buildSnapshotRecord(c *config.Container, lxcName, snapshotID, snapshotDir string, now time.Time, createdBy string, scheduled bool) config.Snapshot {
+	return config.Snapshot{
 		ID:            snapshotID,
 		ContainerID:   c.ID,
 		ContainerName: c.Name,
@@ -109,10 +142,56 @@ func (m *Manager) CreateSnapshot(id int, createdBy string, scheduled bool, rotat
 		Path:          snapshotDir,
 		SizeBytes:     dirSizeBytes(snapshotDir),
 	}
-	snapshotMu.Lock()
-	config.AddSnapshot(snapshot)
-	snapshotMu.Unlock()
-	return snapshot, nil
+}
+
+// freezeContainer pauses all container processes via the cgroup freezer and
+// registers it so the status reconciler does not mistake it for stopped.
+func freezeContainer(lxcName string) error {
+	if out, err := exec.Command("lxc-freeze", "-n", lxcName).CombinedOutput(); err != nil {
+		return fmt.Errorf("lxc-freeze failed: %v, output: %s", err, strings.TrimSpace(string(out)))
+	}
+	frozenContainers.Store(lxcName, true)
+	return nil
+}
+
+// unfreezeContainer resumes a frozen container, retrying a few times because a
+// container left frozen is a hard outage for its users.
+func unfreezeContainer(lxcName string) {
+	var lastErr error
+	for i := 0; i < 3; i++ {
+		if err := exec.Command("lxc-unfreeze", "-n", lxcName).Run(); err == nil {
+			frozenContainers.Delete(lxcName)
+			return
+		} else {
+			lastErr = err
+			time.Sleep(2 * time.Second)
+		}
+	}
+	fmt.Printf("CRITICAL: failed to unfreeze %s after snapshot (container stays frozen; run 'lxc-unfreeze -n %s' manually): %v\n", lxcName, lxcName, lastErr)
+}
+
+// hostMountsUnder reports whether any mount visible in the host mount namespace
+// sits on dir or below it (e.g. bind mounts of a running container). When mounts
+// are present a directory copy would capture mountpoint content instead of the
+// underlying files, so callers should fall back to a cold copy.
+func hostMountsUnder(dir string) bool {
+	data, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		// Cannot verify: choose the safe (cold) path.
+		return true
+	}
+	sep := string(os.PathSeparator)
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Split(line, " ")
+		if len(fields) < 5 {
+			continue
+		}
+		mp := fields[4]
+		if mp == dir || strings.HasPrefix(mp, dir+sep) {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Manager) DeleteSnapshot(id string) error {
