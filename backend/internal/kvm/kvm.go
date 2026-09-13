@@ -3633,6 +3633,15 @@ func generateWindowsDomainXML(name string, vcpu int, ramMB int, diskPath, winISO
       <relaxed state='on'/>
       <vapic state='on'/>
       <spinlocks state='on' retries='8191'/>
+      <vpindex state='on'/>
+      <runtime state='on'/>
+      <synic state='on'/>
+      <stimer state='on'/>
+      <reset state='on'/>
+      <frequencies state='on'/>
+      <reenlightenment state='on'/>
+      <tlbflush state='on'/>
+      <ipi state='on'/>
     </hyperv>
   </features>
   <cpu mode='host-passthrough' check='none'>
@@ -3640,6 +3649,7 @@ func generateWindowsDomainXML(name string, vcpu int, ramMB int, diskPath, winISO
   </cpu>
   <clock offset='localtime'>
     <timer name='hypervclock' present='yes'/>
+    <timer name='hpet' present='no'/>
   </clock>
   <on_poweroff>destroy</on_poweroff>
   <on_reboot>restart</on_reboot>
