@@ -146,6 +146,22 @@
 ### 五、 网络与磁盘细节
 1. **有状态防火墙**：default DROP 策略自动插入 `conntrack ESTABLISHED,RELATED` 放行（iptables/ip6tables，位置在 DROP 之上、用户规则之下），回包不再需要镜像出站规则，对齐 PVE 有状态防火墙语义。
 2. **磁盘 discard=unmap**：KVM 系统盘 driver 启用 unmap，guest 内 fstrim/TRIM 可回收 qcow2/overlay 链占用，防止镜像只增不减。
+3. **快照/备份恢复后权限自动规范化 (`fixKVMInstancePermissions`)**：快照目录以 0700 创建，恢复复制回实例目录后自动重置目录 0755 / 文件 0644 并递归 `chown libvirt-qemu:libvirt-qemu`，彻底解决恢复后开机报 `Cannot access storage file ... Permission denied (as uid:64055)` 的致命问题。
+
+### 六、 WebVNC 性能与剪贴板/打字辅助体验升级
+1. **本地光标渲染 (`showDotCursor`)**：鼠标在浏览器内移动时本地绘制微点光标，消除等待服务器回显带来的拖动粘滞感。
+2. **双态压缩模式在线切换**：默认「流畅模式」（质量 2 + 压缩 8，公网下帧体积缩减 60-80% 提升帧率），支持一键切换「清晰模式」（质量 7 + 压缩 4 保证精细读写）。
+3. **内置剪贴板与模拟打字工具箱 (Type Text)**：
+   - 顶部工具栏增加「📋 剪贴板」浮动抽屉。
+   - **模拟键盘键入 (Type Text)**：将文本按字符映射为 X11 Keysym，以 12ms 间隔自动敲入虚拟机当前光标处，**100% 免驱通用**，支持 Windows 锁屏密码与 Linux 纯终端长命令输入。
+   - **双向剪贴板同步**：支持一键将本地文本发送至 VNC 剪贴板，并实时捕获虚拟机内的 `Ctrl+C` 复制内容。
+
+### 七、 动态内存气球守护机制 (`BalloonGuard`，对齐 ESXi / PVE 调度)
+1. **三态智能自适应**：
+   - 常态模式（母鸡物理内存 <85%）：气球完全休眠，禁止抢夺内存，虚拟机独享全部物理内存，消除 Windows 内存颠簸与 CPU 飙高。
+   - 压力模式（母鸡物理内存 ≥85%）：后台守护协程自动从空闲率高的 KVM 虚拟机收回安全闲置内存（保留 512MB 安全缓冲），防止宿主机 OOM。
+   - 恢复模式（母鸡物理内存 ≤75%）：压力解除后自动恢复所有虚拟机至全额原始配置。
+2. **全套 Hyper-V Enlightenments 加速**：补齐 `tlbflush`、`ipi`、`stimer`、`synic`、`vpindex`、`runtime` 等 9 大半虚拟化加速特性，消灭无谓的 VM-Exits。
 
 ---
 
