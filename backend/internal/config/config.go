@@ -878,6 +878,8 @@ type ClicdConfig struct {
 	WebSSHAllowedOrigins []string               `json:"webssh_allowed_origins"`
 	PanelAccessPolicy    PanelAccessPolicy      `json:"panel_access_policy"`
 	SecurityAutoShutdown bool                   `json:"security_auto_shutdown"`
+	AutoBalloonGuardEnabled bool                   `json:"auto_balloon_guard_enabled"`
+	AutoBalloonThresholdPct int                    `json:"auto_balloon_threshold_pct"`
 	TaskConcurrency      int                    `json:"task_concurrency"`
 	Language             string                 `json:"language"`
 	SSL                  SSLConfig              `json:"ssl"`

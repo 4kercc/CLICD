@@ -86,6 +86,7 @@ func main() {
 		kvmManager.StartUsageMonitor()
 		kvmManager.StartNetworkSyncMonitor()
 		kvmManager.StartIPv6Guard()
+		kvmManager.StartBalloonGuard() // Dynamic memory threshold reclaimer (reclaims idle RAM only when host >85%)
 
 		// Reconcile persisted status/restore flags with the real LXC state every minute
 		manager.StartStatusReconciler()
