@@ -708,6 +708,7 @@ func (m *Manager) StartContainer(id int) error {
 	}
 	lxc.EnsureAssignedPublicIPv4s(c.PublicIPv4s)
 	name := c.VirshName()
+	fixKVMInstancePermissions(m.instanceDir(name))
 	if err := m.ensureDomainDefinition(c); err != nil {
 		fmt.Printf("Warning: failed to refresh KVM domain definition for %s: %v\n", name, err)
 	}
@@ -1481,13 +1482,14 @@ func (m *Manager) RestoreSnapshot(id string) error {
 	if err := os.Rename(instanceDir, backupDir); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to move current VM aside: %v", err)
 	}
-	if err := copyTree(snapshot.Path, instanceDir); err != nil {
-		_ = os.RemoveAll(instanceDir)
-		_ = os.Rename(backupDir, instanceDir)
-		return fmt.Errorf("failed to restore snapshot: %v", err)
-	}
-	_ = os.RemoveAll(backupDir)
-	if err := undefineDomain(name); err != nil {
+		if err := copyTree(snapshot.Path, instanceDir); err != nil {
+			_ = os.RemoveAll(instanceDir)
+			_ = os.Rename(backupDir, instanceDir)
+			return fmt.Errorf("failed to restore snapshot: %v", err)
+		}
+		_ = os.RemoveAll(backupDir)
+		fixKVMInstancePermissions(instanceDir)
+		if err := undefineDomain(name); err != nil {
 		fmt.Printf("Warning: failed to undefine %s before restore redefine: %v\n", name, err)
 	}
 	xmlPath := filepath.Join(instanceDir, "domain.xml")
@@ -2171,13 +2173,14 @@ func (m *Manager) RestoreBackup(id string) error {
 	if err := os.Rename(instanceDir, tmpBackupDir); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to move current VM aside: %v", err)
 	}
-	if err := copyTree(backup.Path, instanceDir); err != nil {
-		_ = os.RemoveAll(instanceDir)
-		_ = os.Rename(tmpBackupDir, instanceDir)
-		return fmt.Errorf("failed to restore backup: %v", err)
-	}
-	_ = os.RemoveAll(tmpBackupDir)
-	_ = undefineDomain(name)
+		if err := copyTree(backup.Path, instanceDir); err != nil {
+			_ = os.RemoveAll(instanceDir)
+			_ = os.Rename(tmpBackupDir, instanceDir)
+			return fmt.Errorf("failed to restore backup: %v", err)
+		}
+		_ = os.RemoveAll(tmpBackupDir)
+		fixKVMInstancePermissions(instanceDir)
+		_ = undefineDomain(name)
 	xmlPath := filepath.Join(instanceDir, "domain.xml")
 	if out, err := exec.Command("virsh", "define", xmlPath).CombinedOutput(); err != nil {
 		return fmt.Errorf("virsh define failed after backup restore: %v, output: %s", err, string(out))
@@ -5348,4 +5351,33 @@ func runStdin(command string, stdin []byte, args ...string) error {
 		return fmt.Errorf("%s failed: %v, output: %s", command, err, string(output))
 	}
 	return nil
+}
+
+// fixKVMInstancePermissions ensures that a KVM VM's instance directory and all
+// contained disk images, unattend ISOs and domain configs are readable by the
+// QEMU process user (libvirt-qemu / qemu).
+//
+// Root-cause fix: snapshots and backups are stored under 0700 permissions;
+// copying them back on restore leaves the instance directory inaccessible to
+// non-root QEMU processes (uid:64055 Permission Denied).
+func fixKVMInstancePermissions(instanceDir string) {
+	if instanceDir == "" {
+		return
+	}
+	_ = os.Chmod(instanceDir, 0755)
+	_ = filepath.Walk(instanceDir, func(p string, info os.FileInfo, err error) error {
+		if err == nil && info != nil {
+			if info.IsDir() {
+				_ = os.Chmod(p, 0755)
+			} else {
+				_ = os.Chmod(p, 0644)
+			}
+		}
+		return nil
+	})
+	// Try standard QEMU daemon user/group combinations across Linux distros
+	_ = exec.Command("chown", "-R", "libvirt-qemu:kvm", instanceDir).Run()
+	_ = exec.Command("chown", "-R", "libvirt-qemu:libvirt-qemu", instanceDir).Run()
+	_ = exec.Command("chown", "-R", "qemu:qemu", instanceDir).Run()
+	_ = exec.Command("chown", "-R", "qemu:kvm", instanceDir).Run()
 }
