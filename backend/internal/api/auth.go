@@ -536,9 +536,13 @@ func HandleTOTPEnable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	oldSecret := config.AppConfig.AdminTOTPSecret
+	oldEnabled := config.AppConfig.AdminTOTPEnabled
 	config.AppConfig.AdminTOTPSecret = req.Secret
 	config.AppConfig.AdminTOTPEnabled = true
 	if err := config.SaveConfig(); err != nil {
+		config.AppConfig.AdminTOTPSecret = oldSecret
+		config.AppConfig.AdminTOTPEnabled = oldEnabled
 		jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: "Failed to save configuration"})
 		return
 	}
@@ -577,9 +581,13 @@ func HandleTOTPDisable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	oldSecret := config.AppConfig.AdminTOTPSecret
+	oldEnabled := config.AppConfig.AdminTOTPEnabled
 	config.AppConfig.AdminTOTPSecret = ""
 	config.AppConfig.AdminTOTPEnabled = false
 	if err := config.SaveConfig(); err != nil {
+		config.AppConfig.AdminTOTPSecret = oldSecret
+		config.AppConfig.AdminTOTPEnabled = oldEnabled
 		jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: "Failed to save configuration"})
 		return
 	}

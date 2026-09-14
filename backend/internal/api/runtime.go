@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"clicd/internal/config"
@@ -173,7 +174,12 @@ func restoreSnapshotByRuntime(snapshotID string) error {
 	snapshot := config.FindSnapshot(snapshotID)
 	if snapshot != nil {
 		if snapshot.RemoteSynced && snapshot.RemotePath != "" {
-			_ = remote.EnsureLocalSnapshotFromRemote(snapshot)
+			// Pull remote copy if local disk is missing
+			if remoteSnapshotDiskMissing(snapshot.Path) {
+				if err := remote.EnsureLocalSnapshotFromRemote(snapshot); err != nil {
+					return fmt.Errorf("failed to fetch snapshot from remote storage: %w", err)
+				}
+			}
 		}
 		if c := config.FindContainer(snapshot.ContainerID); c != nil && c.IsKVM() {
 			return kvmManager.RestoreSnapshot(snapshotID)
@@ -213,11 +219,25 @@ func restoreBackupByRuntime(backupID string) error {
 	backup := config.FindBackup(backupID)
 	if backup != nil {
 		if backup.RemoteSynced && backup.RemotePath != "" {
-			_ = remote.EnsureLocalBackupFromRemote(backup)
+			if remoteSnapshotDiskMissing(backup.Path) {
+				if err := remote.EnsureLocalBackupFromRemote(backup); err != nil {
+					return fmt.Errorf("failed to fetch backup from remote storage: %w", err)
+				}
+			}
 		}
 		return kvmManager.RestoreBackup(backupID)
 	}
 	return fmt.Errorf("backup not found: %s", backupID)
+}
+
+func remoteSnapshotDiskMissing(path string) bool {
+	if path == "" {
+		return true
+	}
+	if _, err := os.Stat(filepath.Join(path, "disk.qcow2")); err == nil {
+		return false
+	}
+	return true
 }
 
 func resizeDiskByRuntime(id int, newSizeGB int) error {

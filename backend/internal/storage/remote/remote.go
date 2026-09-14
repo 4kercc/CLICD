@@ -1,7 +1,6 @@
 package remote
 
 import (
-	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -125,6 +124,11 @@ func (c *SFTPClient) TestConnection(ctx context.Context) error {
 	return session.Run("echo clicd-sftp-test")
 }
 
+// shellQuote wraps a string in single quotes safely for remote shell execution.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
+}
+
 func (c *SFTPClient) UploadFile(ctx context.Context, localPath, remotePath string) error {
 	cfg, err := c.sshConfig()
 	if err != nil {
@@ -148,7 +152,7 @@ func (c *SFTPClient) UploadFile(ctx context.Context, localPath, remotePath strin
 	// Ensure remote directory exists
 	mkdirSession, _ := client.NewSession()
 	if mkdirSession != nil {
-		_ = mkdirSession.Run(fmt.Sprintf("mkdir -p %q", dir))
+		_ = mkdirSession.Run("mkdir -p " + shellQuote(dir))
 		mkdirSession.Close()
 	}
 
@@ -169,7 +173,7 @@ func (c *SFTPClient) UploadFile(ctx context.Context, localPath, remotePath strin
 		return err
 	}
 
-	cmd := fmt.Sprintf("cat > %q", fullRemote)
+	cmd := "cat > " + shellQuote(fullRemote)
 	if err := session.Start(cmd); err != nil {
 		return err
 	}
@@ -211,7 +215,7 @@ func (c *SFTPClient) DownloadFile(ctx context.Context, remotePath, localPath str
 	defer dstFile.Close()
 
 	session.Stdout = dstFile
-	cmd := fmt.Sprintf("cat %q", fullRemote)
+	cmd := "cat " + shellQuote(fullRemote)
 	return session.Run(cmd)
 }
 
@@ -233,7 +237,7 @@ func (c *SFTPClient) DeleteFile(ctx context.Context, remotePath string) error {
 	defer session.Close()
 
 	fullRemote := path.Join(c.BasePath, remotePath)
-	return session.Run(fmt.Sprintf("rm -rf %q", fullRemote))
+	return session.Run("rm -rf " + shellQuote(fullRemote))
 }
 
 // =========================================================================
@@ -518,14 +522,27 @@ func (m *MinIOClient) TestConnection(ctx context.Context) error {
 }
 
 func (m *MinIOClient) UploadFile(ctx context.Context, localPath, remotePath string) error {
-	data, err := os.ReadFile(localPath)
+	f, err := os.Open(localPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	info, err := f.Stat()
 	if err != nil {
 		return err
 	}
 
+	// Stream hash calculation with 1MB buffer instead of reading entire file into RAM
 	h := sha256.New()
-	h.Write(data)
+	buf := make([]byte, 1024*1024)
+	if _, err := io.CopyBuffer(h, f, buf); err != nil {
+		return fmt.Errorf("failed to hash upload payload: %w", err)
+	}
 	payloadHash := hex.EncodeToString(h.Sum(nil))
+
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("failed to rewind upload file: %w", err)
+	}
 
 	scheme := "https"
 	if !m.UseSSL {
@@ -534,11 +551,12 @@ func (m *MinIOClient) UploadFile(ctx context.Context, localPath, remotePath stri
 	objectKey := strings.TrimLeft(remotePath, "/")
 	urlStr := fmt.Sprintf("%s://%s/%s/%s", scheme, m.Endpoint, m.Bucket, objectKey)
 
-	req, err := http.NewRequestWithContext(ctx, "PUT", urlStr, bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, "PUT", urlStr, f)
 	if err != nil {
 		return err
 	}
 	req.Host = m.Endpoint
+	req.ContentLength = info.Size()
 	req.Header.Set("Content-Type", "application/octet-stream")
 	m.signS3V4(req, payloadHash)
 

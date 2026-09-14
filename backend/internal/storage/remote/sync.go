@@ -357,92 +357,127 @@ func EnsureLocalSnapshotFromRemote(snapshot *config.Snapshot) error {
 		Percent: 10,
 	})
 
-	// Download standard files
-	for idx, filename := range files {
-		remoteFile := filepath.ToSlash(filepath.Join(snapshot.RemotePath, filename))
-		localFile := filepath.Join(snapshot.Path, filename)
+		// Download standard files. Optional files may fail if absent remotely,
+		// but core disk images must succeed.
+		var criticalErr error
+		for idx, filename := range files {
+			remoteFile := filepath.ToSlash(filepath.Join(snapshot.RemotePath, filename))
+			localFile := filepath.Join(snapshot.Path, filename)
+
+			SetProgress(SyncProgress{
+				ID: snapshot.ID,
+				Type: "snapshot_download",
+				Stage: "transferring",
+				CurrentFile: filename,
+				Percent: int(float64(idx+1) / float64(totalFiles) * 90),
+			})
+			if err := client.DownloadFile(ctx, remoteFile, localFile); err != nil {
+				_ = os.Remove(localFile)
+				if filename == "disk.qcow2" || filename == "rootfs.tar.gz" {
+					criticalErr = fmt.Errorf("download critical file %s failed: %w", filename, err)
+				}
+			}
+		}
+
+		if criticalErr != nil {
+			SetProgress(SyncProgress{
+				ID: snapshot.ID,
+				Type: "snapshot_download",
+				Stage: "failed",
+				Error: criticalErr.Error(),
+				Percent: 100,
+			})
+			return criticalErr
+		}
 
 		SetProgress(SyncProgress{
 			ID: snapshot.ID,
 			Type: "snapshot_download",
-			Stage: "transferring",
-			CurrentFile: filename,
-			Percent: int(float64(idx+1) / float64(totalFiles) * 90),
+			Stage: "completed",
+			Percent: 100,
 		})
-		_ = client.DownloadFile(ctx, remoteFile, localFile)
+		return nil
 	}
 
-	SetProgress(SyncProgress{
-		ID: snapshot.ID,
-		Type: "snapshot_download",
-		Stage: "completed",
-		Percent: 100,
-	})
-	return nil
-}
-
-// EnsureLocalBackupFromRemote downloads remote backup files if local copy is missing or remote source is requested.
-func EnsureLocalBackupFromRemote(backup *config.Backup) error {
-	if backup == nil {
-		return fmt.Errorf("backup is nil")
-	}
-
-	releaseLock := acquireSyncLock(backup.ID)
-	defer releaseLock()
-
-	if backup.RemoteStoragePoolID == "" || backup.RemotePath == "" {
-		return fmt.Errorf("no remote storage record for backup %s", backup.ID)
-	}
-	var pool *config.StoragePool
-	for _, p := range config.AppConfig.StoragePools {
-		if p.ID == backup.RemoteStoragePoolID {
-			pool = &p
-			break
+	// EnsureLocalBackupFromRemote downloads remote backup files if local copy is missing or remote source is requested.
+	func EnsureLocalBackupFromRemote(backup *config.Backup) error {
+		if backup == nil {
+			return fmt.Errorf("backup is nil")
 		}
-	}
-	if pool == nil {
-		return fmt.Errorf("remote storage pool %s not found", backup.RemoteStoragePoolID)
-	}
-	client, err := NewClient(pool.Type, pool.Config)
-	if err != nil {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
-	defer cancel()
 
-	_ = os.MkdirAll(backup.Path, 0700)
-	files := []string{"disk.qcow2", "domain.xml", "unattend.iso", "seed.iso"}
-	totalFiles := len(files)
+		releaseLock := acquireSyncLock(backup.ID)
+		defer releaseLock()
 
-	SetProgress(SyncProgress{
-		ID: backup.ID,
-		Type: "backup_download",
-		Stage: "transferring",
-		Percent: 10,
-	})
+		if backup.RemoteStoragePoolID == "" || backup.RemotePath == "" {
+			return fmt.Errorf("no remote storage record for backup %s", backup.ID)
+		}
+		var pool *config.StoragePool
+		for _, p := range config.AppConfig.StoragePools {
+			if p.ID == backup.RemoteStoragePoolID {
+				pool = &p
+				break
+			}
+		}
+		if pool == nil {
+			return fmt.Errorf("remote storage pool %s not found", backup.RemoteStoragePoolID)
+		}
+		client, err := NewClient(pool.Type, pool.Config)
+		if err != nil {
+			return err
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
+		defer cancel()
 
-	for idx, filename := range files {
-		remoteFile := filepath.ToSlash(filepath.Join(backup.RemotePath, filename))
-		localFile := filepath.Join(backup.Path, filename)
+		_ = os.MkdirAll(backup.Path, 0700)
+		files := []string{"disk.qcow2", "domain.xml", "unattend.iso", "seed.iso"}
+		totalFiles := len(files)
 
 		SetProgress(SyncProgress{
 			ID: backup.ID,
 			Type: "backup_download",
 			Stage: "transferring",
-			CurrentFile: filename,
-			Percent: int(float64(idx+1) / float64(totalFiles) * 90),
+			Percent: 10,
 		})
-		_ = client.DownloadFile(ctx, remoteFile, localFile)
-	}
 
-	SetProgress(SyncProgress{
-		ID: backup.ID,
-		Type: "backup_download",
-		Stage: "completed",
-		Percent: 100,
-	})
-	return nil
-}
+		var criticalErr error
+		for idx, filename := range files {
+			remoteFile := filepath.ToSlash(filepath.Join(backup.RemotePath, filename))
+			localFile := filepath.Join(backup.Path, filename)
+
+			SetProgress(SyncProgress{
+				ID: backup.ID,
+				Type: "backup_download",
+				Stage: "transferring",
+				CurrentFile: filename,
+				Percent: int(float64(idx+1) / float64(totalFiles) * 90),
+			})
+			if err := client.DownloadFile(ctx, remoteFile, localFile); err != nil {
+				_ = os.Remove(localFile)
+				if filename == "disk.qcow2" {
+					criticalErr = fmt.Errorf("download critical file %s failed: %w", filename, err)
+				}
+			}
+		}
+
+		if criticalErr != nil {
+			SetProgress(SyncProgress{
+				ID: backup.ID,
+				Type: "backup_download",
+				Stage: "failed",
+				Error: criticalErr.Error(),
+				Percent: 100,
+			})
+			return criticalErr
+		}
+
+		SetProgress(SyncProgress{
+			ID: backup.ID,
+			Type: "backup_download",
+			Stage: "completed",
+			Percent: 100,
+		})
+		return nil
+	}
 
 func maxInt64(a, b int64) int64 {
 	if a > b {
