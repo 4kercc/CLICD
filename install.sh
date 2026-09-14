@@ -1649,6 +1649,13 @@ setup_runtime_services() {
         systemd_enable_now_if_exists lxcfs.service
         systemd_enable_now_if_exists lxc-net.service
         systemd_enable_now_if_exists lxc.service
+        if [ -f /etc/libvirt/qemu.conf ]; then
+            if grep -q '^#security_driver =' /etc/libvirt/qemu.conf; then
+                sed -i 's/^#security_driver = .*/security_driver = "none"/' /etc/libvirt/qemu.conf
+            elif ! grep -q '^security_driver =' /etc/libvirt/qemu.conf; then
+                echo 'security_driver = "none"' >> /etc/libvirt/qemu.conf
+            fi
+        fi
         if systemd_unit_exists libvirtd.service; then
             systemd_enable_now_if_exists libvirtd.service
             log "检测到 libvirt 传统 libvirtd 服务，已使用 libvirtd 模式。"

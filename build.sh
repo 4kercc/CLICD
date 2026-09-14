@@ -54,7 +54,7 @@ cd "$BACKEND_DIR"
 go mod tidy
 go mod download
 
-BUILD_VERSION="${CLICD_VERSION:-dev}"
+BUILD_VERSION="${CLICD_VERSION:-1.20.4}"
 TARGET_GOOS="${CLICD_GOOS:-linux}"
 TARGET_GOARCH="${CLICD_GOARCH:-amd64}"
 
