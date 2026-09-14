@@ -207,14 +207,16 @@ func buildStorageInfo() storageInfoResponse {
 			} else if info.Error == "" {
 				info.Error = "storage disk is not mounted"
 			}
-		} else {
-			// Remote storage pool (SFTP / WebDAV / MinIO)
-			info.Available = pool.Enabled
-			info.Exists = true
-			info.MountPoint = pool.Type
-			info.SizeBytes = 1000 * 1024 * 1024 * 1024 // Display placeholder 1TB
-			info.FreeBytes = 1000 * 1024 * 1024 * 1024
-		}
+			} else {
+				// Remote storage pool (SFTP / WebDAV / MinIO)
+				info.Available = pool.Enabled
+				info.Exists = true
+				info.MountPoint = pool.Type
+				info.SizeBytes = 1000 * 1024 * 1024 * 1024 // Display placeholder 1TB
+				info.FreeBytes = 1000 * 1024 * 1024 * 1024
+				// Redact sensitive secrets before returning to frontend
+				info.Config = redactStorageConfig(pool.Config)
+			}
 		pools = append(pools, info)
 	}
 	for i := range disks {
@@ -269,20 +271,21 @@ func normalizeStoragePoolsRequestWithDisks(items []config.StoragePool, disks []s
 				return nil, fmt.Errorf("duplicate storage pool ID: %s", id)
 			}
 			seen[id] = true
-			name := strings.TrimSpace(item.Name)
-			if name == "" {
-				name = fmt.Sprintf("%s 存储", strings.ToUpper(itemType))
-			}
-			result = append(result, config.StoragePool{
-				ID:            id,
-				Name:          name,
-				Type:          itemType,
-				Enabled:       item.Enabled,
-				SyncSnapshots: item.SyncSnapshots,
-				SyncBackups:   item.SyncBackups,
-				Config:        item.Config,
-			})
-			continue
+				name := strings.TrimSpace(item.Name)
+				if name == "" {
+					name = fmt.Sprintf("%s 存储", strings.ToUpper(itemType))
+				}
+				resolvedConfig := preserveRedactedSecrets(item.Config, id)
+				result = append(result, config.StoragePool{
+					ID:            id,
+					Name:          name,
+					Type:          itemType,
+					Enabled:       item.Enabled,
+					SyncSnapshots: item.SyncSnapshots,
+					SyncBackups:   item.SyncBackups,
+					Config:        resolvedConfig,
+				})
+				continue
 		}
 
 		disk, managedPath, err := storageDiskForPoolRequest(item, disks)
@@ -633,4 +636,55 @@ func bestMountPointForPath(path string, disks []storageDiskInfo) string {
 		}
 	}
 	return best
+}
+
+var sensitiveConfigKeys = map[string]bool{
+	"password":      true,
+	"secret_key":    true,
+	"key":           true,
+	"client_secret": true,
+	"refresh_token": true,
+}
+
+// redactStorageConfig replaces sensitive secrets with a mask so API responses
+// do not leak cleartext credentials to frontend consumers.
+func redactStorageConfig(cfg map[string]string) map[string]string {
+	if len(cfg) == 0 {
+		return cfg
+	}
+	redacted := make(map[string]string, len(cfg))
+	for k, v := range cfg {
+		if sensitiveConfigKeys[strings.ToLower(k)] && strings.TrimSpace(v) != "" {
+			redacted[k] = "******"
+		} else {
+			redacted[k] = v
+		}
+	}
+	return redacted
+}
+
+// preserveRedactedSecrets restores the existing secret from the stored pool
+// if the incoming config submitted the "******" mask instead of a new password.
+func preserveRedactedSecrets(incoming map[string]string, poolID string) map[string]string {
+	if len(incoming) == 0 {
+		return incoming
+	}
+	var existingPool *config.StoragePool
+	if config.AppConfig != nil {
+		for _, p := range config.AppConfig.StoragePools {
+			if p.ID == poolID {
+				existingPool = &p
+				break
+			}
+		}
+	}
+	resolved := make(map[string]string, len(incoming))
+	for k, v := range incoming {
+		if sensitiveConfigKeys[strings.ToLower(k)] && strings.TrimSpace(v) == "******" && existingPool != nil {
+			resolved[k] = existingPool.Config[k]
+		} else {
+			resolved[k] = v
+		}
+	}
+	return resolved
 }

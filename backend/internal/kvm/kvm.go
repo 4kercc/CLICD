@@ -1244,9 +1244,12 @@ func (m *Manager) CreateSnapshot(id int, createdBy string, scheduled bool, rotat
 		// Copy the disk: -U shares the QEMU lock so convert works on live images
 		dstDisk := filepath.Join(snapshotDir, "disk.qcow2")
 		cmd := exec.Command("qemu-img", "convert", "-p", "-U", "-O", "qcow2", diskPath, dstDisk)
-		if _, err := cmd.CombinedOutput(); err != nil {
+		if out, err := cmd.CombinedOutput(); err != nil {
 			// Fallback to sparse copy
-			_ = exec.Command("cp", "--sparse=always", diskPath, dstDisk).Run()
+			if cpOut, cpErr := exec.Command("cp", "--sparse=always", diskPath, dstDisk).CombinedOutput(); cpErr != nil {
+				_ = os.RemoveAll(snapshotDir)
+				return config.Snapshot{}, fmt.Errorf("snapshot disk copy failed: convert error: %v (%s), cp error: %v (%s)", err, strings.TrimSpace(string(out)), cpErr, strings.TrimSpace(string(cpOut)))
+			}
 		}
 	} else {
 		// Cold offline snapshot
@@ -1838,18 +1841,13 @@ func (m *Manager) ResizeDisk(id int, newSizeGB int) error {
 
 	status, _ := m.GetContainerStatus(c.VirshName())
 	if status == "running" {
-		// Online resize via virsh blockresize
-		dev := "vda"
-		if c.DiskBus == "sata" || c.DiskBus == "scsi" || IsWindowsImage(c.Template) {
-			dev = "sda"
-		}
+		// Online resize via virsh blockresize. Never fall back to qemu-img resize
+		// while the VM is active (mutating the backing file underneath a running
+		// QEMU process corrupts the qcow2 image and guest filesystem).
+		dev := kvmDiskTargetDev(c)
 		cmd := exec.Command("virsh", "blockresize", c.VirshName(), dev, fmt.Sprintf("%dG", newSizeGB))
 		if out, err := cmd.CombinedOutput(); err != nil {
-			// Fallback: try resizing image directly with -U
-			cmd2 := exec.Command("qemu-img", "resize", diskPath, fmt.Sprintf("%dG", newSizeGB))
-			if out2, err2 := cmd2.CombinedOutput(); err2 != nil {
-				return fmt.Errorf("online blockresize failed: %v (%s); qemu-img resize fallback failed: %v (%s)", err, string(out), err2, string(out2))
-			}
+			return fmt.Errorf("online blockresize failed for device %s: %v (%s)", dev, err, strings.TrimSpace(string(out)))
 		}
 		// Try auto expanding inside guest OS via guest agent
 		if qemuGuestPing(c.VirshName()) == nil {
@@ -1890,7 +1888,7 @@ func (m *Manager) ImportDiskImage(id int, srcPath string, asOverlayBase bool) er
 	if _, err := os.Stat(srcPath); err != nil {
 		return fmt.Errorf("source disk image not found: %v", err)
 	}
-	if err := validateImportSourcePath(srcPath); err != nil {
+	if err := ValidateImportSourcePath(srcPath); err != nil {
 		return err
 	}
 
@@ -1933,9 +1931,9 @@ func (m *Manager) ImportDiskImage(id int, srcPath string, asOverlayBase bool) er
 	return config.SaveConfig()
 }
 
-// validateImportSourcePath restricts disk import sources to storage-pool / image-cache
+// ValidateImportSourcePath restricts disk import sources to storage-pool / image-cache
 // directories, preventing arbitrary host file reads (e.g. /etc/shadow) through the API.
-func validateImportSourcePath(srcPath string) error {
+func ValidateImportSourcePath(srcPath string) error {
 	clean := filepath.Clean(srcPath)
 	if resolved, err := filepath.EvalSymlinks(clean); err == nil {
 		clean = resolved
@@ -3089,7 +3087,7 @@ func generateLinuxDomainXML(name string, vcpu int, ramMB int, diskPath, seedPath
   <devices>
     <emulator>%s</emulator>
     <disk type='file' device='disk'>
-      <driver name='qemu' type='qcow2' cache='none'/>
+      <driver name='qemu' type='qcow2' cache='none' discard='unmap'/>
       <source file='%s'/>
       <target dev='%s' bus='%s'/>%s
     </disk>
@@ -3110,7 +3108,7 @@ func generateLinuxDomainXML(name string, vcpu int, ramMB int, diskPath, seedPath
     <graphics type='vnc' port='-1' autoport='yes' listen='127.0.0.1'/>%s
     %s
   </devices>
-</domain>`, xmlEscape(name), domainUUIDXML(name), ramMB, ramMB, vcpu, vcpu, osAttrs, kvmLibvirtArch(), kvmMachineType(), bootTag, features, xmlEscape(kvmEmulatorPath()), xmlEscape(diskPath), diskDev, diskBus, iotune, seedDisk, xmlEscape(mac), nicModel, bandwidth, input, video)
+</domain>`, xmlEscape(name), domainUUIDXML(name), ramMB, ramMB, vcpu, vcpu, osAttrs, kvmLibvirtArch(), kvmMachineType(), bootTag, features, xmlEscape(kvmEmulatorPath()), xmlEscape(diskPath), xmlEscape(diskDev), xmlEscape(diskBus), iotune, seedDisk, xmlEscape(mac), xmlEscape(nicModel), bandwidth, input, video)
 }
 
 func windowsDomainXML(name string, vcpu int, ramMB int, diskPath, winISOPath, unattendISOPath, mac string, ioReadMBps int, ioWriteMBps int, networkDownMbps int, networkUpMbps int) string {
@@ -3252,8 +3250,8 @@ func generateWindowsDomainXML(name string, vcpu int, ramMB int, diskPath, winISO
     <video><model type='qxl'/></video>
   </devices>
 </domain>`, xmlEscape(name), domainUUIDXML(name), ramMB, ramMB, vcpu, vcpu, bootTag, vcpu,
-		xmlEscape(diskPath), diskDev, diskBus, iotune,
-		cdromDisks, xmlEscape(mac), nicModel, bandwidth)
+		xmlEscape(diskPath), xmlEscape(diskDev), xmlEscape(diskBus), iotune,
+		cdromDisks, xmlEscape(mac), xmlEscape(nicModel), bandwidth)
 }
 
 func xmlEscape(value string) string {

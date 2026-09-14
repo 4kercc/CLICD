@@ -14,6 +14,7 @@ import (
 	"unicode"
 
 	"clicd/internal/config"
+	"clicd/internal/kvm"
 	"clicd/internal/lxc"
 	"clicd/internal/version"
 )
@@ -832,18 +833,54 @@ func handleUpdateHardwareConfig(w http.ResponseWriter, r *http.Request, id int) 
 		jsonResponse(w, http.StatusNotFound, APIResponse{Success: false, Message: "Container not found"})
 		return
 	}
-	if req.BootOrder != "" {
-		c.BootOrder = strings.ToLower(strings.TrimSpace(req.BootOrder))
+	bootOrder := strings.ToLower(strings.TrimSpace(req.BootOrder))
+	if bootOrder != "" {
+		switch bootOrder {
+		case "disk", "cdrom", "network":
+			c.BootOrder = bootOrder
+		default:
+			jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Invalid boot_order (must be disk, cdrom, or network)"})
+			return
+		}
 	}
-	c.BootMedia = strings.TrimSpace(req.BootMedia)
+	bootMedia := strings.TrimSpace(req.BootMedia)
+	if bootMedia != "" {
+		if err := kvm.ValidateImportSourcePath(bootMedia); err != nil {
+			jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Invalid boot_media path: " + err.Error()})
+			return
+		}
+	}
+	c.BootMedia = bootMedia
+
 	if req.Firmware != "" {
-		c.Firmware = strings.ToLower(strings.TrimSpace(req.Firmware))
+		firmware := strings.ToLower(strings.TrimSpace(req.Firmware))
+		switch firmware {
+		case "bios", "uefi", "":
+			c.Firmware = firmware
+		default:
+			jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Invalid firmware (must be bios or uefi)"})
+			return
+		}
 	}
 	if req.NICModel != "" {
-		c.NICModel = strings.ToLower(strings.TrimSpace(req.NICModel))
+		nic := strings.ToLower(strings.TrimSpace(req.NICModel))
+		switch nic {
+		case "virtio", "e1000e", "rtl8139", "e1000":
+			c.NICModel = nic
+		default:
+			jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Invalid nic_model (must be virtio, e1000e, or rtl8139)"})
+			return
+		}
 	}
 	if req.DiskBus != "" {
-		c.DiskBus = strings.ToLower(strings.TrimSpace(req.DiskBus))
+		bus := strings.ToLower(strings.TrimSpace(req.DiskBus))
+		switch bus {
+		case "virtio", "sata", "ide", "scsi":
+			c.DiskBus = bus
+		default:
+			jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Invalid disk_bus (must be virtio, sata, ide, or scsi)"})
+			return
+		}
 	}
 	if err := config.SaveConfig(); err != nil {
 		jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: err.Error()})
