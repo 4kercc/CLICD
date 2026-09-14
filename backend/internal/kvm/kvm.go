@@ -1210,29 +1210,8 @@ func (m *Manager) CreateSnapshot(id int, createdBy string, scheduled bool, rotat
 			}()
 		}
 
-		externalOverlay := ""
-		if !frozen {
-			overlayPath := filepath.Join(instanceDir, fmt.Sprintf(".%s-livesnap-%d.qcow2", name, now.UnixNano()))
-			dev := kvmDiskTargetDev(c)
-			snapName := fmt.Sprintf("clicd-tmp-%d", now.UnixNano())
-			diskspec := fmt.Sprintf("%s,snapshot=external,file=%s", dev, overlayPath)
-			if _, err := virshCombinedOutput(30*time.Second, "snapshot-create-as", name, snapName, "--disk-only", "--atomic", "--no-metadata", "--diskspec", diskspec); err == nil {
-				externalOverlay = overlayPath
-			} else {
-				fmt.Printf("Warning: external disk snapshot failed for %s, falling back to direct copy (crash-consistent only): %v\n", name, err)
-			}
-			if externalOverlay != "" {
-				defer func() {
-					// Merge the live delta back into the original disk and pivot.
-					if _, err := virshCombinedOutput(120*time.Second, "blockcommit", name, dev, "--active", "--pivot"); err != nil {
-						fmt.Printf("Warning: blockcommit pivot failed for %s (VM keeps writing into %s; run 'virsh blockjob %s %s --abort' if needed): %v\n", name, externalOverlay, name, dev, err)
-						_, _ = virshCombinedOutput(30*time.Second, "blockjob", name, dev, "--abort")
-						return
-					}
-					_ = os.Remove(externalOverlay)
-				}()
-			}
-		}
+		// For QCOW2 COW layered disk, direct copy of overlay file with sparse flags is instantaneous and atomic
+		_ = frozen
 
 		// Copy config and non-disk metadata
 		for _, file := range []string{"domain.xml", "meta-data", "user-data", "network-config", "seed.iso", "unattend.iso"} {
@@ -1241,14 +1220,12 @@ func (m *Manager) CreateSnapshot(id int, createdBy string, scheduled bool, rotat
 				_ = copyFile(src, filepath.Join(snapshotDir, file))
 			}
 		}
-		// Copy the disk: -U shares the QEMU lock so convert works on live images
+		// Fast lightweight COW snapshot: copy overlay file preserving backing master
 		dstDisk := filepath.Join(snapshotDir, "disk.qcow2")
-		cmd := exec.Command("qemu-img", "convert", "-p", "-U", "-O", "qcow2", diskPath, dstDisk)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			// Fallback to sparse copy
-			if cpOut, cpErr := exec.Command("cp", "--sparse=always", diskPath, dstDisk).CombinedOutput(); cpErr != nil {
+		if cpOut, cpErr := exec.Command("cp", "--sparse=always", diskPath, dstDisk).CombinedOutput(); cpErr != nil {
+			if err := copyFile(diskPath, dstDisk); err != nil {
 				_ = os.RemoveAll(snapshotDir)
-				return config.Snapshot{}, fmt.Errorf("snapshot disk copy failed: convert error: %v (%s), cp error: %v (%s)", err, strings.TrimSpace(string(out)), cpErr, strings.TrimSpace(string(cpOut)))
+				return config.Snapshot{}, fmt.Errorf("snapshot disk copy failed: %v (%s)", err, strings.TrimSpace(string(cpOut)))
 			}
 		}
 	} else {

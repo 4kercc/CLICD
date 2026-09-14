@@ -57,7 +57,7 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             echo "CLICD_VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_ENV"
           else
-            echo "CLICD_VERSION=dev" >> "$GITHUB_ENV"
+            echo "CLICD_VERSION=1.20.4" >> "$GITHUB_ENV"
           fi
 
       - name: Build CLICD
