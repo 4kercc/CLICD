@@ -1033,6 +1033,129 @@ func (m *Manager) ensureLXCMACAddress(lxcName string, preferredMAC string) (stri
 	return mac, nil
 }
 
+// SyncLXCDHCPStaticHosts writes all containers' static NAT MAC-to-IP bindings to /etc/lxc/dnsmasq.conf
+// and ensures LXC_DHCP_CONFILE is properly set in /etc/default/lxc-net so that lxcbr0's dnsmasq
+// reliably gives each container its specified IP address.
+func (m *Manager) SyncLXCDHCPStaticHosts() error {
+	defaultLxcNetPath := "/etc/default/lxc-net"
+	dnsmasqConfPath := "/etc/lxc/dnsmasq.conf"
+
+	// 1. Ensure LXC_DHCP_CONFILE is configured in /etc/default/lxc-net
+	if data, err := os.ReadFile(defaultLxcNetPath); err == nil {
+		content := string(data)
+		targetSetting := `LXC_DHCP_CONFILE="/etc/lxc/dnsmasq.conf"`
+		if !strings.Contains(content, targetSetting) && !strings.Contains(content, `LXC_DHCP_CONFILE=/etc/lxc/dnsmasq.conf`) {
+			lines := strings.Split(content, "\n")
+			var newLines []string
+			replaced := false
+			for _, line := range lines {
+				trimmed := strings.TrimSpace(line)
+				if strings.HasPrefix(trimmed, "LXC_DHCP_CONFILE=") {
+					newLines = append(newLines, targetSetting)
+					replaced = true
+				} else {
+					newLines = append(newLines, line)
+				}
+			}
+			if !replaced {
+				newLines = append(newLines, targetSetting)
+			}
+			_ = os.WriteFile(defaultLxcNetPath, []byte(strings.Join(newLines, "\n")), 0644)
+		}
+	}
+
+	// 2. Generate dnsmasq.conf entries for LXC containers that have MAC & IP
+	_ = os.MkdirAll("/etc/lxc", 0755)
+	var confLines []string
+	confLines = append(confLines, "# clicd managed: static DHCP leases for containers")
+	for _, c := range config.AppConfig.Containers {
+		if !c.IsKVM() && !c.UsesLANIPv4() && c.MACAddress != "" && c.IP != "" && config.IsValidLXCNATIP(c.IP) {
+			confLines = append(confLines, fmt.Sprintf("dhcp-host=%s,%s", strings.ToLower(c.MACAddress), c.IP))
+		}
+	}
+	confLines = append(confLines, "")
+
+	if err := os.WriteFile(dnsmasqConfPath, []byte(strings.Join(confLines, "\n")), 0644); err != nil {
+		return fmt.Errorf("failed to write %s: %v", dnsmasqConfPath, err)
+	}
+
+	// 3. Send SIGHUP to lxcbr0's dnsmasq daemon to reload leases without restarting the bridge
+	_ = exec.Command("sh", "-c", "pkill -HUP -f 'lxc/dnsmasq.pid' || pkill -HUP -f 'dnsmasq.*lxcbr0' || true").Run()
+	return nil
+}
+
+// SetStaticNATIP reconfigures an LXC container's internal NAT IP.
+func (m *Manager) SetStaticNATIP(id int, newIP string) error {
+	c := config.FindContainer(id)
+	if c == nil {
+		return fmt.Errorf("container not found: %d", id)
+	}
+	if c.IsKVM() {
+		return fmt.Errorf("container %d is a KVM virtual machine", id)
+	}
+	if c.UsesLANIPv4() {
+		return fmt.Errorf("container %d uses dedicated LAN IPv4", id)
+	}
+
+	newIP = strings.TrimSpace(newIP)
+	if !config.IsValidLXCNATIP(newIP) {
+		return fmt.Errorf("invalid LXC NAT IP address %s (must be in %s and not gateway)", newIP, config.LXCNATNetwork().Subnet)
+	}
+
+	// Check for collision with another container
+	for _, other := range config.AppConfig.Containers {
+		if other.ID != id && other.IP == newIP {
+			return fmt.Errorf("IP %s is already assigned to container %s", newIP, other.Name)
+		}
+	}
+
+	lxcName := c.LxcName()
+	if c.MACAddress == "" {
+		mac, err := m.ensureLXCMACAddress(lxcName, "")
+		if err != nil {
+			return fmt.Errorf("failed to ensure MAC for %s: %v", lxcName, err)
+		}
+		c.MACAddress = mac
+	}
+
+	c.IP = newIP
+	_ = config.SaveConfig()
+
+	// Sync static host file
+	_ = m.SyncLXCDHCPStaticHosts()
+
+	// Also update static network configuration inside container rootfs so reboot keeps the static IP
+	rootfsPath := filepath.Join(m.LxcPath, lxcName, "rootfs")
+	networkdPath := filepath.Join(rootfsPath, "etc", "systemd", "network", "10-eth0.network")
+	if _, err := os.ReadFile(networkdPath); err == nil {
+		network := fmt.Sprintf("[Match]\nName=eth0\n\n[Network]\nAddress=%s/24\nGateway=10.0.3.1\nIPv6AcceptRA=no\n", newIP)
+		_ = os.WriteFile(networkdPath, []byte(network), 0644)
+	}
+	interfacesPath := filepath.Join(rootfsPath, "etc", "network", "interfaces")
+	if data, err := os.ReadFile(interfacesPath); err == nil && strings.Contains(string(data), "iface eth0") {
+		content := fmt.Sprintf("auto lo\niface lo inet loopback\n\nauto eth0\niface eth0 inet static\n    address %s\n    netmask 255.255.255.0\n    gateway 10.0.3.1\n", newIP)
+		_ = os.WriteFile(interfacesPath, []byte(content), 0644)
+	}
+
+	// If container is running, live-update its network in guest and refresh iptables
+	if c.Status == "running" {
+		liveScript := fmt.Sprintf(`
+set +e
+ip addr flush dev eth0 2>/dev/null
+ip addr add %s/24 dev eth0 2>/dev/null
+ip route add default via 10.0.3.1 dev eth0 2>/dev/null
+`, newIP)
+		_ = exec.Command("lxc-attach", "-n", lxcName, "--", "sh", "-c", liveScript).Run()
+	}
+
+	// Re-apply port mappings to bind to the new internal IP
+	if err := m.ApplyPortMappings(id); err != nil {
+		return fmt.Errorf("failed to re-apply port mappings for %s: %v", lxcName, err)
+	}
+
+	return nil
+}
+
 func (m *Manager) ensureLANHostAccess(c *config.Container) error {
 	if c == nil || !c.UsesLANIPv4() || strings.TrimSpace(c.IP) == "" {
 		return nil
@@ -2082,6 +2205,7 @@ func (m *Manager) StartContainer(id int) error {
 			config.SaveConfig()
 		}
 	}
+	_ = m.SyncLXCDHCPStaticHosts()
 
 	EnsureAssignedPublicIPv4s(c.PublicIPv4s)
 

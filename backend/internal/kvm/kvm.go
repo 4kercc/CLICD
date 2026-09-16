@@ -2217,6 +2217,66 @@ func (m *Manager) GetContainerIP(name string) (string, error) {
 	return "", fmt.Errorf("no IPv4 address found for %s", name)
 }
 
+// SetStaticNATIP binds a static DHCP lease for a KVM domain in libvirt default network.
+func (m *Manager) SetStaticNATIP(id int, newIP string) error {
+	c := config.FindContainer(id)
+	if c == nil {
+		return fmt.Errorf("container not found: %d", id)
+	}
+	if !c.IsKVM() {
+		return fmt.Errorf("container %d is an LXC container", id)
+	}
+
+	newIP = strings.TrimSpace(newIP)
+	if !config.IsValidKVMNATIP(newIP) {
+		return fmt.Errorf("invalid KVM NAT IP address %s (must be in %s and not gateway)", newIP, config.KVMNATNetwork().Subnet)
+	}
+
+	// Check collision
+	for _, other := range config.AppConfig.Containers {
+		if other.ID != id && other.IP == newIP {
+			return fmt.Errorf("IP %s is already assigned to container %s", newIP, other.Name)
+		}
+	}
+
+	if c.MACAddress == "" {
+		if mac := domainMACAddress(c.VirshName()); mac != "" {
+			c.MACAddress = mac
+		}
+	}
+	if c.MACAddress == "" {
+		return fmt.Errorf("container %s has no MAC address", c.Name)
+	}
+
+	mac := strings.ToLower(strings.TrimSpace(c.MACAddress))
+	virshName := c.VirshName()
+
+	// 1. Remove any old host entry for this MAC if present
+	_ = exec.Command("virsh", "net-update", "default", "delete", "ip-dhcp-host",
+		fmt.Sprintf("<host mac='%s'/>", mac), "--live", "--config").Run()
+
+	// 2. Add new static host entry
+	hostXML := fmt.Sprintf("<host mac='%s' name='%s' ip='%s'/>", mac, virshName, newIP)
+	out, err := exec.Command("virsh", "net-update", "default", "add", "ip-dhcp-host", hostXML, "--live", "--config").CombinedOutput()
+	if err != nil {
+		// Try without --live if domain/network is in specific state
+		out2, err2 := exec.Command("virsh", "net-update", "default", "add", "ip-dhcp-host", hostXML, "--config").CombinedOutput()
+		if err2 != nil {
+			return fmt.Errorf("failed to update libvirt DHCP lease: %v, output: %s / %s", err, string(out), string(out2))
+		}
+	}
+
+	c.IP = newIP
+	_ = config.SaveConfig()
+
+	// Re-apply port mappings to bind to the new internal IP
+	if err := lxc.NewManager().ApplyPortMappings(id); err != nil {
+		return fmt.Errorf("failed to re-apply port mappings for %s: %v", c.Name, err)
+	}
+
+	return nil
+}
+
 func (m *Manager) validateHost(skipCloudInit bool) error {
 	for _, name := range []string{"virsh", "qemu-img"} {
 		if err := requireCommand(name); err != nil {

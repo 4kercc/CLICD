@@ -7,6 +7,7 @@ import {
   updateRoutingIPv6Prefixes,
   updateRoutingIPv4Pool,
   updateRoutingPools,
+  updateRoutingNATAllocation,
   type IPv4Route,
   type IPv6Route,
   type LANDHCPRoute,
@@ -37,6 +38,9 @@ export default function Routing() {
   const [editingIPv6, setEditingIPv6] = useState(false)
   const [savingIPv6, setSavingIPv6] = useState(false)
   const [ipv6Draft, setIPv6Draft] = useState<(IPv6PrefixInfo & { _id: number })[]>([])
+  const [editingNATAlloc, setEditingNATAlloc] = useState<NAT4Allocation | null>(null)
+  const [natAllocDraftIP, setNatAllocDraftIP] = useState('')
+  const [savingNATAlloc, setSavingNATAlloc] = useState(false)
   const [nat4AllocPage, setNat4AllocPage] = useState(1)
   const [nat4AllocSearch, setNat4AllocSearch] = useState('')
   const [nat4Page, setNat4Page] = useState(1)
@@ -231,6 +235,30 @@ export default function Routing() {
       alert(err?.response?.data?.message || text.saveIPv6PrefixesFailed)
     } finally {
       setSavingIPv6(false)
+    }
+  }
+
+  const startEditNATAllocation = (item: NAT4Allocation) => {
+    setEditingNATAlloc(item)
+    setNatAllocDraftIP(item.ip || '')
+  }
+
+  const saveNATAllocation = async () => {
+    if (!editingNATAlloc) return
+    const ip = natAllocDraftIP.trim()
+    if (!ip) {
+      alert(text.guestIPv4Required)
+      return
+    }
+    setSavingNATAlloc(true)
+    try {
+      await updateRoutingNATAllocation(editingNATAlloc.container_id, ip)
+      await fetchData()
+      setEditingNATAlloc(null)
+    } catch (err: any) {
+      alert(err?.response?.data?.message || text.saveNATAllocationFailed)
+    } finally {
+      setSavingNATAlloc(false)
     }
   }
 
@@ -626,6 +654,7 @@ export default function Routing() {
                     <th className="px-4 py-3 text-left font-medium">{text.bridge}</th>
                     <th className="px-4 py-3 text-left font-medium">MAC</th>
                     <th className="px-4 py-3 text-left font-medium">{text.status}</th>
+                    <th className="px-4 py-3 text-right font-medium">{text.action}</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
@@ -645,6 +674,15 @@ export default function Routing() {
                       <td className="px-4 py-3 font-mono text-xs text-gray-600">{item.bridge}</td>
                       <td className="px-4 py-3 font-mono text-xs text-gray-600">{item.mac_address || '-'}</td>
                       <td className="px-4 py-3"><StatusBadge status={item.status} language={language} /></td>
+                      <td className="px-4 py-3 text-right">
+                        <button
+                          onClick={() => startEditNATAllocation(item)}
+                          className="inline-flex items-center gap-1.5 rounded-md border border-gray-300 px-2.5 py-1.5 text-xs text-gray-700 hover:bg-gray-50"
+                        >
+                          <Pencil className="h-3.5 w-3.5" />
+                          {text.edit}
+                        </button>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -740,6 +778,65 @@ export default function Routing() {
           </>
         )}
       </Panel>
+
+      {editingNATAlloc && (
+        <RouteModal title={text.editNATAllocation} onClose={() => setEditingNATAlloc(null)}>
+          <div className="space-y-4">
+            <div className="rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-sm">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div className="text-xs font-medium uppercase text-gray-400">{text.container}</div>
+                  <div className="mt-1 font-medium text-gray-800">{editingNATAlloc.container_name} ({editingNATAlloc.lxc_name})</div>
+                </div>
+                <div className="text-right">
+                  <div className="text-xs font-medium uppercase text-gray-400">{text.virtualization}</div>
+                  <div className="mt-1 font-mono text-xs uppercase text-gray-600">{editingNATAlloc.virtualization} · {editingNATAlloc.bridge}</div>
+                </div>
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <label className="block text-xs font-medium text-gray-700">{text.guestIPv4}</label>
+                <input
+                  type="text"
+                  value={natAllocDraftIP}
+                  onChange={(e) => setNatAllocDraftIP(e.target.value)}
+                  placeholder={`例如: ${editingNATAlloc.subnet.replace(/0\/\d+$/, '100')}`}
+                  className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm text-black focus:border-black focus:outline-none focus:ring-1 focus:ring-black"
+                />
+                <p className="mt-1 text-xs text-gray-500">
+                  {text.targetSubnet}: <span className="font-mono text-gray-700">{editingNATAlloc.subnet}</span> ({text.gatewayIP}: <span className="font-mono text-gray-700">{editingNATAlloc.gateway}</span>)
+                </p>
+              </div>
+
+              {editingNATAlloc.mac_address && (
+                <div className="rounded-md bg-gray-50 px-3 py-2 text-xs text-gray-600">
+                  MAC 地址: <span className="font-mono font-medium text-gray-800">{editingNATAlloc.mac_address}</span> （修改后将自动固化该 MAC 与新 IP 的静态租期）
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center justify-end gap-2 border-t border-gray-100 pt-3">
+              <button
+                onClick={() => setEditingNATAlloc(null)}
+                disabled={savingNATAlloc}
+                className="rounded-md border border-gray-300 px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+              >
+                {text.cancel}
+              </button>
+              <button
+                onClick={saveNATAllocation}
+                disabled={savingNATAlloc}
+                className="inline-flex items-center gap-1.5 rounded-md bg-black px-3 py-1.5 text-xs text-white hover:bg-gray-800 disabled:opacity-50"
+              >
+                <Save className="h-3.5 w-3.5" />
+                {savingNATAlloc ? text.saving : text.save}
+              </button>
+            </div>
+          </div>
+        </RouteModal>
+      )}
     </div>
   )
 }
@@ -1046,6 +1143,11 @@ const routingText = {
     stopped: '已停止',
     unknown: '未知',
     large: '大量',
+    editNATAllocation: '修改内网 IP',
+    guestIPv4Required: '内网 IPv4 地址不能为空',
+    saveNATAllocationFailed: '修改内网 IP 失败',
+    targetSubnet: '所属子网',
+    gatewayIP: '网关 IP',
   },
   en: {
     pageTitle: 'Routing',
@@ -1127,6 +1229,11 @@ const routingText = {
     stopped: 'Stopped',
     unknown: 'Unknown',
     large: 'large',
+    editNATAllocation: 'Edit Internal NAT IP',
+    guestIPv4Required: 'Internal IPv4 address is required',
+    saveNATAllocationFailed: 'Failed to update internal NAT IP',
+    targetSubnet: 'Subnet',
+    gatewayIP: 'Gateway',
   },
 } as const
 
