@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"clicd/internal/config"
 	"clicd/internal/kvm"
@@ -14,6 +15,155 @@ import (
 )
 
 var kvmManager = kvm.NewManager()
+
+func init() {
+	config.StartContainerCallback = startByRuntime
+	config.StopContainerCallback = stopByRuntime
+	config.RestartContainerCallback = restartByRuntime
+	config.ResetPasswordCallback = func(id int) (string, error) {
+		return resetPasswordByRuntime(id, "")
+	}
+	config.CreateSnapshotCallback = func(id int, user string) (string, error) {
+		snap, err := createSnapshotByRuntime(id, user, false, 0)
+		if err != nil {
+			return "", err
+		}
+		remote.SyncSnapshotToRemoteStorage(&snap)
+		return snap.ID, nil
+	}
+	config.BatchActionCallback = func(ids []int, action string) error {
+		for _, id := range ids {
+			c := config.FindContainer(id)
+			if c == nil {
+				continue
+			}
+			var taskType TaskType
+			switch action {
+			case "start":
+				taskType = TaskStart
+			case "stop":
+				taskType = TaskStop
+			case "restart":
+				taskType = TaskRestart
+			case "snapshot":
+				taskType = TaskSnapshot
+			default:
+				continue
+			}
+			globalQueue.enqueueSingleWithUser(id, c.Name, taskType, "", "telegram:admin")
+		}
+		return nil
+	}
+
+	config.BatchCreateQuickVMCallback = func(namePrefix string, count int, templateID string, vcpu float64, ramMB int, diskGB int, isKVM bool) (int, error) {
+		if count <= 0 {
+			count = 1
+		}
+		if count > 20 {
+			count = 20
+		}
+		if vcpu <= 0 {
+			vcpu = 1
+		}
+		if ramMB <= 0 {
+			ramMB = 1024
+		}
+		if diskGB <= 0 {
+			diskGB = 10
+		}
+		virt := config.VirtualizationLXC
+		if isKVM {
+			virt = config.VirtualizationKVM
+		}
+		if templateID == "" {
+			if isKVM {
+				templateID = "debian-12-generic-amd64"
+			} else {
+				templateID = "debian-bookworm"
+			}
+		}
+
+		assignNAT := true
+		var configs []lxc.ContainerConfig
+		for i := 1; i <= count; i++ {
+			cName := fmt.Sprintf("%s-%d", namePrefix, i)
+			if count == 1 {
+				cName = namePrefix
+			}
+			// Check duplicate name
+			if config.FindContainerByName(cName) != nil {
+				cName = fmt.Sprintf("%s-%d", namePrefix, time.Now().Unix()%10000+int64(i))
+			}
+			configs = append(configs, lxc.ContainerConfig{
+				Name:               cName,
+				Virtualization:     virt,
+				TemplateID:         templateID,
+				VCPU:               vcpu,
+				RAMMB:              ramMB,
+				DiskGB:             diskGB,
+				AssignNAT:          &assignNAT,
+				PortMappingCount:   3,
+				SSHAuthMode:        lxc.SSHAuthAutoPassword,
+				SnapshotLimit:      config.DefaultSnapshotLimit,
+			})
+		}
+		planned, err := lxc.ReserveBatchCreateNATPorts(configs)
+		if err != nil {
+			return 0, err
+		}
+		ids := globalQueue.EnqueueBatchCreateWithAudit(planned, "telegram:admin", "127.0.0.1", "TelegramBot")
+		return len(ids), nil
+	}
+
+	config.BatchAdjustQuickConfigCallback = func(ids []int, vcpu float64, ramMB int, diskGB int, downMbps int, upMbps int) (int, error) {
+		count := 0
+		for _, id := range ids {
+			c := config.FindContainer(id)
+			if c == nil {
+				continue
+			}
+			if vcpu > 0 {
+				c.VCPU = vcpu
+			}
+			if ramMB > 0 {
+				c.RAMMB = ramMB
+			}
+			if diskGB > 0 && diskGB >= c.DiskGB {
+				c.DiskGB = diskGB
+			}
+			if downMbps >= 0 {
+				c.NetworkDownMbps = downMbps
+			}
+			if upMbps >= 0 {
+				c.NetworkUpMbps = upMbps
+			}
+			if c.Status == "running" {
+				_ = applyLimitsByRuntime(c)
+			}
+			count++
+		}
+		if count > 0 {
+			_ = config.SaveConfig()
+		}
+		return count, nil
+	}
+
+	config.BatchRestoreLatestSnapshotCallback = func(ids []int) (int, error) {
+		restoredCount := 0
+		for _, id := range ids {
+			snaps := config.ContainerSnapshots(id)
+			if len(snaps) == 0 {
+				continue
+			}
+			sortSnapshotsNewestFirst(snaps)
+			latest := snaps[0]
+			if err := restoreSnapshotByRuntime(latest.ID); err == nil {
+				restoredCount++
+			}
+		}
+		return restoredCount, nil
+	}
+}
 
 const noNetworkSelectedMessage = "请勾选任意一个可用网络"
 

@@ -9,6 +9,7 @@ import (
 
 	"clicd/internal/api"
 	"clicd/internal/config"
+	"clicd/internal/telegram"
 )
 
 // webFS holds embedded frontend files
@@ -96,6 +97,8 @@ func setupRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/security/logs", corsMiddleware(api.AdminMiddleware(api.HandleSecurityLogs)))
 	mux.HandleFunc("/api/security/summary", corsMiddleware(api.AdminMiddleware(api.HandleContainerSecuritySummary)))
 	mux.HandleFunc("/api/security/settings", corsMiddleware(api.AdminMiddleware(api.HandleSecuritySettings)))
+	mux.HandleFunc("/api/telegram", corsMiddleware(api.AdminMiddleware(api.HandleTelegramSettings)))
+	mux.HandleFunc("/api/telegram/test", corsMiddleware(api.AdminMiddleware(api.HandleTelegramTest)))
 	mux.HandleFunc("/api/ssh-ticket", corsMiddleware(api.AuthMiddleware(api.HandleWebSSHTicket)))
 	mux.HandleFunc("/api/ssh", api.HandleWebSSH) // WebSocket
 	mux.HandleFunc("/api/vnc-ticket", corsMiddleware(api.AuthMiddleware(api.HandleVNCTicket)))
@@ -155,6 +158,8 @@ func setupRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/security/logs", corsMiddleware(api.AuthMiddleware(api.ScopeMiddleware("security:read", api.HandleSecurityLogs))))
 	mux.HandleFunc("/api/v1/security/summary", corsMiddleware(api.AuthMiddleware(api.ScopeMiddleware("security:read", api.HandleContainerSecuritySummary))))
 	mux.HandleFunc("/api/v1/security/settings", corsMiddleware(api.AuthMiddleware(api.HandleSecuritySettings)))
+	mux.HandleFunc("/api/v1/telegram", corsMiddleware(api.AdminMiddleware(api.HandleTelegramSettings)))
+	mux.HandleFunc("/api/v1/telegram/test", corsMiddleware(api.AdminMiddleware(api.HandleTelegramTest)))
 	mux.HandleFunc("/api/v1/ssh-ticket", corsMiddleware(api.AuthMiddleware(api.HandleWebSSHTicket)))
 	mux.HandleFunc("/api/v1/vnc-ticket", corsMiddleware(api.AuthMiddleware(api.HandleVNCTicket)))
 	mux.HandleFunc("/api/v1/api-keys", corsMiddleware(api.AuthMiddleware(api.HandleApiKeys)))
@@ -206,6 +211,7 @@ func Run() error {
 	webFS = GetEmbeddedFS()
 	api.StartHostMetricSampler()
 	api.StartContainerMetricSampler()
+	telegram.Global().Start()
 
 	mux := http.NewServeMux()
 	setupRoutes(mux)

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"clicd/internal/config"
+	"clicd/internal/telegram"
 )
 
 // SecurityAlert represents a detected abuse event.
@@ -742,6 +743,7 @@ func (ss *SecurityScanner) addAlert(name, alertType, severity, srcIP, dstIP stri
 
 	ss.alerts = append(ss.alerts, alert)
 	config.AddAuditLog("security_"+alertType, name, fmt.Sprintf("[%s] %s", severity, detail), "system")
+	telegram.Global().SendSecurityAlert(alertType, name, severity, detail, srcIP, dstIP, port)
 	shouldShutdown = config.AppConfig.SecurityAutoShutdown
 
 	if len(ss.alerts) > 200 {

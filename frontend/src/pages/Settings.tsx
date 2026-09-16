@@ -1,5 +1,5 @@
 import { Dispatch, SetStateAction, useCallback, useEffect, useState } from 'react'
-import { Check, Clock, Copy, Globe, KeyRound, ListTodo, Lock, LogIn, Minus, Monitor, Plus, QrCode, RefreshCw, Save, Shield, ShieldCheck, Terminal, Upload, UserCog } from 'lucide-react'
+import { Bot, Check, Clock, Copy, Globe, KeyRound, ListTodo, Lock, LogIn, MessageSquare, Minus, Monitor, Plus, QrCode, RefreshCw, Save, Send, Shield, ShieldCheck, Terminal, Upload, UserCog } from 'lucide-react'
 import {
   changePassword,
   changeUsername,
@@ -9,6 +9,7 @@ import {
   getPanelAccessPolicy,
   getSSLSettings,
   getTaskQueueSettings,
+  getTelegramSettings,
   getTOTPStatus,
   getWebSSHOriginSettings,
   LoginLog,
@@ -16,10 +17,13 @@ import {
   setupTOTP,
   SSLSettings,
   TaskQueueSettings,
+  TelegramSettings,
+  testTelegramMessage,
   TOTPSetupResponse,
   updateTaskQueueSettings,
   updateSSLSettings,
   updatePanelAccessPolicy,
+  updateTelegramSettings,
   updateWebSSHOriginSettings,
   WebSSHOriginSettings,
 } from '../services/api'
@@ -27,12 +31,13 @@ import { useDialog } from '../components/Dialog'
 import { useAuth } from '../contexts/AuthContext'
 import { useLanguage } from '../contexts/LanguageContext'
 
-type SettingsSection = 'tasks' | 'account' | '2fa' | 'access' | 'webssh' | 'ssl' | 'logs'
+type SettingsSection = 'tasks' | 'account' | '2fa' | 'telegram' | 'access' | 'webssh' | 'ssl' | 'logs'
 
 const settingsSections = [
   { id: 'tasks', label: '任务队列', icon: ListTodo },
   { id: 'account', label: '账号设置', icon: UserCog },
   { id: '2fa', label: '两步验证 (2FA)', icon: KeyRound },
+  { id: 'telegram', label: 'Telegram Bot', icon: MessageSquare },
   { id: 'access', label: '访问来源', icon: Shield },
   { id: 'webssh', label: 'WebSSH 访问', icon: Terminal },
   { id: 'ssl', label: 'SSL 证书', icon: ShieldCheck },
@@ -79,6 +84,15 @@ export default function Settings() {
   const [allowedSourcesText, setAllowedSourcesText] = useState('')
   const [trustedProxiesText, setTrustedProxiesText] = useState('')
   const [savingAccessPolicy, setSavingAccessPolicy] = useState(false)
+  const [telegram, setTelegram] = useState<TelegramSettings | null>(null)
+  const [tgEnabled, setTgEnabled] = useState(false)
+  const [tgToken, setTgToken] = useState('')
+  const [tgChatIDsText, setTgChatIDsText] = useState('')
+  const [tgNotifyAlerts, setTgNotifyAlerts] = useState(true)
+  const [tgNotifyEvents, setTgNotifyEvents] = useState(true)
+  const [tgProxyURL, setTgProxyURL] = useState('')
+  const [savingTelegram, setSavingTelegram] = useState(false)
+  const [testingTelegram, setTestingTelegram] = useState(false)
   const [activeSection, setActiveSection] = useState<SettingsSection>('tasks')
 
   const fetchLogs = useCallback(async () => {
@@ -156,6 +170,23 @@ export default function Settings() {
     }
   }, [])
 
+  const fetchTelegram = useCallback(async () => {
+    try {
+      const res = await getTelegramSettings()
+      const data = res.data.data
+      if (!data) return
+      setTelegram(data)
+      setTgEnabled(data.enabled)
+      setTgToken(data.bot_token || '')
+      setTgChatIDsText((data.admin_chat_ids || []).join('\n'))
+      setTgNotifyAlerts(data.notify_alerts)
+      setTgNotifyEvents(data.notify_events)
+      setTgProxyURL(data.proxy_url || '')
+    } catch (err) {
+      console.error(err)
+    }
+  }, [])
+
   useEffect(() => {
     fetchLogs()
     fetchSSL()
@@ -163,13 +194,14 @@ export default function Settings() {
     fetchTaskQueue()
     fetchAccessPolicy()
     fetchTOTPStatus()
+    fetchTelegram()
     const logTimer = setInterval(fetchLogs, 15000)
     const taskTimer = setInterval(fetchTaskQueue, 5000)
     return () => {
       clearInterval(logTimer)
       clearInterval(taskTimer)
     }
-  }, [fetchAccessPolicy, fetchLogs, fetchSSL, fetchTaskQueue, fetchTOTPStatus, fetchWebSSHOrigins])
+  }, [fetchAccessPolicy, fetchLogs, fetchSSL, fetchTaskQueue, fetchTelegram, fetchTOTPStatus, fetchWebSSHOrigins])
 
   const handleSaveTaskQueue = async () => {
     const concurrency = Math.max(1, Math.min(16, Math.round(taskConcurrency || 1)))
@@ -247,6 +279,79 @@ export default function Settings() {
     setAccessEnabled(enabled)
     if (enabled && !allowedSourcesText.trim() && accessPolicy?.current_source) {
       setAllowedSourcesText(accessPolicy.current_source)
+    }
+  }
+
+  const handleSaveTelegram = async () => {
+    const parseChatIDs = (val: string) =>
+      val
+        .split(/[\s,;]+/)
+        .map((item) => item.trim())
+        .filter(Boolean)
+        .map((item) => Number(item))
+        .filter((n) => Number.isFinite(n) && n !== 0)
+
+    setSavingTelegram(true)
+    try {
+      const res = await updateTelegramSettings({
+        enabled: tgEnabled,
+        bot_token: tgToken.trim(),
+        admin_chat_ids: parseChatIDs(tgChatIDsText),
+        notify_alerts: tgNotifyAlerts,
+        notify_events: tgNotifyEvents,
+        proxy_url: tgProxyURL.trim(),
+      })
+      const data = res.data.data
+      if (data) {
+        setTelegram(data)
+        setTgEnabled(data.enabled)
+        setTgToken(data.bot_token || '')
+        setTgChatIDsText((data.admin_chat_ids || []).join('\n'))
+        setTgNotifyAlerts(data.notify_alerts)
+        setTgNotifyEvents(data.notify_events)
+        setTgProxyURL(data.proxy_url || '')
+      }
+      dialog.alert('完成', tgEnabled ? 'Telegram Bot 设置已保存并已自动连接' : 'Telegram Bot 服务已关闭')
+    } catch (err: unknown) {
+      const e = err as { response?: { data?: { message?: string } } }
+      dialog.alert('失败', e.response?.data?.message || 'Telegram Bot 设置保存失败')
+    } finally {
+      setSavingTelegram(false)
+    }
+  }
+
+  const handleTestTelegram = async () => {
+    const parseChatIDs = (val: string) =>
+      val
+        .split(/[\s,;]+/)
+        .map((item) => item.trim())
+        .filter(Boolean)
+        .map((item) => Number(item))
+        .filter((n) => Number.isFinite(n) && n !== 0)
+
+    const chatIDs = parseChatIDs(tgChatIDsText)
+    if (!tgToken.trim()) {
+      dialog.alert('提示', '请先输入 Bot Token')
+      return
+    }
+    if (chatIDs.length === 0) {
+      dialog.alert('提示', '请至少输入一个管理员 Chat ID')
+      return
+    }
+
+    setTestingTelegram(true)
+    try {
+      await testTelegramMessage({
+        bot_token: tgToken.trim(),
+        admin_chat_ids: chatIDs,
+        proxy_url: tgProxyURL.trim(),
+      })
+      dialog.alert('成功', '测试消息已成功发送至 Telegram，请打开 TG 查看')
+    } catch (err: unknown) {
+      const e = err as { response?: { data?: { message?: string } } }
+      dialog.alert('失败', e.response?.data?.message || '发送测试消息失败')
+    } finally {
+      setTestingTelegram(false)
     }
   }
 
@@ -629,6 +734,28 @@ export default function Settings() {
             />
           )}
 
+          {activeSection === 'telegram' && (
+            <TelegramBotCard
+              enabled={tgEnabled}
+              token={tgToken}
+              chatIDsText={tgChatIDsText}
+              notifyAlerts={tgNotifyAlerts}
+              notifyEvents={tgNotifyEvents}
+              proxyURL={tgProxyURL}
+              saving={savingTelegram}
+              testing={testingTelegram}
+              onEnabledChange={setTgEnabled}
+              onTokenChange={setTgToken}
+              onChatIDsTextChange={setTgChatIDsText}
+              onNotifyAlertsChange={setTgNotifyAlerts}
+              onNotifyEventsChange={setTgNotifyEvents}
+              onProxyURLChange={setTgProxyURL}
+              onRefresh={fetchTelegram}
+              onSave={handleSaveTelegram}
+              onTest={handleTestTelegram}
+            />
+          )}
+
           {activeSection === 'access' && (
             <PanelAccessPolicyCard
               policy={accessPolicy}
@@ -783,6 +910,180 @@ function PanelAccessPolicyCard(props: PanelAccessPolicyCardProps) {
           <Save className="h-4 w-4" />
           {props.saving ? '保存中...' : '保存访问策略'}
         </button>
+      </div>
+    </div>
+  )
+}
+
+interface TelegramBotCardProps {
+  enabled: boolean
+  token: string
+  chatIDsText: string
+  notifyAlerts: boolean
+  notifyEvents: boolean
+  proxyURL: string
+  saving: boolean
+  testing: boolean
+  onEnabledChange: (enabled: boolean) => void
+  onTokenChange: (token: string) => void
+  onChatIDsTextChange: (text: string) => void
+  onNotifyAlertsChange: (enabled: boolean) => void
+  onNotifyEventsChange: (enabled: boolean) => void
+  onProxyURLChange: (url: string) => void
+  onRefresh: () => void
+  onSave: () => void
+  onTest: () => void
+}
+
+function TelegramBotCard(props: TelegramBotCardProps) {
+  const [showToken, setShowToken] = useState(false)
+
+  return (
+    <div className="rounded-lg border border-gray-200 bg-white p-5 dark:border-gray-700 dark:bg-gray-900">
+      <div className="mb-4 flex items-center justify-between gap-3">
+        <div>
+          <h2 className="flex items-center gap-2 text-sm font-semibold text-black dark:text-white">
+            <MessageSquare className="h-4 w-4" />Telegram Bot 管理与警报推送
+          </h2>
+          <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">通过 Telegram Bot 随时随地查看母鸡负载、控制小鸡开关机、打快照、重置密码及接收安全报警</p>
+        </div>
+        <button type="button" onClick={props.onRefresh} className="rounded-md border border-gray-200 p-1.5 text-gray-500 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-400 dark:hover:bg-gray-800" title="刷新">
+          <RefreshCw className="h-4 w-4" />
+        </button>
+      </div>
+
+      <div className="flex items-center justify-between gap-4 border-y border-gray-100 py-3 dark:border-gray-800">
+        <div>
+          <div className="text-sm font-medium text-gray-800 dark:text-gray-200">启用 Telegram Bot 服务</div>
+          <div className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">开启后将启动长轮询服务，接收 Telegram 命令控制并推送安全警报</div>
+        </div>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={props.enabled}
+          onClick={() => props.onEnabledChange(!props.enabled)}
+          className={`relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full border transition-colors focus:outline-none focus:ring-2 focus:ring-black focus:ring-offset-2 dark:focus:ring-white dark:focus:ring-offset-gray-900 ${
+            props.enabled
+              ? 'border-black bg-black dark:border-white dark:bg-white'
+              : 'border-gray-300 bg-gray-300 dark:border-gray-600 dark:bg-gray-700'
+          }`}
+          title={props.enabled ? '关闭 Telegram Bot' : '启用 Telegram Bot'}
+        >
+          <span
+            aria-hidden="true"
+            className={`pointer-events-none absolute left-0.5 top-0.5 h-5 w-5 rounded-full shadow-sm ring-1 ring-black/5 transition-[transform,background-color] duration-200 ${
+              props.enabled
+                ? 'translate-x-5 bg-white dark:bg-gray-900'
+                : 'translate-x-0 bg-white dark:bg-gray-200'
+            }`}
+          />
+        </button>
+      </div>
+
+      <div className="mt-4 space-y-4">
+        <div>
+          <label className="mb-1.5 block text-xs font-medium text-gray-700 dark:text-gray-300">
+            Bot Token (来自 @BotFather)
+          </label>
+          <div className="relative">
+            <input
+              type={showToken ? 'text' : 'password'}
+              value={props.token}
+              onChange={(e) => props.onTokenChange(e.target.value)}
+              placeholder="例如: 123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ"
+              className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 pr-16 font-mono text-xs text-black outline-none focus:border-black focus:ring-1 focus:ring-black dark:border-gray-700 dark:bg-gray-950 dark:text-white dark:focus:border-white dark:focus:ring-white"
+            />
+            <button
+              type="button"
+              onClick={() => setShowToken(!showToken)}
+              className="absolute right-2 top-1/2 -translate-y-1/2 rounded px-2 py-1 text-[11px] text-gray-500 hover:text-black dark:hover:text-white"
+            >
+              {showToken ? '隐藏' : '显示'}
+            </button>
+          </div>
+          <p className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
+            在 Telegram 中搜索 <a href="https://t.me/BotFather" target="_blank" rel="noreferrer" className="underline hover:text-black dark:hover:text-white">@BotFather</a> 发送 <code>/newbot</code> 即可免费获取 Bot Token。
+          </p>
+        </div>
+
+        <div>
+          <label className="mb-1.5 block text-xs font-medium text-gray-700 dark:text-gray-300">
+            管理员 Chat ID 白名单（每行一个数字 ID）
+          </label>
+          <textarea
+            value={props.chatIDsText}
+            onChange={(e) => props.onChatIDsTextChange(e.target.value)}
+            rows={3}
+            placeholder={'123456789\n987654321'}
+            className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 font-mono text-xs text-black outline-none focus:border-black focus:ring-1 focus:ring-black dark:border-gray-700 dark:bg-gray-950 dark:text-white dark:focus:border-white dark:focus:ring-white"
+          />
+          <p className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
+            仅白名单内的 Telegram 用户能够操作 Bot。在 TG 中向 <a href="https://t.me/userinfobot" target="_blank" rel="noreferrer" className="underline hover:text-black dark:hover:text-white">@userinfobot</a> 发送任意消息即可查看您的数字 Chat ID。
+          </p>
+        </div>
+
+        <div>
+          <label className="mb-1.5 block text-xs font-medium text-gray-700 dark:text-gray-300">
+            HTTP / SOCKS5 代理（可选，若服务器能直接访问 Telegram API 可留空）
+          </label>
+          <input
+            type="text"
+            value={props.proxyURL}
+            onChange={(e) => props.onProxyURLChange(e.target.value)}
+            placeholder="例如: socks5://127.0.0.1:10808 或 http://127.0.0.1:7890"
+            className="w-full rounded-md border border-gray-300 bg-white px-3 py-2 font-mono text-xs text-black outline-none focus:border-black focus:ring-1 focus:ring-black dark:border-gray-700 dark:bg-gray-950 dark:text-white dark:focus:border-white dark:focus:ring-white"
+          />
+        </div>
+
+        <div className="grid gap-3 pt-2 sm:grid-cols-2">
+          <label className="flex items-start gap-2.5 rounded-lg border border-gray-200 bg-gray-50/50 p-3 text-xs dark:border-gray-800 dark:bg-gray-950">
+            <input
+              type="checkbox"
+              checked={props.notifyAlerts}
+              onChange={(e) => props.onNotifyAlertsChange(e.target.checked)}
+              className="mt-0.5 h-4 w-4 rounded border-gray-300"
+            />
+            <div>
+              <div className="font-medium text-gray-800 dark:text-gray-200">推送安全事件警报</div>
+              <div className="mt-0.5 text-gray-500 dark:text-gray-400">检测到挖矿特征、端口暴力破解或异常扫描时实时向 TG 推送报警卡片</div>
+            </div>
+          </label>
+
+          <label className="flex items-start gap-2.5 rounded-lg border border-gray-200 bg-gray-50/50 p-3 text-xs dark:border-gray-800 dark:bg-gray-950">
+            <input
+              type="checkbox"
+              checked={props.notifyEvents}
+              onChange={(e) => props.onNotifyEventsChange(e.target.checked)}
+              className="mt-0.5 h-4 w-4 rounded border-gray-300"
+            />
+            <div>
+              <div className="font-medium text-gray-800 dark:text-gray-200">推送生命周期与流量通知</div>
+              <div className="mt-0.5 text-gray-500 dark:text-gray-400">实例到期提醒或流量超标自动停机时向管理员发送通知</div>
+            </div>
+          </label>
+        </div>
+
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-gray-100 pt-4 dark:border-gray-800">
+          <button
+            type="button"
+            onClick={props.onTest}
+            disabled={props.testing || !props.token.trim()}
+            className="inline-flex items-center gap-1.5 rounded-md border border-gray-300 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-gray-800"
+          >
+            <Send className="h-3.5 w-3.5" />
+            {props.testing ? '发送中...' : '发送测试消息'}
+          </button>
+
+          <button
+            type="button"
+            onClick={props.onSave}
+            disabled={props.saving}
+            className="inline-flex items-center justify-center gap-2 rounded-md bg-black px-4 py-2 text-sm text-white hover:bg-gray-800 disabled:opacity-50 dark:bg-white dark:text-black dark:hover:bg-gray-200"
+          >
+            <Save className="h-4 w-4" />
+            {props.saving ? '保存中...' : '保存 Telegram 设置'}
+          </button>
+        </div>
       </div>
     </div>
   )

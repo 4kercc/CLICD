@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"clicd/internal/config"
+	"clicd/internal/telegram"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -207,4 +209,149 @@ func HandleAdminUsernameChange(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: "用户名修改成功"})
+}
+
+// Telegram Settings DTO
+type TelegramSettingsResponse struct {
+	Enabled      bool    `json:"enabled"`
+	BotToken     string  `json:"bot_token"`
+	AdminChatIDs []int64 `json:"admin_chat_ids"`
+	NotifyAlerts bool    `json:"notify_alerts"`
+	NotifyEvents bool    `json:"notify_events"`
+	ProxyURL     string  `json:"proxy_url"`
+}
+
+type TelegramSettingsRequest struct {
+	Enabled      bool    `json:"enabled"`
+	BotToken     string  `json:"bot_token"`
+	AdminChatIDs []int64 `json:"admin_chat_ids"`
+	NotifyAlerts bool    `json:"notify_alerts"`
+	NotifyEvents bool    `json:"notify_events"`
+	ProxyURL     string  `json:"proxy_url"`
+}
+
+func maskToken(token string) string {
+	token = strings.TrimSpace(token)
+	if len(token) <= 10 {
+		if len(token) == 0 {
+			return ""
+		}
+		return "******"
+	}
+	return token[:6] + "..." + token[len(token)-4:]
+}
+
+// HandleTelegramSettings returns or updates Telegram Bot settings
+func HandleTelegramSettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		if !requireScope(w, r, "admin:access") {
+			return
+		}
+		tg := config.AppConfig.Telegram
+		jsonResponse(w, http.StatusOK, APIResponse{
+			Success: true,
+			Data: TelegramSettingsResponse{
+				Enabled:      tg.Enabled,
+				BotToken:     maskToken(tg.BotToken),
+				AdminChatIDs: tg.AdminChatIDs,
+				NotifyAlerts: tg.NotifyAlerts,
+				NotifyEvents: tg.NotifyEvents,
+				ProxyURL:     tg.ProxyURL,
+			},
+		})
+	case http.MethodPut, http.MethodPost:
+		if !requireScope(w, r, "admin:access") {
+			return
+		}
+		var req TelegramSettingsRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Invalid request body"})
+			return
+		}
+
+		cleanIDs := make([]int64, 0, len(req.AdminChatIDs))
+		seen := map[int64]bool{}
+		for _, id := range req.AdminChatIDs {
+			if id != 0 && !seen[id] {
+				cleanIDs = append(cleanIDs, id)
+				seen[id] = true
+			}
+		}
+
+		newToken := strings.TrimSpace(req.BotToken)
+		// 如果前端传入的是脱敏掩码，则保留原 token 不变
+		if strings.Contains(newToken, "...") && len(newToken) <= 15 {
+			newToken = config.AppConfig.Telegram.BotToken
+		}
+
+		config.AppConfig.Telegram = config.TelegramConfig{
+			Enabled:      req.Enabled,
+			BotToken:     newToken,
+			AdminChatIDs: cleanIDs,
+			NotifyAlerts: req.NotifyAlerts,
+			NotifyEvents: req.NotifyEvents,
+			ProxyURL:     strings.TrimSpace(req.ProxyURL),
+		}
+
+		if err := config.SaveConfig(); err != nil {
+			jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: "Failed to save configuration"})
+			return
+		}
+
+		// Restart bot with new config
+		telegram.Global().Restart()
+
+		auditRequest(r, "settings.telegram", "telegram_bot", fmt.Sprintf("enabled=%v, chats=%d", req.Enabled, len(cleanIDs)), true, "")
+		jsonResponse(w, http.StatusOK, APIResponse{
+			Success: true,
+			Message: "Telegram Bot 设置已保存并即时生效",
+			Data: TelegramSettingsResponse{
+				Enabled:      config.AppConfig.Telegram.Enabled,
+				BotToken:     maskToken(config.AppConfig.Telegram.BotToken),
+				AdminChatIDs: config.AppConfig.Telegram.AdminChatIDs,
+				NotifyAlerts: config.AppConfig.Telegram.NotifyAlerts,
+				NotifyEvents: config.AppConfig.Telegram.NotifyEvents,
+				ProxyURL:     config.AppConfig.Telegram.ProxyURL,
+			},
+		})
+	default:
+		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
+	}
+}
+
+// HandleTelegramTest sends a test ping message to the configured or supplied Telegram chats
+func HandleTelegramTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
+		return
+	}
+	if !requireScope(w, r, "admin:access") {
+		return
+	}
+
+	var req TelegramSettingsRequest
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&req)
+	}
+
+	token := strings.TrimSpace(req.BotToken)
+	if token == "" || (strings.Contains(token, "...") && len(token) <= 15) {
+		token = config.AppConfig.Telegram.BotToken
+	}
+	chatIDs := req.AdminChatIDs
+	if len(chatIDs) == 0 {
+		chatIDs = config.AppConfig.Telegram.AdminChatIDs
+	}
+	proxy := strings.TrimSpace(req.ProxyURL)
+	if proxy == "" {
+		proxy = config.AppConfig.Telegram.ProxyURL
+	}
+
+	if err := telegram.Global().SendTestMessage(token, chatIDs, proxy); err != nil {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "发送测试消息失败: " + err.Error()})
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: "测试消息已成功发送至 Telegram！"})
 }

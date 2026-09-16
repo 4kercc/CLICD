@@ -10,6 +10,12 @@ import (
 
 func panelAccessMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if config.AppConfig.WebAccessDisabled {
+			w.Header().Set("Cache-Control", "no-store")
+			http.NotFound(w, r)
+			return
+		}
+
 		decision := config.EvaluatePanelAccess(
 			config.AppConfig.PanelAccessPolicy,
 			r.RemoteAddr,

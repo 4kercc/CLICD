@@ -1,170 +1,172 @@
-# CLICD 项目架构、功能设计与演进记录全景文档 (Project Documentation)
+# CLICD 项目架构、功能设计与全景接力文档 (Project Handover Documentation)
 
-本文档记录了 **CLICD (LXC/KVM 虚拟化管理面板)** 的系统全景架构、模块代码分工、关键技术设计、历史演进记录（涵盖 v1.20 ~ v1.20.5 核心特性）以及常用运维与部署指令。
+本文档面向后续 AI 接力开发与架构维护，全面汇总了 **CLICD (LXC/KVM 虚拟化管理面板)** 的系统架构、各模块代码职责、核心技术设计、近期的关键改动与演进记录（涵盖 v1.20 ~ v1.20.6 以及最新 Telegram Bot 集成），并附带现存待办需求与运维指令。
 
 ---
 
 ## 📌 项目基本信息
 - **项目名称**：CLICD (Container & KVM Lifecycle Controller Daemon)
-- **当前版本**：`v1.20.5`
+- **当前版本**：`v1.20.6`
 - **代码仓库**：[https://github.com/4kercc/CLICD](https://github.com/4kercc/CLICD)
-- **后端技术栈**：Go 1.24+ (原生标准库 + SkyLight / Libvirt / LXC / Conntrack 深度调用，无重型第三方框架)
-- **前端技术栈**：React 18 + TypeScript + Vite + Tailwind CSS + Lucide Icons
-- **支持虚拟化引擎**：
-  - **LXC**：轻量级容器（支持 cgroup v2 资源隔离、LXC 模板、网卡限速、磁盘限额、rootfs 用户命名空间 UID/GID 映射）
-  - **KVM / QEMU**：全虚拟化（支持 Windows 10/11/Server、Linux 全发行版、Windows PE / FirPE / WePE 救援系统、virtio-win 驱动挂载、QEMU Guest Agent 协同）
+- **测试验证服务器**：`192.3.170.78:22` (SSH 用户: `cvc` / `root`，密码见运维安全保管箱)
+- **面板运行地址**：`http://192.3.170.78:8999/` (管理员账号: `admin`，密码见面板初始化记录)
+- **后端技术栈**：Go 1.24+（原生标准库 + Libvirt + LXC + Cgroup v2 + Iptables，无重型框架，纯静态二进制打包）
+- **前端技术栈**：React 18 + TypeScript + Vite + Tailwind CSS + Lucide Icons（打包产物嵌入在 `backend/internal/server/web/` 中）
 
 ---
 
-## 🏗️ 模块划分与代码架构
+## 🏗️ 核心模块代码分工与目录结构
 
 ### 1. 后端目录结构 (`backend/`)
-- `main.go`：服务入口，解析 `server` 与 `cli` 运行参数，初始化网络与端口映射，优雅捕获系统退出信号。
-- `internal/server/`：
-  - `server.go`：HTTP/HTTPS 路由分发器，静态 Web 资产 Embed 嵌入与 SSL Let's Encrypt 证书热加载。
-- `internal/api/`：
-  - `handlers.go`：核心容器/虚拟机列表、创建、删除、开机、关机、重启、密码重置等接口。
-  - `runtime.go`：多虚拟化引擎（LXC/KVM）抽象适配层，路由具体操作至底层 Manager。
-  - `security.go`：轻量安全引擎（Conntrack 流量监测、端口扫描、横向移动、多周期挖矿判定模型）。
-  - `snapshots.go`：快照与全量备份接口，支持单项/批量触发远程异地存储同步。
-  - `storage.go`：本地挂载磁盘检测、存储池 CRUD、存储池连通性测试（`/storage/test`）与一键全量备份同步（`/storage/sync-all`）。
-  - `totp.go`：两步验证（2FA/TOTP RFC 6238）密钥生成、二维码生成与登录动态验证。
-- `internal/kvm/`：
-  - `kvm.go`：Libvirt XML 模板生成器（支持 Boot Order、网卡驱动模型、磁盘总线、QEMU GA 交互、fsinfo 真实磁盘读取、在线热扩容）。
-- `internal/lxc/`：
-  - `lxc.go`：LXC 容器生命周期管理、cgroup v2 资源限制（vCPU/内存/磁盘限速/带宽流控）、网络挂载与 SSH 自动注入。
-- `internal/storage/remote/`：
-  - `remote.go`：远程存储驱动接口（支持 **SFTP**、**WebDAV**、**MinIO / AWS S3** 原生驱动与连接测试）。
-  - `sync.go`：快照与全量备份异步双写引擎、多源拉取还原（Local / Remote）与批量同步逻辑。
+- `main.go`：服务入口，解析 `server` 与 `cli` 参数，初始化网络与端口映射，优雅捕获退出信号。
 - `internal/config/`：
-  - `config.go`：全局配置文件（`/var/lib/clicd/config.json`）序列化与并发安全锁。
-- `internal/version/`：
-  - `version.go`：定义全局版本号（`1.20.1`）。
+  - `config.go`：全局数据结构定义（`Container`、`ClicdConfig`、`StoragePool`、`TelegramConfig` 等）与并发读写锁。
+  - `store_sqlite.go`：纯 Go 实现的 SQLite 持久化存储引擎（`/root/.clicd/config.db`），支持表结构自动初始化与全量数据原子事务落盘。
+  - `nat_network.go`：NAT 子网断言与合法性校验（`IsValidLXCNATIP` 检验 `10.0.3.0/24`，`IsValidKVMNATIP` 检验 `192.168.122.0/24`）。
+- `internal/telegram/`：
+  - `bot.go`：原生内置 Telegram Bot 核心引擎。采用 **Long Polling 长轮询**（无需公网 Webhook/反代），内置 Chat ID 白名单安全鉴权、指令路由、Inline 键盘菜单交互、宿主机状态卡片、实例开关机/快照/重置密码及全局安全告警主动推送。
+- `internal/api/`：
+  - `handlers.go`：容器/虚拟机基础 CRUD 接口与单机操作控制器。
+  - `runtime.go`：多虚拟化引擎（LXC/KVM）抽象适配层与统一回调网关（解耦 Bot 与底层 Manager）。
+  - `taskqueue.go`：全局异步任务队列调度器（支持 `maxConcurrency` 严格节流，防止打快照/批量开机阻塞母鸡 I/O），支持 `batch-action`、`batch-config` 批量配置调整。
+  - `routing.go`：路由管理控制器，提供 NAT4 端口范围、公网 IPv4 池、IPv6 前缀、局域网 DHCP 与 **内网 (NAT) IP 分配视图及手动修改接口 (`PUT /api/v1/routing/nat-allocation`)**。
+  - `security.go`：轻量安全监控引擎（基于 Conntrack 监测端口扫描、横向扫描、爆破攻击、多周期挖矿判定并自动挂钩 Telegram 告警推送）。
+  - `snapshots.go`：快照与全量备份接口，支持单机与批量触发远程存储异地双写。
+  - `settings.go`：面板设置接口（任务队列、账号密码、访问来源白名单、SSL 证书、Telegram Bot 设置与测试连通性）。
+- `internal/kvm/`：
+  - `kvm.go`：Libvirt QEMU/KVM 虚拟机生命周期管理、XML 模板生成、QEMU Guest Agent 交互、fsinfo 真实磁盘读取、在线热扩容、静态 DHCP 绑定 (`virsh net-update`)。
+- `internal/lxc/`：
+  - `lxc.go`：LXC 容器生命周期管理、cgroup v2 动态限速限额、**硬件 MAC 固化 (`lxc.net.0.hwaddr`)、内网 IP 静态租期同步 (`/etc/lxc/dnsmasq.conf`)**。
+  - `portmap.go`：基于 iptables 的 NAT 端口映射与 DNAT 规则同步。
+- `internal/server/`：
+  - `server.go`：HTTP/HTTPS 路由注册、中间件装配与服务启动器。
+  - `embed.go`：将前端静态资源（`web/`）嵌入 Go 二进制文件。
 
 ### 2. 前端目录结构 (`frontend/`)
 - `src/pages/`：
-  - `Containers.tsx`：容器列表页面（支持软加载/懒加载状态呈现、多维度搜索筛选、批量控制）。
-  - `ContainerDetail.tsx`：虚拟机/容器详情控制台（实时 CPU/内存/磁盘环形图、NAT 规则配置、Guest Agent 状态与 OS 引导安装弹窗、快照管理、全量备份、VNC/WebSSH 控制台）。
-  - `Storage.tsx`：存储管理中心（本地磁盘挂载状态、远程存储池 SFTP/WebDAV/MinIO 管理、一键全量同步按钮）。
-  - `Snapshots.tsx`：快照与备份总览。
-  - `Security.tsx`：安全告警与威胁日志。
-- `src/services/api.ts`：Axios API 封装层，定义全部 TypeScript 类型与 REST 请求。
+  - `Containers.tsx`：容器管理列表页（集成批量操作工具栏、状态指示、快速开机/关机/重启/删除）。
+  - `ContainerDetail.tsx`：容器/虚拟机详情控制台（实时仪表盘、NAT 端口管理、快照管理、VNC/WebSSH 控制台、Guest Agent 状态）。
+  - `Routing.tsx`：路由管理页面（NAT4 端口范围、公网 IPv4 池、IPv6 前缀、局域网 DHCP、**内网 (NAT) IP 分配视图与行内「修改」弹窗**）。
+  - `Settings.tsx`：面板系统设置（任务队列并发数、账号设置、两步验证 2FA、**Telegram Bot 管理配置卡片**、访问来源白名单、SSL 证书、登录日志）。
+- `src/components/`：
+  - `BatchConfigModal.tsx`：批量配置修改弹窗（细粒度复选框控制覆盖字段，支持 vCPU、内存、上下行限速、磁盘 IO 限速、流量上限/重置、到期时间、端口配额、密码重置）。
+  - `BatchSnapshotModal.tsx`：批量创建快照确认弹窗（支持选择本地或远程存储池）。
+- `src/services/api.ts`：Axios API 封装层，定义所有 TypeScript 数据结构与后端请求方法。
 
 ---
 
-## 🚀 核心优化与演进记录 (v1.20 ~ v1.20.1)
+## 🚀 近期重要功能演进与技术改动 (v1.20.4 ~ v1.20.6)
 
-### 一、 引导管理与灵活硬件驱动选型 (KVM Boot & Hardware Flexibility)
-1. **第一启动项动态切换 (Boot Order)**：
-   - 支持自由切换 **硬盘优先 (Hard Disk)**、**光盘/ISO 优先 (CD-ROM)** 或 **网络 PXE 引导**。
-   - 彻底解决了 Windows/PE 重启后再次陷入光盘安装界面的顽疾。
-2. **虚拟硬件模型适配**：
-   - **网卡驱动 (NIC Model)**：支持切换为高性能 `VirtIO`（Linux原生、Windows需驱动）、`Intel e1000e`（免驱千兆兼容）或 `RTL8139`。
-   - **磁盘总线 (Disk Bus)**：支持切换为 `VirtIO Block (vda)`、`SATA AHCI (sda)`、`IDE (hda)`。
+### 1. 🤖 原生内置 Telegram Bot 模块 (最新新增)
+- **免公网 Webhook**：基于 Go 标准库 `net/http` 原生实现 Telegram 长轮询 (`getUpdates`)，母鸡无需额外域名和 SSL 反代即可直接通信。
+- **安全白名单鉴权**：强制校验请求来源 `Chat ID`，非白名单请求直接忽略丢弃。
+- **快捷指令菜单自动下发**：服务启动及更新 Token 时自动调用 Telegram 官方 API (`setMyCommands`) 同步注册 `/menu`、`/status`、`/list`、`/batch`、`/web`、`/help` 菜单。
+- **交互功能**：
+  - `/menu` 或 `/start`：呼出 Inline 键盘主控制菜单；
+  - `/status`：返回母鸡 CPU、内存、负载、磁盘、网络速率实时卡片；
+  - `/list`：分页列出所有小鸡（带 🟢/🔴 状态），点击进入单机详情面板进行开机、关机（二次确认）、重启（二次确认）、打快照、重置密码（代码块私密回显）、查看内网 IP 与端口映射；
+  - `⚡ 批量控制中心`：支持一键向后台任务队列推送批量电源操作、批量应用规格配置、批量创建实例及批量回滚快照；
+  - `🛡️ Web 访问安全开关`：支持一键开启/关闭 Web 入口，封锁时对外直接返回 404 伪装阻断；
+  - **敏感信息保护**：实例详情中密码采用 Telegram 剧透防窥阴影格式（`||password||`），点击解开；NAT 端口映射自动解析显示宿主机真实公网 IPv4。
+- **主动告警推送**：安全引擎触发挖矿告警、暴力破解或流量超标自动关机时，自动调用 `telegram.Global().SendSecurityAlert` / `SendEventNotification` 向管理员 TG 推送结构化报警卡片。
+- **前端配置管理与脱敏**：在 `Settings.tsx` 中新增「Telegram Bot」专区，API 接口返回脱敏掩码（`895065...PWaQ`），支持配置 Bot Token、Chat ID 白名单、推送开关及「发送测试消息」连通性测试。
+- **涉及文件**：
+  - `backend/internal/telegram/bot.go`：TG Bot 核心生命周期、长轮询、消息发送、指令路由与回调逻辑。
+  - `backend/internal/config/config.go`：定义 `TelegramConfig` 与回调桥接函数。
+  - `backend/internal/api/runtime.go`：实现 Bot 与 LXC/KVM Manager 之间的解耦回调（开关机、重置密码、批量建机与配置等）。
+  - `backend/internal/api/settings.go`：TG 设置的读取（Token 脱敏掩码）、保存与连通性测试。
+  - `backend/internal/api/security.go`：安全扫描引擎对接 TG 主动推送。
+  - `frontend/src/pages/Settings.tsx`：前端 Telegram 管理卡片 UI。
+  - `frontend/src/services/api.ts`：前端 Telegram 设置的 API 接口定义。
 
-### 二、 快照 (Snapshot) 与 备份 (Backup) 架构分离 + 零停机在线热快照
-1. **零停机在线热快照 (Live Snapshot)**：结合 QEMU Guest Agent `fsfreeze` 冻结与 COW 增量捕获，**打快照无需关机**，1 秒内完成。
-2. **自动分层 COW 轻量化**：自动将单体大镜像转换为 `Base (只读基盘) + Overlay (轻量增量层)` 架构，单次快照体积从数十 GB 暴降至 **几十 KB ~ 几十 MB**。
-3. **独立的 Full Backup 全量备份体系**：新增独立接口与数据表，备份时执行全量打平与 `qcow2` 压缩打包归档。
+### 2. 🛡️ Web 访问入口安全控制与应急自愈 (v1.20.5+)
+- **双重控制机制**：
+  - **Telegram 远程控制**：在 Bot 中输入 `/web` 或点击菜单一键关闭/开启 Web 访问入口；
+  - **本地 CLI 命令行控制**：在宿主机终端输入 `sudo clicd web on` / `sudo clicd web off` / `sudo clicd web toggle` / `sudo clicd web status` 随时启闭与查询状态；
+  - **交互菜单控制**：在 `sudo clicd` 交互菜单按 `9` 即可一键切换状态。
+- **404 隐身伪装防护**：当 Web 入口关闭时，系统所有页面及 `/api/` 路由均统一返回原生 `404 Not Found`，不暴露任何面板特征或服务信息。
+- **登录界面脱敏**：登录页面移除了版本号（`CLICD v1.2.0`）展示，防止外部侦察版本特征。
+- **涉及文件**：
+  - `backend/internal/config/config.go`：`ClicdConfig` 结构体新增 `WebAccessDisabled bool` 字段。
+  - `backend/internal/config/store_sqlite.go`：SQLite `app_meta` 读写新增 `web_access_disabled` 键的持久化存储。
+  - `backend/internal/server/access_policy.go`：`panelAccessMiddleware` 拦截中间件检测到关闭时直接调用 `http.NotFound(w, r)`。
+  - `backend/main.go`：参数路由支持 `clicd web` 子命令转发至 CLI 控制模块。
+  - `backend/internal/cli/web_command.go`：实现 `RunWebCommand` CLI 控制指令（`status/on/off/toggle`）。
+  - `backend/internal/cli/cli.go`：更新交互菜单第 `9` 项文字及状态切换逻辑。
+  - `backend/internal/telegram/bot.go`：TG Bot 增加 `/web` 指令及 `sendWebAccessMenu` / `executeWebAccessToggle` 开关交互。
+  - `frontend/src/pages/Login.tsx`：移除底部的版本号标签。
 
-### 三、 在线与离线磁盘动态扩容 (Live Disk Resize)
-- 支持在面板一键调整 KVM 磁盘容量。
-- **在线扩容**：虚拟机开机状态下调用 `virsh blockresize`，并由 Guest Agent 自动触发内部系统文件系统扩展（Windows C 盘 extend，Linux growpart / resize2fs）。
-- **离线扩容**：关机状态下调用 `qemu-img resize` 安全扩容。
+### 3. 🔀 内网 (NAT) IP 分配视图与手动修改 (v1.20.5)
+- **背景**：解决以前用户无法直观查看小鸡内网 IP 分配，以及无法根据需求手动固定内网 IP 的问题。
+- **前端支持**：在 `Routing.tsx` 的「内网 (NAT) IP 分配」表格中新增「修改」操作按钮与弹窗，支持合法 IP 校验与重复冲突拦截。
+- **后端支持 (`PUT /api/v1/routing/nat-allocation`)**：
+  - **LXC 容器**：自动同步更新 `/etc/lxc/dnsmasq.conf` 的 `dhcp-host=<mac>,<ip>` 静态租期，向 dnsmasq 发送 `SIGHUP` 信号热重载，更新容器内 `10-eth0.network` 与 `/etc/network/interfaces`，并在运行状态下调用 `lxc-attach` 刷新客机网络及更新 iptables DNAT 规则。
+  - **KVM 虚拟机**：自动调用 `virsh net-update default add ip-dhcp-host` 绑定 libvirt 静态租期并同步更新 iptables 规则。
 
-### 四、 外部磁盘镜像导入与 PVE/KVM 迁移向导
-- 支持直接输入宿主机外部镜像路径（如 PVE 导出的 `vm-301-disk-0.qcow2` 或 raw/vmdk 镜像）。
-- 支持一键转为 Base 只读基盘并自动挂载增量层，实现从 PVE 到 CLICD 的极速平滑迁移。
+### 3. 🛡️ LXC 硬件 MAC 固化与 IP 防漂移 (v1.20.5)
+- **根因分析**：LXC 默认配置中未指定 `lxc.net.0.hwaddr`，导致每次容器重启底层都会随机生成新 MAC，促使 `dnsmasq` 重新下发新 IP。
+- **修复方案**：新增 `ensureLXCMACAddress` 与 `randomLXCMAC`，在容器创建和启动前自动注入固化 MAC 地址至 `/var/lib/lxc/<name>/config` 与数据库，彻底消除重启后内网 IP 变动缺陷。
 
-### 五、 QEMU Guest Agent 与多系统协同安装
-1. **操作系统感知适配**：
-   - **Windows**：提供「一键挂载驱动光盘」与「弹出光盘」控制，配合 `virtio-win.iso` 安装 `vioserial` 及 QEMU-GA。
-   - **Linux**：隐藏多余光盘挂载，提供多发行版（Debian / Ubuntu / CentOS / Rocky / Alpine）自适应一键安装命令。
-2. **真实磁盘容量读取**：
-   - 解决 KVM 物理层仅显示 2GB Overlay 磁盘的问题，通过 `guest-get-fsinfo` 实时解析 Windows `C:\` 分区真实使用率。
+### 4. 🌐 NAT 子网过滤与防 Docker 网桥干扰 (v1.20.5)
+- 强化 `GetContainerIP` 与 `firstIPv4` 探针逻辑，引入 `IsValidLXCNATIP`（`10.0.3.0/24`）与 `IsValidKVMNATIP`（`192.168.122.0/24`），严格过滤排除 Docker 网桥（`172.17.0.1`）等外部网卡的干扰，保证内部 IP 与端口转发的准确性。
 
-### 六、 挖矿智能深度识别引擎 (v1.20.1)
-- **长连接生命周期追踪 (`miningTracker`)**：监测长连接在多个扫描周期（>45s）的活跃存续情况。
-- **状态加权评分模型**：关联 TCP `ESTABLISHED` 状态、Stratum 握手协议特征与主流矿池威胁情报库，置信度 Score $\ge 70$ 才告警，彻底消除开发环境、Node.js 与通用代理的误报。
-
-### 七、 多协议远程存储与异地容灾双写 (v1.20.1)
-1. **原生多协议客户端**：
-   - **SFTP**：基于 SSH 协议流式上传下载。
-   - **WebDAV**：标准 RFC 4918 HTTP 协议支持。
-   - **MinIO / AWS S3**：纯 Go 实现 AWS Signature Version 4 签名。
-2. **自动化异步双写与集中同步**：
-   - 存储池开启同步后，创建快照/备份时**后台自动异步双写上传**。
-   - 在「存储管理」页面提供 **「一键同步所有快照与备份」** 与单个存储池同步按钮。
-3. **多源灾备恢复**：恢复快照/备份时，支持自由选择 **「从本地极速还原」** 或 **「从远程存储拉取还原」**。
-
-### 八、 实时传输进度跟踪与面板体验全面打磨 (v1.20.2)
-1. **传输进度实时可视化**：
-   - 远程同步快照/备份或从远程存储拉取恢复时，提供毫秒级进度轮询（`/storage/progress`），动态展示当前传输文件、实时传输速率（MB/s）、已传输量与完成百分比。
-2. **Guest Agent 模块与安装引导优化**：
-   - 状态栏显示绿色连接徽标与黄色待安装提示，弹窗集成 Windows（光盘挂载）与 Linux（一键脚本）双模式自主切换 Tab。
-3. **控制台交互与安全防护升级**：
-   - **双击重命名**：主机名和系统标签支持双击行内快速编辑，便于管理多台同配置虚拟机。
-   - **红色高亮删除与二次防误触**：危险操作独立红色展示，并引入两次弹窗确认，彻底杜绝误删风险。
-
-### 九、 虚拟化安全加固与稳定性防卡死重构 (v1.20.3)
-1. **安全修复（严重）**：
-   - 「导入外部磁盘」源路径强制白名单（存储池 / KVM 数据目录 / 镜像缓存，含符号链接解析），并收紧为仅管理员可用，彻底封堵子用户越权读取宿主机任意文件的漏洞。
-2. **并发与锁重构（高）**：
-   - KVM/LXC 快照、备份、还原的全局互斥锁收窄至「轮转删除」与「配置登记」瞬时阶段；长磁盘 I/O 由单机维度互斥锁（`acquireVMLock` / `acquireLXCLock` / `acquireSyncLock`）保护，多虚拟机操作互不阻塞。
-3. **热快照防撕裂（高）**：
-   - 有 Guest Agent：`fsfreeze` 冻结整个拷贝窗口（应用一致性）。
-   - 无 Agent：`virsh snapshot-create-as --disk-only --atomic --no-metadata` 原子外部快照 + `blockcommit --active --pivot` 回合并清理，拷贝统一 `qemu-img convert -U`。
-   - 服务启动时自动解冻遗留冻结虚拟机（`ThawAllRunningVMs`），优雅关机等待延长至 45 秒。
-4. **超时与输入校验**：
-   - `virsh` 热路径（domstate / domifaddr / domstats / guest-ping / guest-exec 等）统一 5–30 秒硬超时封装（`virshCombinedOutput` / `virshOutput`）。
-   - LXC PID 拼接前强制数字校验；主机名 / 系统标签统一 64 字符与控制字符校验。
-
-### 十、 批量运维体系 & 内网 IP 固化防漂移 (v1.20.5)
-1. **批量配置与即时生效**：
-   - 支持批量勾选调整计算资源（vCPU/内存）、网络上下行限速、磁盘读写限速、月度流量模式/限额/重置、到期时间、NAT 端口配额、快照配额，以及批量重置密码。
-   - 采用细粒度 `apply_*` 字段级覆盖控制，运行中实例动态刷新 cgroup/libvirt limits。
-2. **TaskQueue 调度批量快照**：
-   - 扩展任务队列支持 `TaskSnapshot`，受 `maxConcurrency` 严格节流，自动处理 COW 增量快照和远端存储同步，杜绝高并发磁盘 I/O 阻塞。
-3. **LXC MAC 地址持久化与 IP 防漂移**：
-   - 在 LXC 创建与启动生命周期中自动注入并固化 `lxc.net.0.hwaddr`，确保宿主机 `dnsmasq` 为容器始终分配固定的内网 IP，彻底解决容器重启后内网 IP 变动问题。
-4. **NAT 网络精确过滤与路由可视化**：
-   - 优化 `GetContainerIP` 与 `firstIPv4` 逻辑，严格校验 LXC/KVM NAT 子网并屏蔽 Docker 等外部网卡干扰；路由管理新增内网 IP 分配状态视图。
+### 5. 🛠️ 批量修改配置 & 批量打快照 (v1.20.5)
+- **批量修改配置 (`POST /api/v1/batch-config`)**：支持勾选多台实例批量调整硬件配置、网络限速、磁盘限速、流量模式/重置、到期时间、端口/快照配额与批量密码重置，支持字段级细粒度覆盖且运行中实例热应用生效。
+- **任务队列节流批量快照 (`TaskSnapshot`)**：多选容器后一键打快照并自动排队入队 `TaskQueue`，严格受 `maxConcurrency` 节流，杜绝母鸡 I/O 阻塞。
 
 ---
 
-## 🛠️ 运维与部署常用指令
+## 🎯 现存待办需求与已完成状态 (Next Steps & Completed Status)
 
-### 1. 一键安装与更新
+针对 **Telegram Bot 批量控制中心** 的深度增强需求已全部完成并闭环对接：
+
+1. ✅ **Telegram 菜单升级**：将原有的「⚡ 批量电源控制」正式命名升级为「⚡ 批量控制中心」。
+2. ✅ **新增 4 个批量子功能菜单与交互流程**：
+   - **📷 批量添加快照 (`batch:confirm:snapshot`)**：一键为所有实例创建快照并推送到后台任务队列排队。
+   - **⚙️ 批量调整配置 (`batch:menu:config`)**：在 TG 中提供快捷配置模板选择（性能型 2C2G/标准型 1C1G/轻量型/统一限速100M）并热应用至所有实例。
+   - **⏪ 批量恢复快照 (`batch:ask:restore_snap`)**：带二次确认机制，一键将所有存在快照的实例快速回滚至各自最新的可用快照。
+   - **🚀 批量开设虚拟机/容器 (`batch:menu:create`)**：在 TG 中提供 3/5 台 LXC 容器与 2 台 KVM 等预设模版，自动规划 NAT 端口并推送后台队列并发创建。
+
+---
+
+## 🛠️ 运维、编译与部署指令
+
+### 1. 本地代码编译与打包（在宿主开发机上）
 ```bash
-# 一键安装 / 更新至最新稳定版
-curl -fsSL https://raw.githubusercontent.com/4kercc/CLICD/main/install.sh | sudo sh
+# 1. 前端构建
+cd frontend
+npm run build
 
-# 卸载 CLICD
-curl -fsSL https://raw.githubusercontent.com/4kercc/CLICD/main/install.sh | sudo sh -s -- uninstall
+# 2. 将前端产物同步至 Go embed 目录
+cd ..
+rm -rf backend/internal/server/web/*
+cp -r frontend/dist/* backend/internal/server/web/
+touch backend/internal/server/web/.gitkeep
+
+# 3. 本地 Linux 交叉编译（如需直接生成 Linux 二进制）
+cd backend
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o clicd-linux-amd64 main.go
 ```
 
-### 2. 服务管理与排查
+### 2. 测试机 (`192.3.170.78`) 部署与服务管理
 ```bash
 # 查看服务状态
 systemctl status clicd --no-pager
 
-# 重启服务
-systemctl restart clicd
-
 # 查看实时日志
 journalctl -u clicd -f -n 50
+
+# 重启面板服务
+systemctl restart clicd
+
+# 停止服务
+systemctl stop clicd
 ```
 
-### 3. 本地编译与打包流程
-```bash
-# 1. 前端构建
-cd frontend && npm install && npm run build
-
-# 2. 同步 Web 静态资源到后端
-cp -r frontend/dist/* backend/internal/server/web/
-
-# 3. 交叉编译 Linux 二进制
-cd backend
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w -X clicd/internal/version.Version=1.20.3" -o ../build/clicd-linux-amd64 .
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w -X clicd/internal/version.Version=1.20.3" -o ../build/clicd-linux-arm64 .
-```
+### 3. 测试机上的关键文件路径
+- **二进制文件**：`/usr/local/bin/clicd`
+- **数据库路径**：`/root/.clicd/config.db` (SQLite 数据库)
+- **LXC 容器目录**：`/var/lib/lxc/` (软链接至 `/var/lib/clicd/lxc/`)
+- **LXC DHCP 静态租期文件**：`/etc/lxc/dnsmasq.conf`
+- **LXC 网桥配置**：`/etc/default/lxc-net`
+- **KVM 虚拟机数据目录**：`/var/lib/clicd/kvm/`
