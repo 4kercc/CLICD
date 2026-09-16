@@ -2,10 +2,12 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/netip"
 	"sort"
 	"strconv"
+	"strings"
 
 	"clicd/internal/config"
 	"clicd/internal/lxc"
@@ -110,6 +112,11 @@ type routingPoolsRequest struct {
 	Items         *[]config.PublicIPv4Assignment `json:"items"`
 	IPv6Prefixes  *[]config.PublicIPv6Prefix     `json:"ipv6_prefixes"`
 	NAT4PortRange *nat4PortRange                 `json:"nat4_port_range"`
+}
+
+type updateNATAllocationRequest struct {
+	ContainerID int    `json:"container_id"`
+	IP          string `json:"ip"`
 }
 
 type publicIPv4ScanRequest struct {
@@ -460,6 +467,55 @@ func handleRoutingPoolsUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	handleRoutingGet(w, r)
+}
+
+func HandleRoutingNATAllocationUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut && r.Method != http.MethodPost {
+		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
+		return
+	}
+	if !requireScope(w, r, "routing:write") {
+		return
+	}
+	var req updateNATAllocationRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Invalid request body"})
+		return
+	}
+	if req.ContainerID <= 0 {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Valid container_id is required"})
+		return
+	}
+	newIP := strings.TrimSpace(req.IP)
+	if newIP == "" {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "IP address is required"})
+		return
+	}
+
+	c := config.FindContainer(req.ContainerID)
+	if c == nil {
+		jsonResponse(w, http.StatusNotFound, APIResponse{Success: false, Message: "Container not found"})
+		return
+	}
+
+	if c.IsKVM() {
+		if err := kvmManager.SetStaticNATIP(req.ContainerID, newIP); err != nil {
+			jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: err.Error()})
+			return
+		}
+	} else {
+		if err := lxcManager.SetStaticNATIP(req.ContainerID, newIP); err != nil {
+			jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: err.Error()})
+			return
+		}
+	}
+
+	config.AddAuditLog("routing.update_nat_ip", c.Name, fmt.Sprintf("Changed NAT IP of %s (ID %d) to %s", c.Name, c.ID, newIP), "admin")
+	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: "NAT IP updated successfully", Data: map[string]interface{}{
+		"container_id": c.ID,
+		"ip":           c.IP,
+		"mac_address":  c.MACAddress,
+	}})
 }
 
 func totalIPv6Capacity(prefixes []lxc.IPv6PrefixInfo) string {

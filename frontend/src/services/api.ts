@@ -795,6 +795,9 @@ export const updateRoutingIPv4Pool = (items: PublicIPv4Info[]) =>
 export const updateRoutingIPv6Prefixes = (ipv6_prefixes: IPv6PrefixInfo[]) =>
   updateRoutingPools({ ipv6_prefixes })
 
+export const updateRoutingNATAllocation = (container_id: number, ip: string) =>
+  api.put<APIResponse>('/routing/nat-allocation', { container_id, ip })
+
 export const scanRoutingIPv4Segment = (payload: { cidr: string; interface: string; gateway: string; verify: boolean; limit?: number }) =>
   api.post<APIResponse<PublicIPv4ScanResult[]>>('/routing/ipv4-scan', payload)
 
