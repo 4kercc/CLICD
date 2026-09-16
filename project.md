@@ -1,12 +1,12 @@
 # CLICD 项目架构、功能设计与演进记录全景文档 (Project Documentation)
 
-本文档记录了 **CLICD (LXC/KVM 虚拟化管理面板)** 的系统全景架构、模块代码分工、关键技术设计、历史演进记录（涵盖 v1.20 ~ v1.20.3 核心特性）以及常用运维与部署指令。
+本文档记录了 **CLICD (LXC/KVM 虚拟化管理面板)** 的系统全景架构、模块代码分工、关键技术设计、历史演进记录（涵盖 v1.20 ~ v1.20.5 核心特性）以及常用运维与部署指令。
 
 ---
 
 ## 📌 项目基本信息
 - **项目名称**：CLICD (Container & KVM Lifecycle Controller Daemon)
-- **当前版本**：`v1.20.3`
+- **当前版本**：`v1.20.5`
 - **代码仓库**：[https://github.com/4kercc/CLICD](https://github.com/4kercc/CLICD)
 - **后端技术栈**：Go 1.24+ (原生标准库 + SkyLight / Libvirt / LXC / Conntrack 深度调用，无重型第三方框架)
 - **前端技术栈**：React 18 + TypeScript + Vite + Tailwind CSS + Lucide Icons
@@ -118,6 +118,17 @@
 4. **超时与输入校验**：
    - `virsh` 热路径（domstate / domifaddr / domstats / guest-ping / guest-exec 等）统一 5–30 秒硬超时封装（`virshCombinedOutput` / `virshOutput`）。
    - LXC PID 拼接前强制数字校验；主机名 / 系统标签统一 64 字符与控制字符校验。
+
+### 十、 批量运维体系 & 内网 IP 固化防漂移 (v1.20.5)
+1. **批量配置与即时生效**：
+   - 支持批量勾选调整计算资源（vCPU/内存）、网络上下行限速、磁盘读写限速、月度流量模式/限额/重置、到期时间、NAT 端口配额、快照配额，以及批量重置密码。
+   - 采用细粒度 `apply_*` 字段级覆盖控制，运行中实例动态刷新 cgroup/libvirt limits。
+2. **TaskQueue 调度批量快照**：
+   - 扩展任务队列支持 `TaskSnapshot`，受 `maxConcurrency` 严格节流，自动处理 COW 增量快照和远端存储同步，杜绝高并发磁盘 I/O 阻塞。
+3. **LXC MAC 地址持久化与 IP 防漂移**：
+   - 在 LXC 创建与启动生命周期中自动注入并固化 `lxc.net.0.hwaddr`，确保宿主机 `dnsmasq` 为容器始终分配固定的内网 IP，彻底解决容器重启后内网 IP 变动问题。
+4. **NAT 网络精确过滤与路由可视化**：
+   - 优化 `GetContainerIP` 与 `firstIPv4` 逻辑，严格校验 LXC/KVM NAT 子网并屏蔽 Docker 等外部网卡干扰；路由管理新增内网 IP 分配状态视图。
 
 ---
 

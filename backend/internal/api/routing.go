@@ -27,6 +27,19 @@ type nat4Networks struct {
 	KVM config.NATNetwork `json:"kvm"`
 }
 
+type nat4Allocation struct {
+	ContainerID    int    `json:"container_id"`
+	ContainerName  string `json:"container_name"`
+	LXCName        string `json:"lxc_name"`
+	Virtualization string `json:"virtualization"`
+	Status         string `json:"status"`
+	IP             string `json:"ip"`
+	Subnet         string `json:"subnet"`
+	Gateway        string `json:"gateway"`
+	Bridge         string `json:"bridge"`
+	MACAddress     string `json:"mac_address,omitempty"`
+}
+
 type nat4Route struct {
 	ContainerID   int    `json:"container_id"`
 	ContainerName string `json:"container_name"`
@@ -79,6 +92,7 @@ type routingResponse struct {
 	NAT4PortRange       nat4PortRange        `json:"nat4_port_range"`
 	NAT4NextPort        int                  `json:"nat4_next_port"`
 	NAT4Networks        nat4Networks         `json:"nat4_networks"`
+	NAT4Allocations     []nat4Allocation     `json:"nat4_allocations"`
 	IPv4                routeCapacity        `json:"ipv4"`
 	LANDHCP             routeCapacity        `json:"lan_dhcp"`
 	IPv6                routeCapacity        `json:"ipv6"`
@@ -145,15 +159,44 @@ func handleRoutingGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	nat4Mappings := make([]nat4Route, 0)
+	nat4Allocations := make([]nat4Allocation, 0)
 	usedPorts := map[int]bool{}
 	ipv4Assignments := make([]ipv4Route, 0)
 	lanDHCPAssignments := make([]lanDHCPRoute, 0)
 	ipv6Assignments := make([]ipv6Route, 0)
 
 	nat4StartPort, nat4EndPort := config.NATPortRange()
+	lxcNet := config.LXCNATNetwork()
+	kvmNet := config.KVMNATNetwork()
 
 	for i := range config.AppConfig.Containers {
 		c := &config.AppConfig.Containers[i]
+
+		// Collect NAT4 Allocations for any container that uses NAT IP
+		if !c.UsesLANIPv4() {
+			subnet := lxcNet.Subnet
+			gateway := lxcNet.Gateway
+			bridge := "lxcbr0"
+			vType := "lxc"
+			if c.IsKVM() {
+				subnet = kvmNet.Subnet
+				gateway = kvmNet.Gateway
+				bridge = "virbr0"
+				vType = "kvm"
+			}
+			nat4Allocations = append(nat4Allocations, nat4Allocation{
+				ContainerID:    c.ID,
+				ContainerName:  c.Name,
+				LXCName:        c.LxcName(),
+				Virtualization: vType,
+				Status:         c.Status,
+				IP:             c.IP,
+				Subnet:         subnet,
+				Gateway:        gateway,
+				Bridge:         bridge,
+				MACAddress:     c.MACAddress,
+			})
+		}
 		for _, pm := range c.PortMappings {
 			if config.NATPortInRange(pm.HostPort) {
 				usedPorts[pm.HostPort] = true
@@ -216,6 +259,18 @@ func handleRoutingGet(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 	}
+	sort.SliceStable(nat4Allocations, func(i, j int) bool {
+		if nat4Allocations[i].IP != "" && nat4Allocations[j].IP != "" {
+			return nat4Allocations[i].IP < nat4Allocations[j].IP
+		}
+		if nat4Allocations[i].IP != "" {
+			return true
+		}
+		if nat4Allocations[j].IP != "" {
+			return false
+		}
+		return nat4Allocations[i].ContainerID < nat4Allocations[j].ContainerID
+	})
 	sort.SliceStable(nat4Mappings, func(i, j int) bool {
 		if nat4Mappings[i].HostPort == nat4Mappings[j].HostPort {
 			if nat4Mappings[i].HostIP != nat4Mappings[j].HostIP {
@@ -275,6 +330,7 @@ func handleRoutingGet(w http.ResponseWriter, r *http.Request) {
 				LXC: config.LXCNATNetwork(),
 				KVM: config.KVMNATNetwork(),
 			},
+			NAT4Allocations: nat4Allocations,
 			IPv4: routeCapacity{
 				Used:      ipv4Used,
 				Remaining: strconv.Itoa(ipv4Remaining),

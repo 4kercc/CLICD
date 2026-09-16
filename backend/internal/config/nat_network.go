@@ -142,3 +142,43 @@ func netmaskString(bits int) string {
 	}
 	return uint32IPv4(mask).String()
 }
+
+// IsValidLXCNATIP returns true if ipStr is within the configured LXC NAT subnet and is not the gateway or network/broadcast IP
+func IsValidLXCNATIP(ipStr string) bool {
+	addr, err := netip.ParseAddr(strings.TrimSpace(ipStr))
+	if err != nil || !addr.Is4() {
+		return false
+	}
+	net := LXCNATNetwork()
+	prefix, err := netip.ParsePrefix(net.Subnet)
+	if err != nil || !prefix.Contains(addr) {
+		return false
+	}
+	if addr.String() == net.Gateway {
+		return false
+	}
+	return true
+}
+
+// IsValidKVMNATIP returns true if ipStr is within the configured KVM NAT subnet and is not the gateway or network/broadcast IP
+func IsValidKVMNATIP(ipStr string) bool {
+	addr, err := netip.ParseAddr(strings.TrimSpace(ipStr))
+	if err != nil || !addr.Is4() {
+		return false
+	}
+	net := KVMNATNetwork()
+	prefix, err := netip.ParsePrefix(net.Subnet)
+	if err != nil || !prefix.Contains(addr) {
+		return false
+	}
+	if addr.String() == net.Gateway {
+		return false
+	}
+	return true
+}
+
+// IsValidNATIP returns true if ipStr is within either the LXC or KVM NAT subnet
+func IsValidNATIP(ipStr string) bool {
+	return IsValidLXCNATIP(ipStr) || IsValidKVMNATIP(ipStr)
+}
+

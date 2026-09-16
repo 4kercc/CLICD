@@ -696,6 +696,19 @@ export interface NAT4PortRange {
   end: number
 }
 
+export interface NAT4Allocation {
+  container_id: number
+  container_name: string
+  lxc_name: string
+  virtualization: string
+  status: string
+  ip: string
+  subnet: string
+  gateway: string
+  bridge: string
+  mac_address?: string
+}
+
 export interface NAT4Route {
   container_id: number
   container_name: string
@@ -751,6 +764,7 @@ export interface RoutingInfo {
     lxc: NATNetworkInfo
     kvm: NATNetworkInfo
   }
+  nat4_allocations?: NAT4Allocation[]
   ipv4: RouteCapacity
   lan_dhcp: RouteCapacity
   ipv6: RouteCapacity
@@ -1087,8 +1101,54 @@ export const deleteTask = (taskId: string) =>
 export const batchCreate = (containers: CreateContainerRequest[]) =>
   api.post<APIResponse<string[]>>('/batch-create', { containers })
 
-export const batchAction = (action: string, containers: number[], templateId?: string) =>
-  api.post<APIResponse>('/batch-action', { action, containers, template_id: templateId })
+export const batchAction = (action: string, containers: number[], templateId?: string, storagePoolId?: string) =>
+  api.post<APIResponse>('/batch-action', { action, containers, template_id: templateId, storage_pool_id: storagePoolId })
+
+export interface BatchConfigRequest {
+  containers: number[]
+  apply_vcpu?: boolean
+  vcpu?: number
+  apply_ram?: boolean
+  ram_mb?: number
+  apply_network_bw?: boolean
+  network_down_mbps?: number
+  network_up_mbps?: number
+  apply_io_speed?: boolean
+  io_read_mbps?: number
+  io_write_mbps?: number
+  apply_traffic_limit?: boolean
+  traffic_mode?: string
+  monthly_traffic_gb?: number
+  traffic_in_gb?: number
+  traffic_out_gb?: number
+  reset_traffic?: boolean
+  apply_expires_at?: boolean
+  expires_at?: string
+  apply_nat_quota?: boolean
+  nat_quota?: number
+  apply_snapshot_quota?: boolean
+  snapshot_quota?: number
+  apply_password?: boolean
+  password_mode?: 'random' | 'custom'
+  password?: string
+}
+
+export interface BatchConfigResultDetail {
+  container_id: number
+  container_name: string
+  success: boolean
+  error?: string
+  new_password?: string
+}
+
+export interface BatchConfigResponse {
+  success_count: number
+  failed_count: number
+  details: BatchConfigResultDetail[]
+}
+
+export const batchUpdateConfig = (payload: BatchConfigRequest) =>
+  api.post<APIResponse<BatchConfigResponse>>('/batch-config', payload)
 
 // Sub Users
 export interface SubUser {

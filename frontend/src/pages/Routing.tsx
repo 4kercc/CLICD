@@ -11,6 +11,7 @@ import {
   type IPv6Route,
   type LANDHCPRoute,
   type IPv6PrefixInfo,
+  type NAT4Allocation,
   type NAT4PortRange,
   type NAT4Route,
   type PublicIPv4Info,
@@ -36,6 +37,8 @@ export default function Routing() {
   const [editingIPv6, setEditingIPv6] = useState(false)
   const [savingIPv6, setSavingIPv6] = useState(false)
   const [ipv6Draft, setIPv6Draft] = useState<(IPv6PrefixInfo & { _id: number })[]>([])
+  const [nat4AllocPage, setNat4AllocPage] = useState(1)
+  const [nat4AllocSearch, setNat4AllocSearch] = useState('')
   const [nat4Page, setNat4Page] = useState(1)
   const [ipv6Page, setIPv6Page] = useState(1)
   const [nat4Search, setNat4Search] = useState('')
@@ -55,6 +58,7 @@ export default function Routing() {
 
   useEffect(() => { fetchData() }, [fetchData])
 
+  const nat4Allocations = routing?.nat4_allocations || []
   const publicIPv4s = routing?.public_ipv4_addresses || []
   const ipv4Assignments = routing?.ipv4_assignments || []
   const lanDHCPAssignments = routing?.lan_dhcp_assignments || []
@@ -230,6 +234,12 @@ export default function Routing() {
     }
   }
 
+  const filteredNat4Allocs = useMemo(() => {
+    const q = nat4AllocSearch.toLowerCase().trim()
+    if (!q) return nat4Allocations
+    return nat4Allocations.filter((item) => matchesNat4Allocation(item, q))
+  }, [nat4Allocations, nat4AllocSearch])
+
   const filteredNat4 = useMemo(() => {
     const q = nat4Search.toLowerCase().trim()
     if (!q) return nat4Mappings
@@ -242,6 +252,7 @@ export default function Routing() {
     return ipv6Assignments.filter((item) => matchesIPv6(item, q))
   }, [ipv6Assignments, ipv6Search])
 
+  useEffect(() => { setNat4AllocPage(1) }, [nat4AllocSearch])
   useEffect(() => { setNat4Page(1) }, [nat4Search])
   useEffect(() => { setIPv6Page(1) }, [ipv6Search])
 
@@ -254,10 +265,13 @@ export default function Routing() {
   }
 
   const pageSize = 10
+  const nat4AllocTotalPages = Math.max(1, Math.ceil(filteredNat4Allocs.length / pageSize))
   const nat4TotalPages = Math.max(1, Math.ceil(filteredNat4.length / pageSize))
   const ipv6TotalPages = Math.max(1, Math.ceil(filteredIPv6.length / pageSize))
+  const currentNat4AllocPage = Math.min(nat4AllocPage, nat4AllocTotalPages)
   const currentNat4Page = Math.min(nat4Page, nat4TotalPages)
   const currentIPv6Page = Math.min(ipv6Page, ipv6TotalPages)
+  const pagedNat4Allocations = filteredNat4Allocs.slice((currentNat4AllocPage - 1) * pageSize, currentNat4AllocPage * pageSize)
   const pagedNat4Mappings = filteredNat4.slice((currentNat4Page - 1) * pageSize, currentNat4Page * pageSize)
   const pagedIPv6Assignments = filteredIPv6.slice((currentIPv6Page - 1) * pageSize, currentIPv6Page * pageSize)
   const editingIPv4Assignment = editingIPv4Address ? assignedIPv4.get(editingIPv4Address) : undefined
@@ -590,6 +604,57 @@ export default function Routing() {
         )}
       </Panel>
 
+      <Panel
+        title={text.nat4Allocations}
+        subtitle={formatAddressSubtitle(filteredNat4Allocs.length, nat4Allocations.length, language)}
+        action={<SearchBox value={nat4AllocSearch} onChange={setNat4AllocSearch} placeholder={text.searchNATAllocations} />}
+      >
+        {nat4Allocations.length === 0 ? (
+          <EmptyState text={text.noNATAllocations} icon={<Network className="h-7 w-7" />} />
+        ) : (
+          <>
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[980px] text-sm">
+                <thead className="border-b border-gray-200 bg-gray-50 text-xs text-gray-500">
+                  <tr>
+                    <th className="px-4 py-3 text-left font-medium">{text.container}</th>
+                    <th className="px-4 py-3 text-left font-medium">{text.runtimeName}</th>
+                    <th className="px-4 py-3 text-left font-medium">{text.virtualization}</th>
+                    <th className="px-4 py-3 text-left font-medium">{text.guestIPv4}</th>
+                    <th className="px-4 py-3 text-left font-medium">{text.subnet}</th>
+                    <th className="px-4 py-3 text-left font-medium">{text.gateway}</th>
+                    <th className="px-4 py-3 text-left font-medium">{text.bridge}</th>
+                    <th className="px-4 py-3 text-left font-medium">MAC</th>
+                    <th className="px-4 py-3 text-left font-medium">{text.status}</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {pagedNat4Allocations.map((item) => (
+                    <tr key={`${item.container_id}-${item.ip}-${item.lxc_name}`} className="hover:bg-gray-50">
+                      <td className="px-4 py-3">
+                        <button onClick={() => navigate(`/container/${item.container_id}`)} className="inline-flex items-center gap-2 text-left font-medium text-black hover:underline">
+                          <Server className="h-4 w-4 text-gray-400" />
+                          {item.container_name}
+                        </button>
+                      </td>
+                      <td className="px-4 py-3 font-mono text-xs text-gray-600">{item.lxc_name}</td>
+                      <td className="px-4 py-3 text-xs uppercase font-medium text-gray-600">{item.virtualization || 'LXC'}</td>
+                      <td className="px-4 py-3 font-mono text-xs font-semibold text-gray-800">{item.ip || '-'}</td>
+                      <td className="px-4 py-3 font-mono text-xs text-gray-600">{item.subnet}</td>
+                      <td className="px-4 py-3 font-mono text-xs text-gray-600">{item.gateway}</td>
+                      <td className="px-4 py-3 font-mono text-xs text-gray-600">{item.bridge}</td>
+                      <td className="px-4 py-3 font-mono text-xs text-gray-600">{item.mac_address || '-'}</td>
+                      <td className="px-4 py-3"><StatusBadge status={item.status} language={language} /></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <Pagination page={currentNat4AllocPage} totalPages={nat4AllocTotalPages} totalItems={filteredNat4Allocs.length} pageSize={pageSize} onPageChange={setNat4AllocPage} language={language} />
+          </>
+        )}
+      </Panel>
+
       <Panel title={text.ipv4NAT} subtitle={formatMappingSubtitle(filteredNat4.length, nat4Mappings.length, language)} action={<SearchBox value={nat4Search} onChange={setNat4Search} placeholder={text.searchNAT} />}>
         {nat4Mappings.length === 0 ? (
           <EmptyState text={text.noIPv4NATMappings} icon={<Network className="h-7 w-7" />} />
@@ -843,6 +908,19 @@ function StatusBadge({ status, language }: { status: string; language: Language 
   )
 }
 
+function matchesNat4Allocation(item: NAT4Allocation, query: string) {
+  return (
+    item.container_name.toLowerCase().includes(query) ||
+    item.lxc_name.toLowerCase().includes(query) ||
+    (item.ip || '').toLowerCase().includes(query) ||
+    (item.gateway || '').toLowerCase().includes(query) ||
+    (item.subnet || '').toLowerCase().includes(query) ||
+    (item.bridge || '').toLowerCase().includes(query) ||
+    (item.virtualization || '').toLowerCase().includes(query) ||
+    (item.mac_address || '').toLowerCase().includes(query)
+  )
+}
+
 function matchesNat4(item: NAT4Route, query: string) {
   return (
     String(item.host_port).includes(query) ||
@@ -942,6 +1020,12 @@ const routingText = {
     source: '来源',
     local: '本机',
     manual: '手动',
+    nat4Allocations: '内网 (NAT) IP 分配',
+    searchNATAllocations: '搜索内网 IP...',
+    noNATAllocations: '暂无内网 IP 分配',
+    subnet: '子网',
+    bridge: '网桥',
+    virtualization: '虚拟化',
     ipv4NAT: 'IPv4 NAT',
     searchNAT: '搜索 NAT...',
     noIPv4NATMappings: '暂无 IPv4 NAT 映射',
@@ -1017,6 +1101,12 @@ const routingText = {
     source: 'Source',
     local: 'local',
     manual: 'manual',
+    nat4Allocations: 'Internal (NAT) IP Allocations',
+    searchNATAllocations: 'Search internal IP...',
+    noNATAllocations: 'No internal IP allocations',
+    subnet: 'Subnet',
+    bridge: 'Bridge',
+    virtualization: 'Type',
     ipv4NAT: 'IPv4 NAT',
     searchNAT: 'Search NAT...',
     noIPv4NATMappings: 'No IPv4 NAT mappings',

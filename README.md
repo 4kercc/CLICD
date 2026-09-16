@@ -112,6 +112,13 @@ curl -fsSL https://raw.githubusercontent.com/4kercc/CLICD/main/install.sh | sudo
 - **稳定性修复（中）**：全部 `virsh` 热路径调用（domstate / domifaddr / domstats / guest-ping / guest-exec 等）统一加 5–30 秒硬超时，libvirtd 僵死时面板不再整体冻结。
 - **其他加固**：服务启动时自动解冻遗留的冻结虚拟机；LXC PID 拼接前强制数字校验（防 shell 注入）；主机名/系统标签统一长度与控制字符校验；优雅关机等待延长至 45 秒，避免强制断电导致 Windows 蓝屏或文件系统损坏。
 
+### 12. ⚡ 批量运维体系 & 内网 IP 固化防漂移 (Batch Operations & Static IP Lock - v1.20.5)
+- **批量调整配置 (Batch Config Modification)**：支持勾选多台容器/虚拟机一键批量调整计算资源（vCPU、内存）、网络上下行限速、磁盘读写限速、月度流量配额模式与上限、到期时间、NAT 端口配额、快照配额，并支持批量生成独立随机密码或统一重置密码。支持字段级精准勾选覆盖，运行中实例即时生效。
+- **批量创建快照 (Batch Snapshot Creation)**：支持多选实例后选择本地或远程目标存储池一键批量打快照；通过异步任务队列机制调度执行并严格限制并发度，杜绝批量打快照打崩宿主机磁盘 I/O。
+- **LXC 容器 MAC 地址持久化与内网 IP 永久固化**：修复 LXC 容器每次重启随机生成 MAC 导致 `dnsmasq` 动态分配新内网 IP 漂移的缺陷。在容器创建和启动生命周期中自动生成并固化 `lxc.net.0.hwaddr`，确保容器重启后内网 IP 绝对固定。
+- **KVM/LXC NAT 内网子网精准过滤**：完善 IP 探针过滤规则，排除 Docker 桥接网卡（`172.17.0.1`）及其他虚拟网卡对 KVM/LXC 真实内网 NAT IP（`192.168.122.0/24` / `10.0.3.0/24`）的干扰，确保 iptables DNAT 端口映射及内网通信绝对可靠。
+- **路由管理内网 NAT 分配可视化**：在路由管理页面中新增容器与虚拟机的内网 IP 分配状态视图，直观展示各实例内网 IP、网桥与绑定状态。
+
 
 
 ## Features / 功能介绍

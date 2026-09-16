@@ -2205,7 +2205,7 @@ func (m *Manager) GetContainerIP(name string) (string, error) {
 		if err != nil {
 			continue
 		}
-		if ip := firstIPv4(string(out)); ip != "" {
+		if ip := firstKVMNATIPv4(string(out)); ip != "" {
 			return ip, nil
 		}
 	}
@@ -3351,6 +3351,16 @@ func firstIPv4(output string) string {
 	re := regexp.MustCompile(`\b((?:\d{1,3}\.){3}\d{1,3})(?:/\d+)?\b`)
 	for _, match := range re.FindAllStringSubmatch(output, -1) {
 		if len(match) > 1 && net.ParseIP(match[1]) != nil && !strings.HasPrefix(match[1], "127.") {
+			return match[1]
+		}
+	}
+	return ""
+}
+
+func firstKVMNATIPv4(output string) string {
+	re := regexp.MustCompile(`\b((?:\d{1,3}\.){3}\d{1,3})(?:/\d+)?\b`)
+	for _, match := range re.FindAllStringSubmatch(output, -1) {
+		if len(match) > 1 && config.IsValidKVMNATIP(match[1]) {
 			return match[1]
 		}
 	}

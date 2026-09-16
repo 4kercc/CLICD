@@ -10,6 +10,7 @@ import (
 
 	"clicd/internal/config"
 	"clicd/internal/lxc"
+	"clicd/internal/storage/remote"
 )
 
 type TaskType string
@@ -21,6 +22,7 @@ const (
 	TaskRestart   TaskType = "restart"
 	TaskDelete    TaskType = "delete"
 	TaskReinstall TaskType = "reinstall"
+	TaskSnapshot  TaskType = "snapshot"
 )
 
 type Task struct {
@@ -502,6 +504,10 @@ func (q *TaskQueue) runOperationTask(task *Task) {
 			}
 		}
 	}
+	auditUser := task.User
+	if auditUser == "" {
+		auditUser = "admin"
+	}
 	if err == nil && isSecurityStopTask(task) && !config.AppConfig.SecurityAutoShutdown {
 		skipped = true
 	}
@@ -527,13 +533,15 @@ func (q *TaskQueue) runOperationTask(task *Task) {
 			} else {
 				err = reinstallByRuntime(task.ContainerID, task.TemplateID)
 			}
+		case TaskSnapshot:
+			var snap config.Snapshot
+			snap, err = createSnapshotByRuntime(task.ContainerID, auditUser, false, 0, task.TemplateID)
+			if err == nil {
+				remote.SyncSnapshotToRemoteStorage(&snap)
+			}
 		}
 	}
 
-	auditUser := task.User
-	if auditUser == "" {
-		auditUser = "admin"
-	}
 	if err != nil {
 		config.AddAuditLogFull(string(task.Type), task.ContainerName, "失败: "+err.Error(), auditUser, task.IP, task.UserAgent, false, err.Error())
 		q.finishTask(task, "failed", err)
@@ -883,17 +891,18 @@ func HandleBatchAction(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
 		return
 	}
-	if !hasAnyScope(r, "container:power", "container:delete", "container:reinstall") {
+	if !hasAnyScope(r, "container:power", "container:delete", "container:reinstall", "snapshot:create", "container:write") {
 		jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "Insufficient API key scope"})
 		return
 	}
 	var req struct {
-		Action       string `json:"action"`
-		Containers   []int  `json:"containers"`
-		TemplateID   string `json:"template_id,omitempty"`
-		SSHAuthMode  string `json:"ssh_auth_mode,omitempty"`
-		SSHPassword  string `json:"ssh_password,omitempty"`
-		SSHPublicKey string `json:"ssh_public_key,omitempty"`
+		Action        string `json:"action"`
+		Containers    []int  `json:"containers"`
+		TemplateID    string `json:"template_id,omitempty"`
+		StoragePoolID string `json:"storage_pool_id,omitempty"`
+		SSHAuthMode   string `json:"ssh_auth_mode,omitempty"`
+		SSHPassword   string `json:"ssh_password,omitempty"`
+		SSHPublicKey  string `json:"ssh_public_key,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Invalid request body"})
@@ -916,6 +925,12 @@ func HandleBatchAction(w http.ResponseWriter, r *http.Request) {
 	case "delete":
 		taskType = TaskDelete
 		requiredScope = "container:delete"
+	case "snapshot":
+		taskType = TaskSnapshot
+		requiredScope = "snapshot:create"
+		if req.StoragePoolID != "" {
+			req.TemplateID = req.StoragePoolID
+		}
 	case "reinstall":
 		if req.TemplateID == "" {
 			jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "template_id required"})
@@ -976,6 +991,190 @@ func HandleBatchAction(w http.ResponseWriter, r *http.Request) {
 		ids = globalQueue.EnqueueBatchWithAudit(taskType, req.Containers, req.TemplateID, requestActor(r), clientIP(r), r.UserAgent())
 	}
 	jsonResponse(w, http.StatusAccepted, APIResponse{Success: true, Data: ids})
+}
+
+// BatchConfigRequest defines the payload for batch modifying container configurations
+type BatchConfigRequest struct {
+	Containers         []int    `json:"containers"`
+	ApplyVCPU          bool     `json:"apply_vcpu"`
+	VCPU               float64  `json:"vcpu"`
+	ApplyRAM           bool     `json:"apply_ram"`
+	RAMMB              int      `json:"ram_mb"`
+	ApplyNetworkBW     bool     `json:"apply_network_bw"`
+	NetworkDownMbps    int      `json:"network_down_mbps"`
+	NetworkUpMbps      int      `json:"network_up_mbps"`
+	ApplyIOSpeed       bool     `json:"apply_io_speed"`
+	IOReadMBps         int      `json:"io_read_mbps"`
+	IOWriteMBps        int      `json:"io_write_mbps"`
+	ApplyTrafficLimit  bool     `json:"apply_traffic_limit"`
+	TrafficMode        string   `json:"traffic_mode"` // "total" | "in_out"
+	MonthlyTrafficGB   int      `json:"monthly_traffic_gb"`
+	TrafficInGB        int      `json:"traffic_in_gb"`
+	TrafficOutGB       int      `json:"traffic_out_gb"`
+	ResetTraffic       bool     `json:"reset_traffic"`
+	ApplyExpiresAt     bool     `json:"apply_expires_at"`
+	ExpiresAt          string   `json:"expires_at"`
+	ApplyNATQuota      bool     `json:"apply_nat_quota"`
+	NATQuota           int      `json:"nat_quota"`
+	ApplySnapshotQuota bool     `json:"apply_snapshot_quota"`
+	SnapshotQuota      int      `json:"snapshot_quota"`
+	ApplyPassword      bool     `json:"apply_password"`
+	PasswordMode       string   `json:"password_mode"` // "random" | "custom"
+	Password           string   `json:"password"`
+}
+
+type BatchConfigResultItem struct {
+	ContainerID   int    `json:"container_id"`
+	ContainerName string `json:"container_name"`
+	Success       bool   `json:"success"`
+	Error         string `json:"error,omitempty"`
+	NewPassword   string `json:"new_password,omitempty"`
+}
+
+// HandleBatchConfig handles batch modifying container configurations
+func HandleBatchConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
+		return
+	}
+	if !hasAnyScope(r, "container:write", "container:power") {
+		jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "Insufficient API key scope"})
+		return
+	}
+
+	var req BatchConfigRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Invalid request body"})
+		return
+	}
+	if len(req.Containers) == 0 {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "No containers specified"})
+		return
+	}
+
+	user := requestUser(r)
+	results := make([]BatchConfigResultItem, 0, len(req.Containers))
+	successCount := 0
+	failedCount := 0
+
+	for _, id := range req.Containers {
+		c := config.FindContainer(id)
+		if c == nil || !isContainerAllowedForRequest(r, c.UUID) {
+			results = append(results, BatchConfigResultItem{
+				ContainerID: id,
+				Success:     false,
+				Error:       "Container not found or access denied",
+			})
+			failedCount++
+			continue
+		}
+
+		itemResult := BatchConfigResultItem{
+			ContainerID:   c.ID,
+			ContainerName: c.Name,
+			Success:       true,
+		}
+
+		// 1. Hardware & Resource Limits
+		if req.ApplyVCPU {
+			if req.VCPU > 0 {
+				c.VCPU = req.VCPU
+			}
+		}
+		if req.ApplyRAM {
+			if req.RAMMB > 0 {
+				c.RAMMB = req.RAMMB
+			}
+		}
+		if req.ApplyNetworkBW {
+			if req.NetworkDownMbps >= 0 && req.NetworkUpMbps >= 0 {
+				down := req.NetworkDownMbps
+				up := req.NetworkUpMbps
+				applyNetworkLimitPatch(c, nil, &down, &up)
+			}
+		}
+		if req.ApplyIOSpeed {
+			if req.IOReadMBps >= 0 && req.IOWriteMBps >= 0 {
+				read := req.IOReadMBps
+				write := req.IOWriteMBps
+				applyIOLimitPatch(c, nil, &read, &write)
+			}
+		}
+
+		// 2. Traffic Limits & Reset
+		if req.ApplyTrafficLimit {
+			if req.TrafficMode == "in_out" {
+				c.TrafficMode = "in_out"
+				c.TrafficInGB = req.TrafficInGB
+				c.TrafficOutGB = req.TrafficOutGB
+			} else {
+				c.TrafficMode = "total"
+				c.MonthlyTrafficGB = req.MonthlyTrafficGB
+			}
+		}
+		if req.ResetTraffic {
+			c.TrafficUsedRX = 0
+			c.TrafficUsedTX = 0
+			c.TrafficResetDate = time.Now().Format("2006-01")
+		}
+
+		// 3. Expiry
+		if req.ApplyExpiresAt {
+			c.ExpiresAt = strings.TrimSpace(req.ExpiresAt)
+		}
+
+		// 4. NAT Quota
+		if req.ApplyNATQuota {
+			if req.NATQuota >= len(c.PortMappings) && req.NATQuota >= 0 {
+				c.PortMappingLimit = req.NATQuota
+			}
+		}
+
+		// 5. Snapshot Quota
+		if req.ApplySnapshotQuota {
+			if req.SnapshotQuota >= 1 {
+				c.SnapshotLimit = req.SnapshotQuota
+			}
+		}
+
+		// Save container state
+		config.NormalizeContainerResourceAliases(c)
+
+		// Apply limits to running container
+		if c.Status == "running" && (req.ApplyVCPU || req.ApplyRAM || req.ApplyNetworkBW || req.ApplyIOSpeed) {
+			_ = applyLimitsByRuntime(c)
+		}
+
+		// 6. Password Reset
+		if req.ApplyPassword {
+			pwd := ""
+			if req.PasswordMode == "custom" {
+				pwd = strings.TrimSpace(req.Password)
+			}
+			newPwd, err := resetPasswordByRuntime(c.ID, pwd)
+			if err != nil {
+				itemResult.Error = "Config updated but password reset failed: " + err.Error()
+			} else {
+				itemResult.NewPassword = newPwd
+			}
+		}
+
+		results = append(results, itemResult)
+		successCount++
+		config.AddAuditLog("batch.config", c.Name, "Batch config updated", user)
+	}
+
+	_ = config.SaveConfig()
+
+	jsonResponse(w, http.StatusOK, APIResponse{
+		Success: true,
+		Message: fmt.Sprintf("批量处理完成: 成功 %d 个, 失败 %d 个", successCount, failedCount),
+		Data: map[string]interface{}{
+			"success_count": successCount,
+			"failed_count":  failedCount,
+			"details":       results,
+		},
+	})
 }
 
 // HandleTaskDelete deletes a specific task by ID
