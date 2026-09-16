@@ -286,8 +286,12 @@ func Run() {
 
 func printMenu() {
 	webStatus := "启动"
-	if isWebPanelRunning() {
-		webStatus = "停止"
+	if isWebPanelRunning() && !config.AppConfig.WebAccessDisabled {
+		webStatus = "关闭 Web 访问入口"
+	} else if config.AppConfig.WebAccessDisabled {
+		webStatus = "开启 Web 访问入口"
+	} else {
+		webStatus = "启动 Web 服务"
 	}
 	cliPrintln("")
 	cliPrintln("  ==========================================")
@@ -295,10 +299,13 @@ func printMenu() {
 	cliPrintln("  ==========================================")
 	cliPrintln("")
 	cliPrintf("  Web 面板: %s (端口 %d)\n", func() string {
-		if isWebPanelRunning() {
-			return "运行中"
+		if !isWebPanelRunning() {
+			return "服务已停止"
 		}
-		return "已停止"
+		if config.AppConfig.WebAccessDisabled {
+			return "运行中 (已关闭访问入口/安全封锁)"
+		}
+		return "运行中 (正常开放)"
 	}(), config.AppConfig.Port)
 	cliPrintf("  当前版本: %s\n", version.Current())
 	cliPrintln("")
@@ -310,7 +317,7 @@ func printMenu() {
 	cliPrintln("  6. 删除容器")
 	cliPrintln("  7. 重装容器系统")
 	cliPrintln("  8. 重置 Web 管理员密码")
-	cliPrintf("  9. %s Web 面板\n", webStatus)
+	cliPrintf("  9. %s\n", webStatus)
 	cliPrintln("  10. 导入现有 LXC 容器")
 	cliPrintln("  11. 检查并升级 CLICD")
 	cliPrintln("  12. 卸载 CLICD")
@@ -611,12 +618,25 @@ func cliResetPassword(reader *bufio.Reader) {
 }
 
 func cliToggleWebPanel() {
-	if isWebPanelRunning() {
-		if err := stopService("clicd"); err != nil {
-			cliPrintf("停止 Web 面板失败: %v\n", err)
+	if config.AppConfig.WebAccessDisabled {
+		config.AppConfig.WebAccessDisabled = false
+		if err := config.SaveConfig(); err != nil {
+			cliPrintf("保存配置失败: %v\n", err)
 			return
 		}
-		cliPrintln("Web 面板已停止，LXC 容器不会受影响。")
+		cliPrintln("Web 访问入口已开启！")
+		restartWebPanelForConfigChange()
+		return
+	}
+
+	if isWebPanelRunning() {
+		config.AppConfig.WebAccessDisabled = true
+		if err := config.SaveConfig(); err != nil {
+			cliPrintf("保存配置失败: %v\n", err)
+			return
+		}
+		cliPrintln("Web 访问入口已关闭（安全封锁生效）。")
+		restartWebPanelForConfigChange()
 		return
 	}
 
@@ -624,7 +644,9 @@ func cliToggleWebPanel() {
 		cliPrintf("启动 Web 面板失败: %v\n", err)
 		return
 	}
-	cliPrintln("Web 面板已启动")
+	config.AppConfig.WebAccessDisabled = false
+	_ = config.SaveConfig()
+	cliPrintln("Web 面板已启动并开启访问入口。")
 }
 
 type githubRelease struct {

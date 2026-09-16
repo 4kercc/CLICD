@@ -657,6 +657,9 @@ func loadConfigFromDB() (*ClicdConfig, bool, error) {
 	if raw := strings.TrimSpace(meta["panel_access_policy"]); raw != "" {
 		_ = json.Unmarshal([]byte(raw), &cfg.PanelAccessPolicy)
 	}
+	if raw := strings.TrimSpace(meta["web_access_disabled"]); raw != "" {
+		cfg.WebAccessDisabled = atob(raw)
+	}
 	if raw := strings.TrimSpace(meta["storage_pools"]); raw != "" {
 		_ = json.Unmarshal([]byte(raw), &cfg.StoragePools)
 	}
@@ -665,6 +668,9 @@ func loadConfigFromDB() (*ClicdConfig, bool, error) {
 	}
 	if raw := strings.TrimSpace(meta["custom_lxc_images"]); raw != "" {
 		_ = json.Unmarshal([]byte(raw), &cfg.CustomLXCImages)
+	}
+	if raw := strings.TrimSpace(meta["telegram"]); raw != "" {
+		_ = json.Unmarshal([]byte(raw), &cfg.Telegram)
 	}
 
 	if cfg.Containers, err = loadContainers(); err != nil {
@@ -777,6 +783,7 @@ func saveMeta(tx *sql.Tx) error {
 	storagePoolsJSON, _ := json.Marshal(AppConfig.StoragePools)
 	customKVMImagesJSON, _ := json.Marshal(AppConfig.CustomKVMImages)
 	customLXCImagesJSON, _ := json.Marshal(AppConfig.CustomLXCImages)
+	telegramJSON, _ := json.Marshal(AppConfig.Telegram)
 		values := map[string]string{
 			"admin_user":             AppConfig.AdminUser,
 			"admin_pass_hash":        AppConfig.AdminPassHash,
@@ -802,9 +809,11 @@ func saveMeta(tx *sql.Tx) error {
 		"public_ipv6_prefixes":   string(publicIPv6PrefixesJSON),
 		"webssh_allowed_origins": string(webSSHAllowedOriginsJSON),
 		"panel_access_policy":    string(panelAccessPolicyJSON),
+		"web_access_disabled":    btoa(AppConfig.WebAccessDisabled),
 		"storage_pools":          string(storagePoolsJSON),
 		"custom_kvm_images":      string(customKVMImagesJSON),
 		"custom_lxc_images":      string(customLXCImagesJSON),
+		"telegram":               string(telegramJSON),
 		"schema_version":         "1",
 		"updated_at":             time.Now().Format("2006-01-02 15:04:05"),
 	}

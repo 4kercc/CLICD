@@ -28,6 +28,7 @@ func main() {
 	isCliMode := false
 	noWebAutostart := false
 	isAccessPolicyCommand := len(os.Args) > 1 && os.Args[1] == "access-policy"
+	isWebCommand := len(os.Args) > 1 && (os.Args[1] == "web" || os.Args[1] == "web-panel")
 	for _, arg := range os.Args[1:] {
 		if arg == "server" || arg == "-s" || arg == "--server" {
 			isServerMode = true
@@ -52,6 +53,14 @@ func main() {
 	if isAccessPolicyCommand {
 		if err := cli.RunAccessPolicyCommand(os.Args[2:]); err != nil {
 			fmt.Fprintf(os.Stderr, "Access policy error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	if isWebCommand {
+		if err := cli.RunWebCommand(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "Web command error: %v\n", err)
 			os.Exit(1)
 		}
 		return

@@ -859,13 +859,25 @@ type ClicdConfig struct {
 	PublicIPv6Prefixes   []PublicIPv6Prefix     `json:"public_ipv6_prefixes"`
 	WebSSHAllowedOrigins []string               `json:"webssh_allowed_origins"`
 	PanelAccessPolicy    PanelAccessPolicy      `json:"panel_access_policy"`
+	WebAccessDisabled    bool                   `json:"web_access_disabled"`
 	SecurityAutoShutdown bool                   `json:"security_auto_shutdown"`
 	TaskConcurrency      int                    `json:"task_concurrency"`
 	Language             string                 `json:"language"`
-	SSL                  SSLConfig              `json:"ssl"`
-	SSLCertificates      map[string]SSLConfig   `json:"ssl_certificates"`
-	StoragePools         []StoragePool          `json:"storage_pools"`
-}
+		SSL                  SSLConfig              `json:"ssl"`
+		SSLCertificates      map[string]SSLConfig   `json:"ssl_certificates"`
+		StoragePools         []StoragePool          `json:"storage_pools"`
+		Telegram             TelegramConfig         `json:"telegram"`
+	}
+
+	// TelegramConfig holds settings for Telegram Bot control and notifications
+	type TelegramConfig struct {
+		Enabled      bool     `json:"enabled"`
+		BotToken     string   `json:"bot_token"`
+		AdminChatIDs []int64  `json:"admin_chat_ids"` // Whitelisted Telegram Chat IDs
+		NotifyAlerts bool     `json:"notify_alerts"`  // Push security alerts
+		NotifyEvents bool     `json:"notify_events"`  // Push lifecycle / traffic events
+		ProxyURL     string   `json:"proxy_url,omitempty"`
+	}
 
 const (
 	KVMProvisionerLinuxCloudInit = "linux-cloud-init"
@@ -904,6 +916,19 @@ type CustomLXCImage struct {
 var configPath string
 var AppConfig *ClicdConfig
 var allocationMu sync.Mutex
+
+// Callbacks for decoupled runtime and bot integrations
+var (
+	StartContainerCallback             func(id int) error
+	StopContainerCallback              func(id int) error
+	RestartContainerCallback           func(id int) error
+	ResetPasswordCallback              func(id int) (string, error)
+	CreateSnapshotCallback             func(id int, user string) (string, error)
+	BatchActionCallback                func(ids []int, action string) error
+	BatchCreateQuickVMCallback         func(namePrefix string, count int, templateID string, vcpu float64, ramMB int, diskGB int, isKVM bool) (int, error)
+	BatchAdjustQuickConfigCallback     func(ids []int, vcpu float64, ramMB int, diskGB int, downMbps int, upMbps int) (int, error)
+	BatchRestoreLatestSnapshotCallback func(ids []int) (int, error)
+)
 
 const DefaultSnapshotLimit = 3
 

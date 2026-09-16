@@ -577,6 +577,24 @@ export const getPanelAccessPolicy = () =>
 export const updatePanelAccessPolicy = (data: Pick<PanelAccessPolicy, 'enabled' | 'allowed_sources' | 'trusted_proxies'>) =>
   api.put<APIResponse<PanelAccessPolicy>>('/access-policy', data)
 
+export interface TelegramSettings {
+  enabled: boolean
+  bot_token: string
+  admin_chat_ids: number[]
+  notify_alerts: boolean
+  notify_events: boolean
+  proxy_url?: string
+}
+
+export const getTelegramSettings = () =>
+  api.get<APIResponse<TelegramSettings>>('/telegram')
+
+export const updateTelegramSettings = (data: TelegramSettings) =>
+  api.put<APIResponse<TelegramSettings>>('/telegram', data)
+
+export const testTelegramMessage = (data: Partial<TelegramSettings>) =>
+  api.post<APIResponse>('/telegram/test', data)
+
 // Containers
 export const getContainers = () =>
   api.get<APIResponse<Container[]>>('/containers')
