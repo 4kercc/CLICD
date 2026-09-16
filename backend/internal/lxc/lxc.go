@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"net"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -557,6 +558,13 @@ func (m *Manager) CreateContainer(cfg ContainerConfig) error {
 		return err
 	}
 
+	// Ensure a persistent MAC address is generated and written to LXC config
+	macAddress, err := m.ensureLXCMACAddress(lxcName, "")
+	if err != nil {
+		fmt.Printf("Warning: failed to ensure persistent LXC MAC for %s: %v\n", lxcName, err)
+	}
+	_ = macAddress
+
 	cfg.ReportProgress("addresses", "分配 IPv4、IPv6 与 NAT 端口")
 	publicIPv4s, err := AllocatePublicIPv4Assignments(id, cfg.PublicIPv4s, cfg.IPv4Count, cfg.AssignIPv4)
 	if err != nil {
@@ -963,6 +971,66 @@ func readLXCConfigValue(lxcName string, key string) string {
 		}
 	}
 	return ""
+}
+
+// randomLXCMAC generates a random MAC address with the standard LXC OUI prefix 00:16:3e
+func randomLXCMAC() string {
+	b := make([]byte, 3)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("00:16:3e:%02x:%02x:%02x", time.Now().UnixNano()&0xff, (time.Now().UnixNano()>>8)&0xff, (time.Now().UnixNano()>>16)&0xff)
+	}
+	return fmt.Sprintf("00:16:3e:%02x:%02x:%02x", b[0], b[1], b[2])
+}
+
+// ensureLXCMACAddress ensures that an LXC container has a persistent MAC address configured.
+// If the container's config file or DB record is missing a MAC address, it assigns/generates one
+// and writes `lxc.net.0.hwaddr` into /var/lib/lxc/<lxcName>/config so that dnsmasq/lxc-net always
+// issues the same IP across restarts.
+func (m *Manager) ensureLXCMACAddress(lxcName string, preferredMAC string) (string, error) {
+	configPath := filepath.Join(m.LxcPath, lxcName, "config")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read container config for MAC check: %v", err)
+	}
+	content := string(data)
+	existingMAC := readLXCConfigValue(lxcName, "lxc.net.0.hwaddr")
+	if existingMAC != "" {
+		return existingMAC, nil
+	}
+
+	mac := strings.TrimSpace(preferredMAC)
+	if mac == "" {
+		mac = randomLXCMAC()
+	}
+
+	lines := strings.Split(content, "\n")
+	var next []string
+	hwaddrInserted := false
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "lxc.net.0.hwaddr") {
+			// Replace existing line
+			next = append(next, fmt.Sprintf("lxc.net.0.hwaddr = %s", mac))
+			hwaddrInserted = true
+			continue
+		}
+		next = append(next, line)
+		// Insert after lxc.net.0.flags or lxc.net.0.link or lxc.net.0.type if not already inserted
+		if !hwaddrInserted && (strings.HasPrefix(trimmed, "lxc.net.0.flags") || strings.HasPrefix(trimmed, "lxc.net.0.link") || strings.HasPrefix(trimmed, "lxc.net.0.type")) {
+			next = append(next, fmt.Sprintf("lxc.net.0.hwaddr = %s", mac))
+			hwaddrInserted = true
+		}
+	}
+
+	if !hwaddrInserted {
+		next = append(next, fmt.Sprintf("lxc.net.0.hwaddr = %s", mac))
+	}
+
+	if err := os.WriteFile(configPath, []byte(strings.Join(next, "\n")), 0644); err != nil {
+		return "", fmt.Errorf("failed to write lxc.net.0.hwaddr to config: %v", err)
+	}
+	return mac, nil
 }
 
 func (m *Manager) ensureLANHostAccess(c *config.Container) error {
@@ -2007,6 +2075,14 @@ func (m *Manager) StartContainer(id int) error {
 			return err
 		}
 	}
+	// Ensure persistent MAC address is configured before container boot
+	if mac, err := m.ensureLXCMACAddress(lxcName, c.MACAddress); err == nil && mac != "" {
+		if c.MACAddress != mac {
+			c.MACAddress = mac
+			config.SaveConfig()
+		}
+	}
+
 	EnsureAssignedPublicIPv4s(c.PublicIPv4s)
 
 	logFile, consoleLog, output, err := m.startLXCContainerDaemon(lxcName)
@@ -3148,18 +3224,34 @@ func (m *Manager) GetContainerIP(lxcName string) (string, error) {
 	}
 
 	ip := strings.TrimSpace(string(output))
-	// Always prefer IPv4; IPv6 addresses break WebSSH and port forwarding.
-	re := regexp.MustCompile(`(\d+\.\d+\.\d+\.\d+)`)
-	matches := re.FindStringSubmatch(ip)
-	if len(matches) > 1 {
-		return matches[1], nil
+	// Look for IPv4 matching LXC NAT subnet first
+	re := regexp.MustCompile(`\b((?:\d{1,3}\.){3}\d{1,3})(?:/\d+)?\b`)
+	for _, match := range re.FindAllStringSubmatch(ip, -1) {
+		if len(match) > 1 && config.IsValidLXCNATIP(match[1]) {
+			return match[1], nil
+		}
+	}
+	// If no valid NAT IPv4 found from lxc-info, check any valid private IPv4 excluding 127.*
+	for _, match := range re.FindAllStringSubmatch(ip, -1) {
+		if len(match) > 1 && net.ParseIP(match[1]) != nil && !strings.HasPrefix(match[1], "127.") && !strings.HasPrefix(match[1], "172.17.") {
+			return match[1], nil
+		}
 	}
 	// If no IPv4 found, try lxc-attach as fallback (DHCP may be delayed)
 	attachCmd := exec.Command("lxc-attach", "-n", lxcName, "--", "sh", "-c", "ip -4 addr show eth0 2>/dev/null | grep -oP 'inet \\K[\\d.]+' || true")
 	if attachOut, attachErr := attachCmd.Output(); attachErr == nil {
 		v4 := strings.TrimSpace(string(attachOut))
 		if v4 != "" {
-			return v4, nil
+			for _, match := range re.FindAllStringSubmatch(v4, -1) {
+				if len(match) > 1 && config.IsValidLXCNATIP(match[1]) {
+					return match[1], nil
+				}
+			}
+			for _, match := range re.FindAllStringSubmatch(v4, -1) {
+				if len(match) > 1 && net.ParseIP(match[1]) != nil && !strings.HasPrefix(match[1], "127.") && !strings.HasPrefix(match[1], "172.17.") {
+					return match[1], nil
+				}
+			}
 		}
 	}
 	return "", fmt.Errorf("no IPv4 address found for %s (IPv6 is disabled for containers)", lxcName)

@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router'
 import {
   ArrowDown,
   ArrowUp,
+  Camera,
   Cpu,
   Eye,
   HardDrive,
@@ -15,12 +16,15 @@ import {
   RotateCcw,
   Search,
   Server,
+  Sliders,
   Square,
   Trash2,
   ListTodo,
   X,
 } from 'lucide-react'
 import CreateContainerModal from '../components/CreateContainerModal'
+import BatchConfigModal from '../components/BatchConfigModal'
+import BatchSnapshotModal from '../components/BatchSnapshotModal'
 import { useAuth } from '../contexts/AuthContext'
 import { useLanguage } from '../contexts/LanguageContext'
 import {
@@ -43,6 +47,8 @@ export default function Containers() {
   const [usageByName, setUsageByName] = useState<Record<string, ContainerUsage>>({})
   const [loading, setLoading] = useState(true)
   const [showCreate, setShowCreate] = useState(false)
+  const [showBatchConfig, setShowBatchConfig] = useState(false)
+  const [showBatchSnapshot, setShowBatchSnapshot] = useState(false)
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [batchLoading, setBatchLoading] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
@@ -162,7 +168,7 @@ export default function Containers() {
   }, [fetchData, fetchTasks])
 
   const actionLabels: Record<string, string> = {
-    create: '正在初始化', start: '开机中', stop: '关机中', restart: '重启中', delete: '删除中', reinstall: '重装中',
+    create: '正在初始化', start: '开机中', stop: '关机中', restart: '重启中', delete: '删除中', reinstall: '重装中', snapshot: '创建快照中',
   }
 
   const displayContainers = buildDisplayContainers(containers, queuedCreates, tasks)
@@ -333,6 +339,12 @@ export default function Containers() {
           {selected.size > 0 && (
             <div className="flex flex-wrap items-center justify-end gap-1.5">
               <span className="text-xs text-gray-500">{selected.size} 个</span>
+              <button onClick={() => setShowBatchConfig(true)} disabled={batchLoading} className="inline-flex h-8 items-center gap-1 px-2.5 text-xs text-gray-700 hover:bg-gray-100 rounded border border-gray-300 disabled:opacity-50 disabled:cursor-not-allowed">
+                <Sliders className="w-3 h-3 text-black" />调整配置
+              </button>
+              <button onClick={() => setShowBatchSnapshot(true)} disabled={batchLoading || hasActiveTasks(tasks)} className="inline-flex h-8 items-center gap-1 px-2.5 text-xs text-gray-700 hover:bg-gray-100 rounded border border-gray-300 disabled:opacity-50 disabled:cursor-not-allowed">
+                <Camera className="w-3 h-3 text-blue-600" />批量快照
+              </button>
               <button onClick={() => handleBatchAction('start')} disabled={batchLoading || hasActiveTasks(tasks)} className="inline-flex h-8 items-center gap-1 px-2.5 text-xs text-gray-700 hover:bg-gray-100 rounded border border-gray-300 disabled:opacity-50 disabled:cursor-not-allowed">
                 <Play className="w-3 h-3" />{batchLoading ? '执行中...' : '开机'}
               </button>
@@ -564,6 +576,28 @@ export default function Containers() {
       )}
 
       <CreateContainerModal isOpen={showCreate} onClose={() => setShowCreate(false)} onSuccess={handleCreateQueued} existingNames={containers.map(c => c.name)} />
+      {showBatchConfig && (
+        <BatchConfigModal
+          isOpen={showBatchConfig}
+          onClose={() => setShowBatchConfig(false)}
+          onSuccess={() => {
+            setSelected(new Set())
+            fetchData()
+          }}
+          selectedContainers={containers.filter((c) => selected.has(c.id))}
+        />
+      )}
+      {showBatchSnapshot && (
+        <BatchSnapshotModal
+          isOpen={showBatchSnapshot}
+          onClose={() => setShowBatchSnapshot(false)}
+          onSuccess={() => {
+            setSelected(new Set())
+            fetchTasks()
+          }}
+          selectedContainers={containers.filter((c) => selected.has(c.id))}
+        />
+      )}
       {showTasks && (
         <TaskQueueModal
           tasks={tasks}
@@ -639,7 +673,7 @@ function StatusBadge({ running, initializing, task, placeholder, policyBlocked }
 
   if (task && task.status !== 'done' && task.status !== 'failed') {
     const taskLabels: Record<string, string> = {
-      start: '开机中', stop: '关机中', restart: '重启中', delete: '删除中', reinstall: '重装中',
+      start: '开机中', stop: '关机中', restart: '重启中', delete: '删除中', reinstall: '重装中', snapshot: '快照中',
     }
     return (
       <span className={`${baseClass} bg-amber-50 text-amber-700`}>

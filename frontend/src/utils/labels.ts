@@ -6,6 +6,7 @@ export function actionLabel(action: string): string {
     restart: '重启',
     delete: '删除',
     reinstall: '重装',
+    snapshot: '创建快照',
   }
   return map[action] || action
 }
