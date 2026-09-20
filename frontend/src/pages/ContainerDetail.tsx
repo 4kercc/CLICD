@@ -293,11 +293,20 @@ export default function ContainerDetail() {
       if (res.data.data) setContainer(res.data.data)
       if (hostRes?.data.data) setHostInfo(hostRes.data.data)
     } catch (err) {
+      // The instance was removed (deleted here or from another tab/session).
+      // Without this the page would keep rendering the last known snapshot with
+      // a stuck task label and every action would fail with a 404.
+      const status = (err as { response?: { status?: number } })?.response?.status
+      if (status === 404) {
+        await dialog.alert('实例已不存在', '该容器/虚拟机已被删除，即将返回列表页。')
+        navigate('/containers', { replace: true })
+        return
+      }
       console.error('Failed to fetch container:', err)
     } finally {
       setLoading(false)
     }
-  }, [containerIdentifier, isSubUser])
+  }, [containerIdentifier, isSubUser, dialog, navigate])
 
   const fetchSnapshots = useCallback(async () => {
     if (!containerIdentifier) return
@@ -545,7 +554,13 @@ export default function ContainerDetail() {
       await fetchContainer()
     } catch (err) {
       console.error('Action failed:', err)
-      dialog.alert('操作失败', (err as Error).message || '请稍后重试')
+      const failure = err as { response?: { status?: number; data?: { message?: string } }; message?: string }
+      const detail = failure.response?.data?.message || failure.message || '请稍后重试'
+      if (failure.response?.status === 409) {
+        dialog.alert('操作未执行', `${detail}\n\n该实例已有任务排队或正在执行，请等待当前任务结束后重试。`)
+        return
+      }
+      dialog.alert('操作失败', detail)
     } finally {
       setActionLoading(null)
     }

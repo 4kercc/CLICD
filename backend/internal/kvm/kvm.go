@@ -726,8 +726,11 @@ func (m *Manager) StartContainer(id int) error {
 	}
 	_ = exec.Command("virsh", "dommemstat", name, "--period", "10", "--live").Run()
 	_ = exec.Command("virsh", "dommemstat", name, "--period", "10", "--config").Run()
-	// Windows VMs need manual install via VNC — don't require IP on first boot
-	isWindows := IsWindowsImage(c.Template)
+	// Windows VMs need manual install via VNC — don't require IP on first boot.
+	// The check must tolerate relabeled templates (e.g. "windows"), otherwise a
+	// VM whose disk is still empty blocks this task for the full Linux IP window
+	// and every queued stop/delete behind it looks stuck in the panel.
+	isWindows := looksLikeWindowsTemplate(c.Template)
 	if isWindows {
 		for i := 0; i < 15; i++ {
 			if ip, err := m.GetContainerIP(name); err == nil && ip != "" {
@@ -848,8 +851,9 @@ func (m *Manager) StopContainer(id int) error {
 
 	// 1. First try graceful shutdown via ACPI/QEMU Guest Agent
 	exec.Command("virsh", "shutdown", name).Run()
-	// Wait up to 45 seconds for graceful shutdown (Windows update/flushing dirty blocks)
-	for i := 0; i < 45; i++ {
+	gracefulWindow := m.stopGracefulWindow(name, c)
+	deadline := time.Now().Add(gracefulWindow)
+	for time.Now().Before(deadline) {
 		if status, _ := m.GetContainerStatus(name); status != "running" {
 			config.UpdateContainerStatusAndRestore(id, "stopped", false)
 			return nil
@@ -869,6 +873,83 @@ func (m *Manager) StopContainer(id int) error {
 	}
 	config.UpdateContainerStatusAndRestore(id, "stopped", false)
 	return nil
+}
+
+// stopGracefulWindow decides how long to wait for an ACPI shutdown before
+// falling back to a hard power-off.
+//
+// Waiting the full window only makes sense when there is a live OS to flush
+// dirty blocks. A freshly created Windows VM still booting the installer (or
+// never installed at all) has an almost empty system disk — a plain qcow2 with
+// no backing file — so nothing can be lost, yet the panel would otherwise sit in
+// "关机中" for the whole window and look hung. Only that case is shortened;
+// Linux cloud images always boot an OS from their backing file, and any VM with
+// real data on disk keeps the long window.
+func (m *Manager) stopGracefulWindow(name string, c *config.Container) time.Duration {
+	const (
+		shortWindow = 5 * time.Second
+		longWindow  = 45 * time.Second
+		osDataBytes = int64(512) * 1024 * 1024
+	)
+	if c == nil || !looksLikeWindowsTemplate(c.Template) {
+		return longWindow
+	}
+	allocated := m.systemDiskAllocatedBytes(name, c)
+	if allocated >= 0 && allocated < osDataBytes {
+		return shortWindow
+	}
+	return longWindow
+}
+
+// looksLikeWindowsTemplate widens IsWindowsImage with a label check: operators
+// often relabel an instance's template from the UI (e.g. to "windows" or
+// "win2019") and those labels are not registered images, so FindImage returns
+// nil. The check only ever shortens the wait for a disk with no data on it, so a
+// mislabeled Linux VM still cannot lose anything to the fast path.
+func looksLikeWindowsTemplate(templateID string) bool {
+	if IsWindowsImage(templateID) {
+		return true
+	}
+	return strings.Contains(strings.ToLower(strings.TrimSpace(templateID)), "windows")
+}
+
+// systemDiskAllocatedBytes reports how much data the VM's system disk actually
+// holds, via libvirt (safe while the domain is running). It returns -1 when the
+// size cannot be determined, which callers treat as "unknown, be conservative".
+func (m *Manager) systemDiskAllocatedBytes(name string, c *config.Container) int64 {
+	for _, dev := range kvmDiskDeviceCandidates(c) {
+		out, err := virshOutput(5*time.Second, "domblkinfo", name, dev)
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(out), "\n") {
+			key, value, ok := strings.Cut(line, ":")
+			if !ok || !strings.EqualFold(strings.TrimSpace(key), "Allocation") {
+				continue
+			}
+			if bytes, convErr := strconv.ParseInt(strings.TrimSpace(value), 10, 64); convErr == nil {
+				return bytes
+			}
+		}
+	}
+	return -1
+}
+
+func kvmDiskDeviceCandidates(c *config.Container) []string {
+	bus := ""
+	if c != nil {
+		bus = strings.ToLower(strings.TrimSpace(c.DiskBus))
+	}
+	switch bus {
+	case "sata", "scsi":
+		return []string{"sda", "vda", "hda"}
+	case "ide":
+		return []string{"hda", "sda", "vda"}
+	case "virtio":
+		return []string{"vda", "sda", "hda"}
+	default:
+		return []string{"sda", "vda", "hda"}
+	}
 }
 
 func (m *Manager) RestartContainer(id int) error {
