@@ -565,21 +565,6 @@ export default function Containers() {
               <div className="text-xs text-gray-500">
                 显示 {pageStart + 1}-{Math.min(pageStart + pageSize, filteredContainers.length)} / {filteredContainers.length}
               </div>
-              {!isSubUser && pageContainers.some((container) => !container.isPlaceholder && !taskStatusMap[container.id] && !taskNameMap[container.name]) && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    const pageIDs = pageContainers
-                      .filter((container) => !container.isPlaceholder && !taskStatusMap[container.id] && !taskNameMap[container.name])
-                      .map((container) => container.id)
-                    setSelected((prev) => new Set([...prev, ...pageIDs]))
-                  }}
-                  className="rounded border border-gray-200 px-2.5 py-1.5 text-xs text-gray-600 hover:bg-gray-50"
-                  title="只勾选当前这一页显示的实例"
-                >
-                  选择本页
-                </button>
-              )}
               <div className="flex items-center gap-1">
                 <button
                   onClick={() => setPage(1)}
