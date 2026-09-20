@@ -143,6 +143,20 @@ curl -fsSL https://raw.githubusercontent.com/4kercc/CLICD/main/install.sh | sudo
   - **修复 Windows 虚拟机无法进入安装程序（致命）**：新建 Windows 虚拟机使用空磁盘，但 Domain XML 默认仅写 `<boot dev='hd'/>`，SeaBIOS 在空盘上直接以 `No bootable device` 中止，永不回退到安装光盘。现改为 `hd → cdrom` 回退链（`network` 引导时为 `network → cdrom → hd`）：空盘自动回退光盘启动安装，系统装好后优先硬盘引导、自动忽略仍挂载的安装 ISO。
   - **修复自定义 ISO 挂载**：`BootMedia` 增加物理存在性校验，杜绝写入 `__invalid_image_id__` 占位路径导致 `Cannot access storage file` 启动失败；运行中实例修改挂载时自动调用 `virsh change-media` 热插拔光驱。
 
+### 15. 💿 额外挂载光盘、镜像选择器与任务假死修复 (Extra ISO / Media Picker / Task Stall Fix - v1.20.8)
+- **💿 额外挂载光盘（独立光驱，不再抢占启动盘）**：原「自定义挂载 ISO 路径」的语义是**替换**镜像自带光盘，导致 PE 镜像（如 `firepe`）设了自定义 ISO 后就无法从自带的 PE 盘启动。现新增独立的 `extra_iso` 字段，挂载在**单独的 SATA 光驱（`sdc`）**上：
+  - 镜像自带光盘（`hdb`）永远由镜像决定，额外光盘不会碰它 —— 可以「先用自带 PE 盘启动进入 PE，再从额外光驱读 Windows 安装盘」；
+  - 支持**运行中热插拔**：域内尚无该光驱时先 `virsh attach-device` 挂上，之后换盘走 `change-media --insert/--update`、清空走 `--eject`，全程不影响启动盘；旧实例（域内无 SATA 控制器）无法热附加时会在下次开机自动生效；
+  - 两个 Domain XML 生成器显式声明 `<controller type='sata' index='0'/>`，保证该光驱可被热插拔。
+- **🖱️ 服务器镜像选择器**：新增 `GET /api/kvm-media`，汇总服务器上「已下载的注册镜像」与「镜像缓存目录内其它 `.iso`」（含名称、类型与体积）。前端「引导与硬件」弹窗把原来手填路径的输入框换成两个下拉选择器——「启动光盘覆盖」与「额外挂载光盘」，均提供「自定义路径…」回退；路径范围仍受原有白名单约束，不会暴露宿主机任意文件。
+- **⏱️ 修复「一直卡在关机中 / 无法删除」任务假死（重要）**：任务队列按实例串行，两处长等待会把目标锁占满，使后续关机/删除只能排队、前端看起来像卡死：
+  - **关机固定死等 45 秒**：系统盘还是空的 Windows 实例（正在跑安装程序或从未装系统）不响应 ACPI，必然耗满 45 秒才强断电。现用 `virsh domblkinfo` 读取系统盘真实分配量作为判据 —— 无数据可丢时优雅窗口 **45s → 5s**，盘上已有数据（含安装程序写入）仍保留完整 45 秒，不丢数据。
+  - **开机最长死等 180 秒拿不到 IP**：运维在界面手改过系统标签的实例无法被 `FindImage` 解析，被误判为 Linux 而空等 IP。现兼容手写标签，不再阻塞。
+  - 实测：新建 Windows 实例关机 **48 秒 → 6 秒**；全链路「新建 → 关机(6s) → 删除(2s)」通过。
+- **📄 容器列表分页与批量勾选**：每页默认 **20** 条，可选项扩展为 **10 / 20 / 50 / 100** 并在本地记忆选择；表头复选框跨分页全选当前筛选结果，勾选后提供「取消选择」一键清空。
+- **🧩 修复第三方 WinPE / WePE 镜像无法添加**：后端注册接口的 `switch req.Provisioner` 漏了 `windows-pe` 分支，导致选择「WinPE / WePE」模板必然报 `unsupported unattended installation template`。已补齐该分支（校验 amd64、归一 `distro`/`release`，WinPE 属纯引导镜像不生成无人值守应答文件）。
+- **🌐 英文界面完整汉化**：补齐约 260 条中英对照词条并新增 10 条正则规则处理数字插值模板（`第 N 台容器` → `Container #N` 等），修掉 `Disk总线`、`Network InterfacesDriver`、`Page 台容器` 这类半中半英混合串；同时从源头简化了两句会产生混合翻译的文案。新增 4 个自检脚本（`frontend/scripts/i18n-{audit,check,coverage,duplicates}.mjs`）用于持续校验覆盖率与词典重复键。
+
 
 
 ## Features / 功能介绍

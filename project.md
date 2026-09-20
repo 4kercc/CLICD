@@ -1,12 +1,12 @@
 # CLICD 项目架构、功能设计与全景接力文档 (Project Handover Documentation)
 
-本文档面向后续 AI 接力开发与架构维护，全面汇总了 **CLICD (LXC/KVM 虚拟化管理面板)** 的系统架构、各模块代码职责、核心技术设计、近期的关键改动与演进记录（涵盖 v1.20 ~ v1.20.6 以及最新 Telegram Bot 集成），并附带现存待办需求与运维指令。
+本文档面向后续 AI 接力开发与架构维护，全面汇总了 **CLICD (LXC/KVM 虚拟化管理面板)** 的系统架构、各模块代码职责、核心技术设计、近期的关键改动与演进记录（涵盖 v1.20 ~ v1.20.8，含 Telegram Bot、预设初始化命令、Windows 装机链路与额外挂载光盘等），并附带现存待办需求与运维指令。
 
 ---
 
 ## 📌 项目基本信息
 - **项目名称**：CLICD (Container & KVM Lifecycle Controller Daemon)
-- **当前版本**：`v1.20.6`
+- **当前版本**：`v1.20.8`
 - **代码仓库**：[https://github.com/4kercc/CLICD](https://github.com/4kercc/CLICD)
 - **测试验证服务器**：`<测试机地址>:<端口>` （凭据单独保管）
 - **面板运行地址**：`http://<测试机地址>:<面板端口>/` （凭据单独保管）
