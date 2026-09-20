@@ -555,7 +555,7 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
               <Field label="子用户可用镜像（权限设置，可多选）">
                 <div className="rounded-md border border-dashed border-gray-300 bg-gray-50 p-3">
                   <div className="mb-2 text-xs text-gray-500">
-                    仅控制<strong className="font-medium text-gray-700">子用户</strong>能看到/重装哪些系统，<strong className="font-medium text-gray-700">不影响上面选的安装系统</strong>。
+                    仅控制子用户能看到/重装哪些系统，不影响上面选的安装系统。
                   </div>
                   <div className="grid gap-2 sm:grid-cols-2">
                     {templates.map((template) => {
@@ -1707,7 +1707,7 @@ function validateBatchNATPortMappings(mappings: PortMapping[], managementPort: n
       const managementKey = `${expandedManagementPort}/tcp`
       const managementOwner = used.get(managementKey)
       if (managementOwner) {
-        return `批量端口冲突：${managementKey} 同时被 ${managementOwner} 和第 ${batchIndex + 1} 台容器的管理端口使用`
+        return `批量端口冲突：${managementKey} 已被 ${managementOwner} 占用`
       }
       used.set(managementKey, `第 ${batchIndex + 1} 台容器的管理端口`)
     }
@@ -1725,7 +1725,7 @@ function validateBatchNATPortMappings(mappings: PortMapping[], managementPort: n
       const key = `${hostPort}/${protocol}`
       const owner = used.get(key)
       if (owner) {
-        return `批量端口冲突：${key} 同时被 ${owner} 和第 ${batchIndex + 1} 台容器使用`
+        return `批量端口冲突：${key} 已被 ${owner} 占用`
       }
       used.set(key, `第 ${batchIndex + 1} 台容器`)
     }
