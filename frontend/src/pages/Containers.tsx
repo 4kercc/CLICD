@@ -40,6 +40,15 @@ import {
 } from '../services/api'
 import { actionLabel, taskStatusClass, taskStatusLabel } from '../utils/labels'
 
+export const PAGE_SIZE_OPTIONS = [10, 20, 50, 100] as const
+const DEFAULT_PAGE_SIZE = 20
+const PAGE_SIZE_STORAGE_KEY = 'clicd_containers_page_size'
+
+function readStoredPageSize(): number {
+  const stored = Number(localStorage.getItem(PAGE_SIZE_STORAGE_KEY))
+  return PAGE_SIZE_OPTIONS.includes(stored as (typeof PAGE_SIZE_OPTIONS)[number]) ? stored : DEFAULT_PAGE_SIZE
+}
+
 export default function Containers() {
   const navigate = useNavigate()
   const { isSubUser } = useAuth()
@@ -60,7 +69,9 @@ export default function Containers() {
   const [systemFilter, setSystemFilter] = useState('all')
   const [statusFilter, setStatusFilter] = useState('all')
   const [page, setPage] = useState(1)
-  const [pageSize, setPageSize] = useState(10)
+  // Batch operators keep a large page size across visits, so the choice is
+  // remembered instead of resetting to the default on every refresh.
+  const [pageSize, setPageSize] = useState(readStoredPageSize)
 
   const refreshUsage = useCallback(async (items: Container[]) => {
     const targets = items.filter((container) => container.status === 'running')
@@ -326,19 +337,35 @@ export default function Containers() {
             </select>
             <select
               value={pageSize}
-              onChange={(event) => setPageSize(Number(event.target.value))}
+              onChange={(event) => {
+                const next = Number(event.target.value)
+                setPageSize(next)
+                localStorage.setItem(PAGE_SIZE_STORAGE_KEY, String(next))
+              }}
               className="h-8 rounded-md border border-gray-300 bg-white px-2 text-xs text-gray-700 outline-none focus:border-black focus:ring-2 focus:ring-black"
               title="每页数量"
             >
-              <option value={10}>10 / 页</option>
-              <option value={20}>20 / 页</option>
-              <option value={50}>50 / 页</option>
+              {PAGE_SIZE_OPTIONS.map((size) => (
+                <option key={size} value={size}>
+                  {size} / 页
+                </option>
+              ))}
             </select>
           </div>
 
           {selected.size > 0 && (
             <div className="flex flex-wrap items-center justify-end gap-1.5">
               <span className="text-xs text-gray-500">{selected.size} 个</span>
+              {!isSubUser && (
+                <button
+                  onClick={() => setSelected(new Set())}
+                  disabled={batchLoading}
+                  className="inline-flex h-8 items-center gap-1 px-2.5 text-xs text-gray-500 hover:bg-gray-100 rounded border border-gray-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                  title="清空当前已勾选的全部实例"
+                >
+                  <X className="w-3 h-3" />取消选择
+                </button>
+              )}
               <button onClick={() => setShowBatchConfig(true)} disabled={batchLoading} className="inline-flex h-8 items-center gap-1 px-2.5 text-xs text-gray-700 hover:bg-gray-100 rounded border border-gray-300 disabled:opacity-50 disabled:cursor-not-allowed">
                 <Sliders className="w-3 h-3 text-black" />调整配置
               </button>
@@ -383,6 +410,7 @@ export default function Containers() {
                         checked={allFilteredSelected}
                         disabled={selectableIDs.length === 0}
                         onChange={toggleAll}
+                        title="全选/取消全选（跨分页，作用于当前筛选的全部实例）"
                         className="w-4 h-4 rounded border-gray-300 text-black focus:ring-black accent-black"
                       />
                     )}
@@ -537,6 +565,21 @@ export default function Containers() {
               <div className="text-xs text-gray-500">
                 显示 {pageStart + 1}-{Math.min(pageStart + pageSize, filteredContainers.length)} / {filteredContainers.length}
               </div>
+              {!isSubUser && pageContainers.some((container) => !container.isPlaceholder && !taskStatusMap[container.id] && !taskNameMap[container.name]) && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const pageIDs = pageContainers
+                      .filter((container) => !container.isPlaceholder && !taskStatusMap[container.id] && !taskNameMap[container.name])
+                      .map((container) => container.id)
+                    setSelected((prev) => new Set([...prev, ...pageIDs]))
+                  }}
+                  className="rounded border border-gray-200 px-2.5 py-1.5 text-xs text-gray-600 hover:bg-gray-50"
+                  title="只勾选当前这一页显示的实例"
+                >
+                  选择本页
+                </button>
+              )}
               <div className="flex items-center gap-1">
                 <button
                   onClick={() => setPage(1)}
