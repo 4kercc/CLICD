@@ -131,6 +131,18 @@ curl -fsSL https://raw.githubusercontent.com/4kercc/CLICD/main/install.sh | sudo
 - **主动安全威胁预警**：安全扫描引擎检测到挖矿特征、端口暴力破解、异常扫描或流量超标自动停机时，自动向管理员 Telegram 实时推送结构化告警卡片。
 - **前端配置管理面板**：在「面板设置」新增「Telegram Bot」专区，支持 Token/Chat ID 管理、推送开关设置与即时连通性测试。
 
+### 14. 🚀 预设初始化命令、登录提醒与 Windows 装机链路修复 (Init Script / Login Alert / Windows Install Fix - v1.20.7)
+- **🚀 预设初始化命令 (Init Script)**：创建、批量开设与重装实例时均可配置自定义初始化脚本，实例首次启动并连网就绪后在后台静默自动执行（如批量预装 `wget`/`curl`/`lrzsz`/`iftop`/`htop`/`btop`/Docker 等常用组件），无需逐台登录装机。前端提供「常用工具包」「安装 Docker」一键预设。
+  - **KVM Linux**：注入 Cloud-Init `#cloud-config` 的 `runcmd`，日志落盘客机 `/var/log/clicd-init-script.log`；
+  - **KVM Windows**：注入无人值守应答 `FirstLogon.ps1`，首次登录自动执行，日志落盘 `C:\CLICD\init.log`；
+  - **LXC 容器**：网络与 SSH 就绪后由 `lxc-attach` 在沙箱临时脚本中异步执行，规避多行 `&&` 命令的 Shell 语法解析问题，日志落盘 `/var/log/clicd-init-script.log`。
+- **🔐 Telegram 登录成功提醒**：新增 `notify_logins` 开关（面板设置 → Telegram Bot 可配置），**仅在登录成功时推送**账号（区分超级管理员 / 子用户 / 子用户快捷链接）、来源 IP、客户端 UA 与登录时间；登录失败（密码错误、2FA 校验失败、无可用容器等）一律不推送，避免被爆破尝试刷屏。
+- **🪟 创建向导与 Windows 装机链路修复（重要）**：
+  - **修复「选 Windows 却装出 Debian」**：原先「系统模板」是不起眼的下拉框，下方醒目的「子用户可用镜像」复选框网格易被误当成系统选择器（勾选它只影响子用户权限）。现已将系统选择改为**大卡片单选**并明确标注标题，子用户镜像区改为虚线框并注明「不影响上面选的安装系统」。
+  - **修复自定义 Windows 镜像识别**：原前端仅按镜像 ID 是否含 `windows` 字样判断，而自定义镜像 ID 形如 `custom-kvm-42e957647c`，导致被误判为 Linux（网络步骤显示 SSH 22 而非 RDP 3389）。现统一以镜像 `distro` 字段为准（新增共享工具 `utils/templateKind.ts`），后端 `IsWindows()` 同步改为 distro 判定，不再依赖 provisioner 或 ID 关键字。
+  - **修复 Windows 虚拟机无法进入安装程序（致命）**：新建 Windows 虚拟机使用空磁盘，但 Domain XML 默认仅写 `<boot dev='hd'/>`，SeaBIOS 在空盘上直接以 `No bootable device` 中止，永不回退到安装光盘。现改为 `hd → cdrom` 回退链（`network` 引导时为 `network → cdrom → hd`）：空盘自动回退光盘启动安装，系统装好后优先硬盘引导、自动忽略仍挂载的安装 ISO。
+  - **修复自定义 ISO 挂载**：`BootMedia` 增加物理存在性校验，杜绝写入 `__invalid_image_id__` 占位路径导致 `Cannot access storage file` 启动失败；运行中实例修改挂载时自动调用 `virsh change-media` 热插拔光驱。
+
 
 
 ## Features / 功能介绍

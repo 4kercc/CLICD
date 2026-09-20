@@ -60,6 +60,7 @@ type savedTaskConfig struct {
 	SSHAuthMode          string        `json:"ssh_auth_mode,omitempty"`
 	SSHPassword          string        `json:"ssh_password,omitempty"`
 	SSHPublicKey         string        `json:"ssh_public_key,omitempty"`
+	InitScript           string        `json:"init_script,omitempty"`
 	ExpiresAt            string        `json:"expires_at"`
 }
 
@@ -244,12 +245,13 @@ func ensureSchema() error {
 				policy_blocked_at TEXT,
 				allowed_image_ids TEXT,
 				image_limit_configured INTEGER NOT NULL DEFAULT 0,
-				boot_order TEXT NOT NULL DEFAULT '',
-				boot_media TEXT NOT NULL DEFAULT '',
-				firmware TEXT NOT NULL DEFAULT '',
-				nic_model TEXT NOT NULL DEFAULT '',
-				disk_bus TEXT NOT NULL DEFAULT ''
-			)`,
+					boot_order TEXT NOT NULL DEFAULT '',
+					boot_media TEXT NOT NULL DEFAULT '',
+					firmware TEXT NOT NULL DEFAULT '',
+					nic_model TEXT NOT NULL DEFAULT '',
+					disk_bus TEXT NOT NULL DEFAULT '',
+					init_script TEXT NOT NULL DEFAULT ''
+				)`,
 		`CREATE TABLE IF NOT EXISTS port_mappings (
 			container_id INTEGER NOT NULL,
 			position INTEGER NOT NULL,
@@ -382,10 +384,11 @@ func ensureSchema() error {
 			cfg_ssh_auth_mode TEXT,
 			cfg_ssh_password TEXT,
 			cfg_ssh_public_key TEXT,
-			cfg_allowed_image_ids TEXT,
-			cfg_image_limit_configured INTEGER NOT NULL DEFAULT 0,
-			cfg_expires_at TEXT
-		)`,
+				cfg_allowed_image_ids TEXT,
+				cfg_image_limit_configured INTEGER NOT NULL DEFAULT 0,
+				cfg_init_script TEXT NOT NULL DEFAULT '',
+				cfg_expires_at TEXT
+			)`,
 		`CREATE TABLE IF NOT EXISTS task_extra_ports (
 			task_id TEXT NOT NULL,
 			position INTEGER NOT NULL,
@@ -506,9 +509,11 @@ func ensureSchemaMigrations() error {
 			{"containers", "boot_media", "TEXT NOT NULL DEFAULT ''"},
 			{"containers", "firmware", "TEXT NOT NULL DEFAULT ''"},
 			{"containers", "nic_model", "TEXT NOT NULL DEFAULT ''"},
-				{"containers", "disk_bus", "TEXT NOT NULL DEFAULT ''"},
-				{"containers", "snapshot_schedule_max_copies", "INTEGER NOT NULL DEFAULT 0"},
-			} {
+					{"containers", "disk_bus", "TEXT NOT NULL DEFAULT ''"},
+					{"containers", "snapshot_schedule_max_copies", "INTEGER NOT NULL DEFAULT 0"},
+					{"containers", "init_script", "TEXT NOT NULL DEFAULT ''"},
+					{"tasks", "cfg_init_script", "TEXT NOT NULL DEFAULT ''"},
+				} {
 		wasAdded, err := ensureColumn(column.table, column.name, column.def)
 		if err != nil {
 			return err
@@ -842,24 +847,24 @@ func saveContainers(tx *sql.Tx) error {
 				snapshot_schedule_max_copies,
 				snapshot_schedule_last_run, snapshot_schedule_next_run, snapshot_schedule_created_by,
 					policy_blocked, policy_blocked_reason, policy_blocked_at,
-					firewall_enabled, firewall_default_action, firewall_rules, allowed_image_ids, image_limit_configured,
-					boot_order, boot_media, firmware, nic_model, disk_bus
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-					c.ID, c.UUID, c.Name, c.Virtualization, c.LXCName, c.KVMName, c.DiskImage, c.StoragePoolID, c.StoragePath, c.MACAddress, c.Template,
-					c.VCPU, c.RAMMB, c.DiskGB, c.NetworkBWMbps, c.NetworkDownMbps, c.NetworkUpMbps,
-					c.MonthlyTrafficGB, c.TrafficMode, c.TrafficInGB,
-					c.TrafficOutGB, c.TrafficUsedRX, c.TrafficUsedTX, c.TrafficResetDate,
-					c.IOSpeedMBps, c.IOReadMBps, c.IOWriteMBps,
-					c.Status, boolInt(c.RestoreOnHostBoot), c.IP, c.LANIPv4Mode, c.LANInterface, c.LANIPv4Address, c.LANIPv4PrefixLen, c.LANIPv4Gateway,
-					c.IPv6, c.IPv6PrefixLen, c.IPv6Interface, c.VNCPort, c.SSHPort, c.SSHPassword,
-					c.SSHHostKey, c.PortMappingLimit, c.SnapshotLimit, c.CreatedAt, c.ExpiresAt,
-					boolInt(c.SnapshotScheduleEnabled), c.SnapshotScheduleIntervalHours, c.SnapshotScheduleTime,
-					c.SnapshotScheduleMaxCopies,
-					c.SnapshotScheduleLastRun, c.SnapshotScheduleNextRun, c.SnapshotScheduleCreatedBy,
-					boolInt(c.PolicyBlocked), c.PolicyBlockedReason, c.PolicyBlockedAt,
-				boolInt(c.FirewallEnabled), normalizeFirewallDefaultAction(c.FirewallDefaultAction), marshalFirewallRules(c.FirewallRules), allowedImageIDs, boolInt(c.ImageLimitConfigured),
-				c.BootOrder, c.BootMedia, c.Firmware, c.NICModel, c.DiskBus,
-			); err != nil {
+						firewall_enabled, firewall_default_action, firewall_rules, allowed_image_ids, image_limit_configured,
+						boot_order, boot_media, firmware, nic_model, disk_bus, init_script
+					) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+						c.ID, c.UUID, c.Name, c.Virtualization, c.LXCName, c.KVMName, c.DiskImage, c.StoragePoolID, c.StoragePath, c.MACAddress, c.Template,
+						c.VCPU, c.RAMMB, c.DiskGB, c.NetworkBWMbps, c.NetworkDownMbps, c.NetworkUpMbps,
+						c.MonthlyTrafficGB, c.TrafficMode, c.TrafficInGB,
+						c.TrafficOutGB, c.TrafficUsedRX, c.TrafficUsedTX, c.TrafficResetDate,
+						c.IOSpeedMBps, c.IOReadMBps, c.IOWriteMBps,
+						c.Status, boolInt(c.RestoreOnHostBoot), c.IP, c.LANIPv4Mode, c.LANInterface, c.LANIPv4Address, c.LANIPv4PrefixLen, c.LANIPv4Gateway,
+						c.IPv6, c.IPv6PrefixLen, c.IPv6Interface, c.VNCPort, c.SSHPort, c.SSHPassword,
+						c.SSHHostKey, c.PortMappingLimit, c.SnapshotLimit, c.CreatedAt, c.ExpiresAt,
+						boolInt(c.SnapshotScheduleEnabled), c.SnapshotScheduleIntervalHours, c.SnapshotScheduleTime,
+						c.SnapshotScheduleMaxCopies,
+						c.SnapshotScheduleLastRun, c.SnapshotScheduleNextRun, c.SnapshotScheduleCreatedBy,
+						boolInt(c.PolicyBlocked), c.PolicyBlockedReason, c.PolicyBlockedAt,
+					boolInt(c.FirewallEnabled), normalizeFirewallDefaultAction(c.FirewallDefaultAction), marshalFirewallRules(c.FirewallRules), allowedImageIDs, boolInt(c.ImageLimitConfigured),
+					c.BootOrder, c.BootMedia, c.Firmware, c.NICModel, c.DiskBus, c.InitScript,
+				); err != nil {
 			return err
 		}
 		for i, pm := range c.PortMappings {
@@ -997,22 +1002,22 @@ func saveTasksDB(tx *sql.Tx) error {
 			cfg_network_bw_mbps, cfg_network_down_mbps, cfg_network_up_mbps,
 			cfg_monthly_traffic_gb, cfg_traffic_mode, cfg_traffic_in_gb,
 			cfg_traffic_out_gb, cfg_io_speed_mbps, cfg_io_read_mbps, cfg_io_write_mbps,
-			cfg_management_port, cfg_port_mapping_count, cfg_assign_nat, cfg_lan_ipv4_mode, cfg_lan_interface,
-			cfg_lan_ipv4_address, cfg_lan_ipv4_prefix_len, cfg_lan_ipv4_gateway, cfg_snapshot_limit,
-			cfg_assign_ipv4, cfg_ipv4_count, cfg_public_ipv4s, cfg_assign_ipv6, cfg_ipv6_count, cfg_ipv6_addresses,
-			cfg_ssh_auth_mode, cfg_ssh_password, cfg_ssh_public_key, cfg_allowed_image_ids, cfg_image_limit_configured, cfg_expires_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			task.ID, task.Type, task.ContainerID, task.ContainerName, task.Status, task.Error, task.CreatedAt, task.TemplateID, task.User, task.IP, task.UserAgent,
-			cfg.Name, cfg.Virtualization, cfg.TemplateID, cfg.VCPU, cfg.CPUPercent, cfg.RAMMB, cfg.DiskGB,
-			cfg.NetworkBWMbps, cfg.NetworkDownMbps, cfg.NetworkUpMbps,
-			cfg.MonthlyTrafficGB, cfg.TrafficMode, cfg.TrafficInGB,
-			cfg.TrafficOutGB, cfg.IOSpeedMBps, cfg.IOReadMBps, cfg.IOWriteMBps,
-			cfg.ManagementPort, cfg.PortMappingCount, boolPtrInt(cfg.AssignNAT), cfg.LANIPv4Mode, cfg.LANInterface,
-			cfg.LANIPv4Address, cfg.LANIPv4PrefixLen, cfg.LANIPv4Gateway, cfg.SnapshotLimit,
-			boolInt(cfg.AssignIPv4), cfg.IPv4Count, encodeStringSlice(cfg.PublicIPv4s),
-			boolInt(cfg.AssignIPv6), cfg.IPv6Count, encodeStringSlice(cfg.IPv6Addresses),
-			cfg.SSHAuthMode, cfg.SSHPassword, cfg.SSHPublicKey, encodeStringSlice(cfg.AllowedImageIDs), boolInt(cfg.ImageLimitConfigured), cfg.ExpiresAt,
-		); err != nil {
+				cfg_management_port, cfg_port_mapping_count, cfg_assign_nat, cfg_lan_ipv4_mode, cfg_lan_interface,
+				cfg_lan_ipv4_address, cfg_lan_ipv4_prefix_len, cfg_lan_ipv4_gateway, cfg_snapshot_limit,
+				cfg_assign_ipv4, cfg_ipv4_count, cfg_public_ipv4s, cfg_assign_ipv6, cfg_ipv6_count, cfg_ipv6_addresses,
+				cfg_ssh_auth_mode, cfg_ssh_password, cfg_ssh_public_key, cfg_allowed_image_ids, cfg_image_limit_configured, cfg_init_script, cfg_expires_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				task.ID, task.Type, task.ContainerID, task.ContainerName, task.Status, task.Error, task.CreatedAt, task.TemplateID, task.User, task.IP, task.UserAgent,
+				cfg.Name, cfg.Virtualization, cfg.TemplateID, cfg.VCPU, cfg.CPUPercent, cfg.RAMMB, cfg.DiskGB,
+				cfg.NetworkBWMbps, cfg.NetworkDownMbps, cfg.NetworkUpMbps,
+				cfg.MonthlyTrafficGB, cfg.TrafficMode, cfg.TrafficInGB,
+				cfg.TrafficOutGB, cfg.IOSpeedMBps, cfg.IOReadMBps, cfg.IOWriteMBps,
+				cfg.ManagementPort, cfg.PortMappingCount, boolPtrInt(cfg.AssignNAT), cfg.LANIPv4Mode, cfg.LANInterface,
+				cfg.LANIPv4Address, cfg.LANIPv4PrefixLen, cfg.LANIPv4Gateway, cfg.SnapshotLimit,
+				boolInt(cfg.AssignIPv4), cfg.IPv4Count, encodeStringSlice(cfg.PublicIPv4s),
+				boolInt(cfg.AssignIPv6), cfg.IPv6Count, encodeStringSlice(cfg.IPv6Addresses),
+				cfg.SSHAuthMode, cfg.SSHPassword, cfg.SSHPublicKey, encodeStringSlice(cfg.AllowedImageIDs), boolInt(cfg.ImageLimitConfigured), cfg.InitScript, cfg.ExpiresAt,
+			); err != nil {
 			return err
 		}
 		for i, port := range cfg.ExtraPorts {
@@ -1086,7 +1091,7 @@ func loadContainers() ([]Container, error) {
 		snapshot_schedule_last_run, snapshot_schedule_next_run, snapshot_schedule_created_by,
 			policy_blocked, policy_blocked_reason, policy_blocked_at,
 			firewall_enabled, firewall_default_action, firewall_rules, allowed_image_ids, image_limit_configured,
-			boot_order, boot_media, firmware, nic_model, disk_bus
+			boot_order, boot_media, firmware, nic_model, disk_bus, init_script
 			FROM containers ORDER BY id`)
 		if err != nil {
 			return nil, err
@@ -1103,7 +1108,7 @@ func loadContainers() ([]Container, error) {
 			var lanIPv4Mode, lanInterface sql.NullString
 			var lanIPv4Address, lanIPv4Gateway sql.NullString
 			var lanIPv4PrefixLen sql.NullInt64
-			var bootOrder, bootMedia, firmware, nicModel, diskBus sql.NullString
+			var bootOrder, bootMedia, firmware, nicModel, diskBus, initScript sql.NullString
 			if err := rows.Scan(
 				&c.ID, &c.UUID, &c.Name, &c.Virtualization, &c.LXCName, &c.KVMName, &c.DiskImage, &storagePoolID, &storagePath, &c.MACAddress, &c.Template,
 				&c.VCPU, &c.RAMMB, &c.DiskGB, &c.NetworkBWMbps, &c.NetworkDownMbps, &c.NetworkUpMbps,
@@ -1118,7 +1123,7 @@ func loadContainers() ([]Container, error) {
 					&c.SnapshotScheduleLastRun, &c.SnapshotScheduleNextRun, &c.SnapshotScheduleCreatedBy,
 					&policyBlocked, &c.PolicyBlockedReason, &c.PolicyBlockedAt,
 				&firewallEnabled, &firewallDefaultAction, &firewallRulesJSON, &allowedImageIDs, &imageLimitConfigured,
-				&bootOrder, &bootMedia, &firmware, &nicModel, &diskBus,
+				&bootOrder, &bootMedia, &firmware, &nicModel, &diskBus, &initScript,
 			); err != nil {
 				return nil, err
 			}
@@ -1140,8 +1145,9 @@ func loadContainers() ([]Container, error) {
 			c.BootOrder = bootOrder.String
 			c.BootMedia = bootMedia.String
 			c.Firmware = firmware.String
-			c.NICModel = nicModel.String
-			c.DiskBus = diskBus.String
+				c.NICModel = nicModel.String
+				c.DiskBus = diskBus.String
+				c.InitScript = initScript.String
 		if firewallRulesJSON.Valid && strings.TrimSpace(firewallRulesJSON.String) != "" {
 			_ = json.Unmarshal([]byte(firewallRulesJSON.String), &c.FirewallRules)
 		}
@@ -1350,7 +1356,7 @@ func loadTasks() ([]SavedTask, error) {
 		cfg_management_port, cfg_port_mapping_count, cfg_assign_nat, cfg_lan_ipv4_mode, cfg_lan_interface,
 		cfg_lan_ipv4_address, cfg_lan_ipv4_prefix_len, cfg_lan_ipv4_gateway, cfg_snapshot_limit,
 		cfg_assign_ipv4, cfg_ipv4_count, cfg_public_ipv4s, cfg_assign_ipv6, cfg_ipv6_count, cfg_ipv6_addresses,
-		cfg_ssh_auth_mode, cfg_ssh_password, cfg_ssh_public_key, cfg_allowed_image_ids, cfg_image_limit_configured, cfg_expires_at
+		cfg_ssh_auth_mode, cfg_ssh_password, cfg_ssh_public_key, cfg_allowed_image_ids, cfg_image_limit_configured, cfg_init_script, cfg_expires_at
 		FROM tasks ORDER BY created_at, id`)
 	if err != nil {
 		return nil, err
@@ -1363,7 +1369,7 @@ func loadTasks() ([]SavedTask, error) {
 		var cfg savedTaskConfig
 		var assignIPv4, assignIPv6, imageLimitConfigured int
 		var ip, userAgent, publicIPv4s, ipv6Addresses sql.NullString
-		var lanIPv4Mode, lanInterface, lanIPv4Address, lanIPv4Gateway, sshAuthMode, sshPassword, sshPublicKey, allowedImageIDs sql.NullString
+		var lanIPv4Mode, lanInterface, lanIPv4Address, lanIPv4Gateway, sshAuthMode, sshPassword, sshPublicKey, allowedImageIDs, initScript sql.NullString
 		var assignNAT, lanIPv4PrefixLen, ipv4Count, ipv6Count sql.NullInt64
 		if err := rows.Scan(
 			&t.ID, &t.Type, &t.ContainerID, &t.ContainerName, &t.Status, &t.Error, &t.CreatedAt, &t.TemplateID, &t.User, &ip, &userAgent,
@@ -1374,7 +1380,7 @@ func loadTasks() ([]SavedTask, error) {
 			&cfg.ManagementPort, &cfg.PortMappingCount, &assignNAT, &lanIPv4Mode, &lanInterface,
 			&lanIPv4Address, &lanIPv4PrefixLen, &lanIPv4Gateway, &cfg.SnapshotLimit,
 			&assignIPv4, &ipv4Count, &publicIPv4s, &assignIPv6, &ipv6Count, &ipv6Addresses,
-			&sshAuthMode, &sshPassword, &sshPublicKey, &allowedImageIDs, &imageLimitConfigured, &cfg.ExpiresAt,
+			&sshAuthMode, &sshPassword, &sshPublicKey, &allowedImageIDs, &imageLimitConfigured, &initScript, &cfg.ExpiresAt,
 		); err != nil {
 			return nil, err
 		}
@@ -1406,6 +1412,7 @@ func loadTasks() ([]SavedTask, error) {
 		cfg.SSHPublicKey = sshPublicKey.String
 		cfg.AllowedImageIDs = decodeStringSlice(allowedImageIDs.String)
 		cfg.ImageLimitConfigured = imageLimitConfigured != 0
+		cfg.InitScript = initScript.String
 		normalizeSavedTaskConfigLimits(&cfg)
 		result = append(result, t)
 		configs = append(configs, cfg)

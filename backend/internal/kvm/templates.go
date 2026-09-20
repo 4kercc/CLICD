@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"clicd/internal/config"
 )
@@ -245,7 +246,7 @@ func (image Image) IsWindows() bool {
 	return image.Provisioner == config.KVMProvisionerWindows10 ||
 		image.Provisioner == config.KVMProvisionerWindows11 ||
 		image.Provisioner == config.KVMProvisionerWindowsPE ||
-		(image.Provisioner == "" && image.Distro == "windows")
+		strings.EqualFold(strings.TrimSpace(image.Distro), "windows")
 }
 
 func (image Image) IsWindowsPE() bool {

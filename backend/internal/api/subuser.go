@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"clicd/internal/config"
+	"clicd/internal/telegram"
 
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
@@ -175,66 +176,68 @@ func HandleSubUserLogin(w http.ResponseWriter, r *http.Request) {
 					jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "No active container is assigned to this user"})
 					return
 				}
-				tokenStr := newSubUserToken(su.Username, containerUUIDs, time.Now().Add(24*time.Hour), su.TokenVersion)
-				config.AddLoginLog(su.Username, clientIP, clientUA, true)
+					tokenStr := newSubUserToken(su.Username, containerUUIDs, time.Now().Add(24*time.Hour), su.TokenVersion)
+					config.AddLoginLog(su.Username, clientIP, clientUA, true)
+					go telegram.Global().SendLoginNotification(su.Username, "子用户", clientIP, clientUA)
 
-				jsonResponse(w, http.StatusOK, APIResponse{
-					Success: true,
-					Data: map[string]interface{}{
-						"token":           tokenStr,
-						"username":        su.Username,
-						"container_uuids": containerUUIDs,
-					},
-				})
-				return
-			} else {
-				config.AddLoginLog(su.Username, clientIP, clientUA, false)
+					jsonResponse(w, http.StatusOK, APIResponse{
+						Success: true,
+						Data: map[string]interface{}{
+							"token":           tokenStr,
+							"username":        su.Username,
+							"container_uuids": containerUUIDs,
+						},
+					})
+					return
+				} else {
+					config.AddLoginLog(su.Username, clientIP, clientUA, false)
+				}
 			}
 		}
+
+		jsonResponse(w, http.StatusUnauthorized, APIResponse{Success: false, Message: "Invalid credentials"})
 	}
 
-	jsonResponse(w, http.StatusUnauthorized, APIResponse{Success: false, Message: "Invalid credentials"})
-}
+	// HandleSubUserAccessCode handles access via short code + password (no token in URL)
+	func HandleSubUserAccessCode(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
+			return
+		}
 
-// HandleSubUserAccessCode handles access via short code + password (no token in URL)
-func HandleSubUserAccessCode(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
-		return
-	}
+		var req struct {
+			Code     string `json:"code"`
+			Password string `json:"password"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Invalid request body"})
+			return
+		}
 
-	var req struct {
-		Code     string `json:"code"`
-		Password string `json:"password"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Invalid request body"})
-		return
-	}
+		// Find sub-user by access code
+		clientIP := r.Header.Get("X-Forwarded-For")
+		if clientIP == "" {
+			clientIP = r.RemoteAddr
+		}
+		clientUA := r.Header.Get("User-Agent")
 
-	// Find sub-user by access code
-	clientIP := r.Header.Get("X-Forwarded-For")
-	if clientIP == "" {
-		clientIP = r.RemoteAddr
-	}
-	clientUA := r.Header.Get("User-Agent")
+		for _, su := range config.AppConfig.SubUsers {
+			if su.AccessCode == req.Code {
+				if err := bcrypt.CompareHashAndPassword([]byte(su.PassHash), []byte(req.Password)); err != nil {
+					config.AddLoginLog(su.Username, clientIP, clientUA, false)
+					jsonResponse(w, http.StatusUnauthorized, APIResponse{Success: false, Message: "Invalid password"})
+					return
+				}
 
-	for _, su := range config.AppConfig.SubUsers {
-		if su.AccessCode == req.Code {
-			if err := bcrypt.CompareHashAndPassword([]byte(su.PassHash), []byte(req.Password)); err != nil {
-				config.AddLoginLog(su.Username, clientIP, clientUA, false)
-				jsonResponse(w, http.StatusUnauthorized, APIResponse{Success: false, Message: "Invalid password"})
-				return
-			}
-
-			containerUUIDs := activeSubUserContainerUUIDs(&su)
-			if len(containerUUIDs) == 0 {
-				config.AddLoginLog(su.Username, clientIP, clientUA, false)
-				jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "No active container is assigned to this link"})
-				return
-			}
-			tokenStr := newSubUserToken(su.Username, containerUUIDs, time.Now().Add(24*time.Hour), su.TokenVersion)
-			config.AddLoginLog(su.Username, clientIP, clientUA, true)
+				containerUUIDs := activeSubUserContainerUUIDs(&su)
+				if len(containerUUIDs) == 0 {
+					config.AddLoginLog(su.Username, clientIP, clientUA, false)
+					jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "No active container is assigned to this link"})
+					return
+				}
+				tokenStr := newSubUserToken(su.Username, containerUUIDs, time.Now().Add(24*time.Hour), su.TokenVersion)
+				config.AddLoginLog(su.Username, clientIP, clientUA, true)
+				go telegram.Global().SendLoginNotification(su.Username, "子用户快捷链接", clientIP, clientUA)
 
 			jsonResponse(w, http.StatusOK, APIResponse{
 				Success: true,

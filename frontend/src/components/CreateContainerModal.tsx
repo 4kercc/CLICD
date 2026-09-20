@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import { ArrowLeft, ArrowRight, CalendarClock, Check, Plus, RefreshCw, Trash2, X } from 'lucide-react'
+import { ArrowLeft, ArrowRight, CalendarClock, Check, ChevronDown, ChevronUp, Plus, RefreshCw, Terminal, Trash2, X } from 'lucide-react'
 import { useNavigate } from 'react-router'
 import { batchCreate, getIPv6Status, getEnabledImages, getHostInfo, getHostReport, getRoutingInfo, getStorageInfo, CreateContainerRequest, HostInfo, HostProbeReport, IPv6Status, PortMapping, RoutingInfo, StorageInfo, Template } from '../services/api'
 import { useDialog } from './Dialog'
 import { useLanguage, type Language } from '../contexts/LanguageContext'
 import { generateSSHPassword, sshPasswordError, sshPublicKeyError, type SSHAuthMode } from '../utils/sshAuth'
+import { isWindowsTemplate, registerTemplateKinds } from '../utils/templateKind'
 
 interface CreateContainerModalProps {
   isOpen: boolean
@@ -75,6 +76,7 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
   const [routingInfo, setRoutingInfo] = useState<RoutingInfo | null>(null)
   const [ipv6Status, setIPv6Status] = useState<IPv6Status | null>(null)
   const [nameError, setNameError] = useState('')
+  const [initScriptOpen, setInitScriptOpen] = useState(false)
 
   useEffect(() => {
     if (isOpen) setCurrentStep(0)
@@ -86,6 +88,7 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
     getEnabledImages(form.virtualization)
       .then((res) => {
         const data = res.data.data || []
+        registerTemplateKinds(data)
         setTemplates(data)
         setForm((prev) => {
           const templateID = data.some((item) => item.id === prev.template_id) ? prev.template_id : (data[0]?.id || '')
@@ -472,30 +475,42 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
 
           {currentStep === 1 && (
             <>
-          <Field label="系统模板">
+          <Field label={`要安装的系统（单选，决定本次装出的系统）`}>
             {templates.length === 0 ? (
               <div className="text-sm text-amber-600 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
                 暂无可用的{form.virtualization === 'kvm' ? ' KVM' : ' LXC'}系统镜像，请先在「镜像管理」中下载镜像模板。
               </div>
             ) : (
-            <select
-              value={form.template_id}
-              onChange={(event) => {
-                const templateID = event.target.value
-                const allowed = new Set(form.allowed_image_ids || [])
-                if (templateID) allowed.add(templateID)
-                setForm(applyTemplateDefaults({ ...form, template_id: templateID, allowed_image_ids: Array.from(allowed), image_limit_configured: true }))
-              }}
-              className={inputClass}
-            >
-              {templates.map((template) => (
-                <option key={template.id} value={template.id}>
-                  {template.name}
-                </option>
-              ))}
-            </select>
+              <div className="grid gap-2 sm:grid-cols-2">
+                {templates.map((template) => {
+                  const selected = template.id === form.template_id
+                  const windows = isWindowsTemplate(template.id)
+                  return (
+                    <button
+                      key={template.id}
+                      type="button"
+                      onClick={() => {
+                        const allowed = new Set(form.allowed_image_ids || [])
+                        allowed.add(template.id)
+                        setForm(applyTemplateDefaults({ ...form, template_id: template.id, allowed_image_ids: Array.from(allowed), image_limit_configured: true }))
+                      }}
+                      className={`flex items-start gap-2.5 rounded-md border px-3 py-2.5 text-left text-xs transition-colors ${selected ? 'border-black bg-black text-white' : 'border-gray-300 bg-white text-gray-800 hover:bg-gray-50'}`}
+                    >
+                      <span className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border ${selected ? 'border-white bg-white' : 'border-gray-300'}`}>
+                        {selected && <Check className="h-3 w-3 text-black" />}
+                      </span>
+                      <span className="min-w-0">
+                        <span className="block truncate font-medium">{template.name}</span>
+                        <span className={`block ${selected ? 'text-gray-300' : 'text-gray-500'}`}>
+                          {template.arch} · {template.distro} {template.release}
+                          {windows ? ' · Windows' : ''}
+                        </span>
+                      </span>
+                    </button>
+                  )
+                })}
+              </div>
             )}
-
           </Field>
             </>
           )}
@@ -536,35 +551,101 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
           )}
 
           {currentStep === 1 && templates.length > 0 && (
-            <Field label="子用户可用镜像">
-              <div className="rounded-md border border-gray-200 bg-gray-50 p-3">
-                <div className="mb-2 text-xs text-gray-500">默认勾选当前系统；取消后，子用户也不能重装该系统。</div>
-                <div className="grid gap-2 sm:grid-cols-2">
-                  {templates.map((template) => {
-                    const checked = (form.allowed_image_ids || []).includes(template.id)
-                    const current = template.id === form.template_id
-                    return (
-                      <label key={template.id} className={`flex cursor-pointer items-start gap-2 rounded border px-2.5 py-2 text-xs ${checked ? 'border-black bg-white' : 'border-gray-200 bg-white hover:bg-gray-50'}`}>
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={() => {
-                            const currentIDs = form.allowed_image_ids || []
-                            const next = checked ? currentIDs.filter((id) => id !== template.id) : [...currentIDs, template.id]
-                            setForm({ ...form, allowed_image_ids: next, image_limit_configured: true })
-                          }}
-                          className="mt-0.5 h-4 w-4 rounded border-gray-300 text-black focus:ring-black"
-                        />
-                        <span className="min-w-0">
-                          <span className="block truncate font-medium text-gray-800">{template.name}{current ? '（当前系统）' : ''}</span>
-                          <span className="block text-gray-500">{template.arch} · {template.distro} {template.release}</span>
-                        </span>
-                      </label>
-                    )
-                  })}
+            <>
+              <Field label="子用户可用镜像（权限设置，可多选）">
+                <div className="rounded-md border border-dashed border-gray-300 bg-gray-50 p-3">
+                  <div className="mb-2 text-xs text-gray-500">
+                    仅控制<strong className="font-medium text-gray-700">子用户</strong>能看到/重装哪些系统，<strong className="font-medium text-gray-700">不影响上面选的安装系统</strong>。
+                  </div>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    {templates.map((template) => {
+                      const checked = (form.allowed_image_ids || []).includes(template.id)
+                      const current = template.id === form.template_id
+                      return (
+                        <label key={template.id} className={`flex cursor-pointer items-start gap-2 rounded border px-2.5 py-2 text-xs ${checked ? 'border-black bg-white' : 'border-gray-200 bg-white hover:bg-gray-50'}`}>
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => {
+                              const currentIDs = form.allowed_image_ids || []
+                              const next = checked ? currentIDs.filter((id) => id !== template.id) : [...currentIDs, template.id]
+                              setForm({ ...form, allowed_image_ids: next, image_limit_configured: true })
+                            }}
+                            className="mt-0.5 h-4 w-4 rounded border-gray-300 text-black focus:ring-black"
+                          />
+                          <span className="min-w-0">
+                            <span className="block truncate font-medium text-gray-800">{template.name}{current ? '（当前系统）' : ''}</span>
+                            <span className="block text-gray-500">{template.arch} · {template.distro} {template.release}</span>
+                          </span>
+                        </label>
+                      )
+                    })}
+                  </div>
                 </div>
+              </Field>
+
+              <div className="rounded-md border border-gray-200 bg-white">
+                <button
+                  type="button"
+                  onClick={() => setInitScriptOpen(!initScriptOpen)}
+                  className="flex w-full items-center justify-between px-3 py-2.5 text-left text-sm font-medium text-gray-800 hover:bg-gray-50"
+                >
+                  <span className="flex items-center gap-1.5">
+                    <Terminal className="h-4 w-4 text-gray-500" />
+                    <span>预设初始化命令 (Init Script)</span>
+                    {form.init_script?.trim() && (
+                      <span className="ml-1.5 rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-normal text-emerald-700">已配置</span>
+                    )}
+                  </span>
+                  {initScriptOpen ? <ChevronUp className="h-4 w-4 text-gray-400" /> : <ChevronDown className="h-4 w-4 text-gray-400" />}
+                </button>
+                {initScriptOpen && (
+                  <div className="border-t border-gray-100 p-3 space-y-2.5">
+                    <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                      <span className="text-gray-500">快捷预设:</span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const cmd = 'apt-get update && apt-get install -y wget curl lrzsz iftop htop btop net-tools || yum install -y wget curl lrzsz iftop htop btop net-tools'
+                          setForm({ ...form, init_script: form.init_script?.trim() ? `${form.init_script.trim()}\n\n${cmd}` : cmd })
+                        }}
+                        className="rounded border border-gray-200 bg-gray-50 px-2 py-1 text-gray-700 hover:bg-gray-100"
+                      >
+                        📦 常用工具包 (wget/curl/iftop/htop)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const cmd = 'curl -fsSL https://get.docker.com | sh'
+                          setForm({ ...form, init_script: form.init_script?.trim() ? `${form.init_script.trim()}\n\n${cmd}` : cmd })
+                        }}
+                        className="rounded border border-gray-200 bg-gray-50 px-2 py-1 text-gray-700 hover:bg-gray-100"
+                      >
+                        🐳 安装 Docker
+                      </button>
+                      {form.init_script && (
+                        <button
+                          type="button"
+                          onClick={() => setForm({ ...form, init_script: '' })}
+                          className="rounded border border-red-200 bg-red-50 px-2 py-1 text-red-600 hover:bg-red-100 ml-auto"
+                        >
+                          清空
+                        </button>
+                      )}
+                    </div>
+                    <textarea
+                      value={form.init_script || ''}
+                      onChange={(e) => setForm({ ...form, init_script: e.target.value })}
+                      placeholder="# 实例首次开机就绪后将在后台自动执行预设命令&#10;# Linux 支持 Shell 命令，Windows 支持 PowerShell 脚本&#10;apt-get update && apt-get install -y curl wget"
+                      className="w-full h-28 rounded-md border border-gray-300 p-2 font-mono text-xs text-gray-800 focus:border-black focus:outline-none focus:ring-1 focus:ring-black"
+                    />
+                    <div className="text-[11px] text-gray-400">
+                      提示：执行日志将保存在实例内部 <code className="text-gray-600">/var/log/clicd-init-script.log</code>（Windows 为 <code className="text-gray-600">C:\CLICD\init.log</code>）。
+                    </div>
+                  </div>
+                )}
               </div>
-            </Field>
+            </>
           )}
 
           {currentStep === 0 && linuxTemplate && (
@@ -1195,18 +1276,19 @@ export default function CreateContainerModal({ isOpen, onClose, onSuccess, exist
               <section>
                 <h3 className="mb-2 text-sm font-semibold text-gray-900">{t('镜像与登录')}</h3>
                 <dl className="grid grid-cols-1 border-y border-gray-200 sm:grid-cols-3">
-                  <ReviewItem label={t('系统镜像')} value={selectedTemplate?.name || '-'} />
-                  <ReviewItem label={t('登录方式')} value={
-                    !linuxTemplate
-                      ? t('镜像默认')
-                      : sshAuthMode === 'key'
-                        ? 'SSH Key'
-                        : sshAuthMode === 'password'
-                          ? t('自定义密码')
-                          : t('自动生成密码')
-                  } />
-                  <ReviewItem label={t('子用户可用镜像')} value={`${selectedAllowedImages.length} ${t('个')}`} />
-                </dl>
+	                  <ReviewItem label={t('系统镜像')} value={selectedTemplate?.name || '-'} />
+	                  <ReviewItem label={t('登录方式')} value={
+	                    !linuxTemplate
+	                      ? t('镜像默认')
+	                      : sshAuthMode === 'key'
+	                        ? 'SSH Key'
+	                        : sshAuthMode === 'password'
+	                          ? t('自定义密码')
+	                          : t('自动生成密码')
+	                  } />
+	                  <ReviewItem label={t('子用户可用镜像')} value={`${selectedAllowedImages.length} ${t('个')}`} />
+	                  <ReviewItem label="初始化命令" value={form.init_script?.trim() ? '已配置' : '未配置'} />
+	                </dl>
                 {selectedAllowedImages.length > 0 && (
                   <div className="mt-2 flex flex-wrap gap-1.5">
                     {selectedAllowedImages.map((template) => (
@@ -1474,10 +1556,6 @@ function applyTemplateDefaults(form: CreateContainerRequest): CreateContainerReq
     ram_mb: Math.max(2048, Math.round(Number.isFinite(form.ram_mb) ? form.ram_mb : 2048)),
     disk_gb: Math.max(30, Math.round(Number.isFinite(form.disk_gb) ? form.disk_gb : 30)),
   }
-}
-
-function isWindowsTemplate(templateID: string) {
-  return templateID.toLowerCase().includes('windows')
 }
 
 function normalizeLXCvCPU(value: number) {

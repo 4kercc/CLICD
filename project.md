@@ -114,6 +114,83 @@
 - **批量修改配置 (`POST /api/v1/batch-config`)**：支持勾选多台实例批量调整硬件配置、网络限速、磁盘限速、流量模式/重置、到期时间、端口/快照配额与批量密码重置，支持字段级细粒度覆盖且运行中实例热应用生效。
 - **任务队列节流批量快照 (`TaskSnapshot`)**：多选容器后一键打快照并自动排队入队 `TaskQueue`，严格受 `maxConcurrency` 节流，杜绝母鸡 I/O 阻塞。
 
+### 6. 🚀 容器/虚拟机预设初始化命令 (Init Script) (最新新增 - 2026-09-17)
+- **需求背景**：用户在创建单台实例、批量开设或重装实例时，支��配置自定义的「预设初始化命令/脚本 (Init Script)」。实例在首次启动就绪（连网成功）后在后台自动静默执行预设命令（如自动安装 `wget`、`curl`、`lrzsz`、`iftop`、`htop`、`docker` 等常用工具），无需人工登录逐台装包。
+- **KVM Linux (Cloud-Init `seed.iso`)**：在 `backend/internal/kvm/kvm.go` 的 `createSeedISO` 中将用户的 `InitScript` 追加至 `#cloud-config` 的 `runcmd` 列表，虚拟机首次开机后自动执行并将日志重定向输出至客机 `/var/log/clicd-init-script.log`。
+- **KVM Windows (Unattend ISO)**：在 `backend/internal/kvm/kvm.go` 的 `windowsFirstLogonPowerShell` 中将 `InitScript` 写入 `FirstLogon.ps1` 尾部，并在首次管理员登录时通过 PowerShell 静默执行并记录日志至 `C:\CLICD\init.log`。
+- **LXC 容器执行机制**：在 `backend/internal/lxc/lxc.go` 中，在 `EnsureSSH` 及容器网络就绪后，调用 `lxc.ExecuteInitScriptAsync` 在后台异步通过 `lxc-attach` 执行用户预设命令，并将日志记录于容器内 `/var/log/clicd-init-script.log`。
+- **数据结构与持久化**：
+  - `backend/internal/config/config.go`：`Container` 结构体新增 `InitScript string json:"init_script,omitempty"`。
+  - `backend/internal/lxc/lxc.go`：`ContainerConfig` 结构体新增 `InitScript string json:"init_script,omitempty"`。
+  - `backend/internal/config/store_sqlite.go`：SQLite `containers` 表及 `tasks` 表支持自动迁移并读写 `init_script` / `cfg_init_script` 字段。
+- **任务队列与 API 透传**：
+  - `backend/internal/api/handlers.go`：单机创建、批量创建 (`batch-create`) 接口支持解析并透传 `init_script`。
+  - `backend/internal/api/taskqueue.go`：重装系统 (`reinstall`) 任务支持提取并透传 `init_script` 至底层 `ReinstallContainer`。
+- **前端交互与快捷预设**：
+  - `frontend/src/services/api.ts`：更新 TypeScript 接口定义（`Container`、`CreateContainerRequest`、`ReinstallContainerOptions`）。
+  - `frontend/src/components/CreateContainerModal.tsx`（创建容器向导）：在镜像配置步中增加「预设初始化命令 (Init Script)」折叠面板，提供等宽代码框与常用预设按钮，并在第 4 步预览清单中展示配置状态。
+  - `frontend/src/pages/ContainerDetail.tsx`（重装系统）：重装弹窗中新增「预设初始化命令 (Init Script)」配置与快捷填充按钮。
+  - 提供快捷预设：📦 *常用工具包 (`wget/curl/iftop/htop`)*、🐳 *安装 Docker* 与清空功能。
+- **实机验证与多行脚本执行优化 (<测试机地址>)**：
+  - **排查修复多行执行异常**：此前若用户多行命令包含 `&&` 换行拼接（如同时点击了工��包和 Docker 安装），直接作为 `sh -c` 字符串执行时触发了 `sh: Syntax error: "&&" unexpected` 语法错误。
+  - **脚本执行器封装增强**：在 `backend/internal/lxc/lxc.go` 的 `ExecuteInitScriptAsync` 中改为生成沙箱临时脚本 `/tmp/.clicd_init_script.sh`（带 `chmod +x` 与 `set -e` 自动保护），并优化前端预设填充逻辑采用换行分割拼接，彻底消除多行 Shell 命令的语法解析隐患。
+  - **实机全量验证通过**：在测试服务器上创建实例 `ccc-good`，注入「常用工具包 (`wget/curl/lrzsz/iftop/htop/btop/net-tools`) + 官方 Docker Engine 安装脚本」，验证客机内 `/usr/bin/htop`、`/usr/sbin/iftop`、`/usr/bin/wget`、`/usr/bin/curl` 及 `docker-ce` 全部安装就绪，日志记录完整。
+
+### 7. 🔐 Telegram 登录成功提醒 (最新新增 - 2026-09-18)
+- **需求背景**：为及时感知控制面板的登录行为，Telegram Bot 新增「登录提醒」能力。**仅在登录成功时推送**，登录失败（密码错误、账号不存在、2FA 校验失败、子用户无可用容器等）一律不推送，避免被爆破尝试刷屏。
+- **推送内容**：登录账号（含身份角色：超级管理员 / 子用户 / 子用户快捷链接）、来源 IP、客户端 User-Agent、节点主机名与登录时间，便于第一时间识别异常来源。
+- **数据结构**：
+  - `backend/internal/config/config.go`：`TelegramConfig` 新增 `NotifyLogins bool` (`json:"notify_logins"`)，随 `app_meta.telegram` JSON 一并持久化，无需改动 SQLite 表结构。
+- **推送实现**：
+  - `backend/internal/telegram/bot.go`：新增 `SendLoginNotification(username, role, ip, userAgent string)`，复用已配置的 BotToken / AdminChatIDs / ProxyURL 长轮询客户端；推送成功或失败均写入 `[Telegram] Login notification ...` 运行日志，便于排查投递链路。
+- **触发点（仅成功分支）**：
+  - `backend/internal/api/auth.go`：`HandleLogin` 中通过 bcrypt 与（启用时）2FA TOTP 双重校验后，在 `RecordLoginLog(..., true)` 之后以 goroutine 异步触发 `go telegram.Global().SendLoginNotification(req.Username, "超级管理员", ip, ua)`，不阻塞登录响应。
+  - `backend/internal/api/subuser.go`：`HandleSubUserLogin` 与 `HandleSubUserAccessCode` 在密码校验通过且存在可用容器后触发，角色分别标记为「子用户」与「子用户快捷链接」。
+- **接口与前端**：
+  - `backend/internal/api/settings.go`：`TelegramSettingsRequest/Response` 增加 `notify_logins`，GET 返回当前状态、PUT 保存并 `telegram.Global().Restart()` 即时生效。
+  - `frontend/src/services/api.ts`：`TelegramSettings` 接口增加 `notify_logins: boolean`。
+  - `frontend/src/pages/Settings.tsx`：Telegram Bot 卡片新增「推送登录成功提醒」复选框（默认开启），并接入 `handleSaveTelegram` / `fetchTelegram` 的读写回填。
+- **实机验证 (<测试机地址>)**：
+  - 部署新二进制并启用 `notify_logins` 后，通过接口创建一个临时子用户并完成一次成功登录，服务端日志输出：
+    `[Telegram] Login notification pushed: user=user-668ed93b role=子用户 ip=192.168.122.84:62463`，确认消息已成功投递至管理员 TG（无发送失败日志）。
+  - 验证结束后已清理临时子用户数据并重启服务，环境恢复原状。
+
+### 8. 💿 KVM Windows ISO 挂载防呆与 `__invalid_image_id__` 启动报错修复 (最新修复 - 2026-09-18)
+- **根因分析**：
+  - 在生成 Windows 虚拟机的 Libvirt Domain XML 时，此前直接调用了 `ImagePath(c.Template)`；当用户修改了虚拟机模板标识或直接导入外部磁盘镜像时，`ImagePath` 会返回不存在的默认占位符 `/var/lib/clicd/images/kvm/__invalid_image_id__.iso` 并强行作为光驱写入配置，导致 QEMU 启动时检测到文件不存在报错 `Cannot access storage file ... No such file or directory`。
+- **修复方案**：
+  - 在 `backend/internal/kvm/kvm.go` 的 `ApplyContainerLimits` 与 `ensureDomainDefinition` 中引入 **ISO 存在性安全校验**：
+    - 优先采用用户自定义填写的 `c.BootMedia`；
+    - 若未指定，则仅当镜像库中存在且物理文件真实存在时才作为光驱挂载；
+    - 否则 `winISO` 保持为空字符串，Domain XML 生成器自动跳过生成该虚拟光驱，不再写入任何无效占位符。
+  - 支持热挂载/热更新：当虚拟机在运行中调整硬件配置修改 `BootMedia` 时，底层自动调用 `virsh change-media` 对光盘进行 `--insert` / `--update` / `--eject` 动态热插拔。
+- **实机验证 (<测试机地址>)**：
+  - 成功为运行中的 Windows 虚拟机 `vm-4`（`jsq-windows`）热挂载 `/var/lib/clicd/images/kvm/custom-kvm-770d5fc03f.iso` 到虚拟光驱 `hdb`，`virsh domblklist vm-4` 确认光驱源已正确更新为自定义 ISO。
+
+### 9. 🪟 创建向导「选 Windows 却装出 Debian 12」根因修复 (最新修复 - 2026-09-20)
+- **问题现象**：在创建向导中选择 Windows 镜像，创建出来的实例却仍然是 Debian 12；且自定义 Windows 镜像在网络步骤显示为 SSH 22 而非 RDP 3389。
+- **根因（三处叠加缺陷）**：
+  1. **前端 Windows 识别错误**：`isWindowsTemplate()` 仅用 `templateID.includes('windows')` 做字符串匹配，而用户自定义镜像的 ID 形如 `custom-kvm-42e957647c`（不含 windows），导致自定义 Windows 镜像被当作 Linux 处理。
+  2. **创建向导 OS 选择易被误操作**：「系统模板」是普通下拉框，而下方「子用户可用镜像」是一整片醒目的复选框网格，用户极易把后者当成系统选择器 —— 勾选 Windows 复选框只影响子用户权限，不会改变本次安装的系统，于是仍以默认的 Debian 12 建机。
+  3. **Windows 虚拟机引导顺序缺陷（致命）**：新建 Windows 虚拟机使用空磁盘，但 Domain XML 默认只写 `<boot dev='hd'/>`，SeaBIOS 在空盘上直接以 `Boot failed: not a bootable disk / No bootable device` 中止，永远不会回退到安装光盘，导致即使镜像选对也无法进入安装程序。
+- **修复方案**：
+  - **新增共享工具 `frontend/src/utils/templateKind.ts`**：以 API 返回的 `distro` 字段为准注册 Windows 模板（`registerTemplateKinds`），`isWindowsTemplate` 优先查注册表、再退化为 ID 关键字匹配。`CreateContainerModal.tsx` 与 `ContainerDetail.tsx` 均改为引用该共享实现，删除各自原有的错误字符串匹配。
+  - **重做创建向导「镜像选择」步骤**：把「系统模板」下拉框改为**大卡片单选**（标题明确为「要安装的系统（单选，决定本次装出的系统）」，Windows 卡片额外标注 `· Windows`）；「子用户可用镜像」改为虚线框区块并注明「仅控制子用户能看到/重装哪些系统，不影响上面选的安装系统」。
+  - **修正 KVM 引导顺序（`backend/internal/kvm/kvm.go`）**：Windows 与 Linux Domain XML 的默认引导项改为 `hd → cdrom` 回退链，`network` 引导时为 `network → cdrom → hd`。空盘时 SeaBIOS 自动回退到安装光盘；系统装好后硬盘可引导则优先走硬盘，光驱中的 ISO 被自动忽略，无需人工弹出。
+- **实机验证 (<测试机地址>)**：
+  - 通过浏览器实际驱动面板创建向导：选 KVM 后 Windows 卡片正确识别（网络步骤显示 **RDP: 22015 -> 3389**，vCPU/内存/磁盘自动提升为 2C/2048MB/30GB）；预览清单「系统镜像」正确显示为所选 Windows 镜像。
+  - 创建实例并抓取控制台截图，确认 SeaBIOS 走 `hd → cdrom` 回退并成功进入 **Windows Server 2019 安装程序（“安装程序正在启动”）**，系统盘为空盘（`<backingStore/>`）而非 Debian 覆盖层，彻底闭环。
+  - **重要提示**：镜像 `custom-kvm-770d5fc03f`（`windows server 2019` / `2019-virto.iso`，2.2GB）经校验 **缺少 El Torito 引导记录（第 17 扇区为终止描述符，且 Boot System ID 为 LINUX）**，属不可引导的数据盘，任何平台都无法用它安装系统；请改用 `custom-kvm-42e957647c`（`cn_windows_server_2019_x64_dvd_4de40f33_virtio_20190225.iso`，5.3GB，第 17 扇区为 `EL TORITO SPECIFICATION`）等可引导安装镜像。
+  - 验证完成后已删除测试实例 `win-verify`、`win2019-check`，服务器环境恢复原状。
+
+---
+
+## 📝 AI 接力开发与修改记录规范 (Development Guidelines for AI Assistants)
+后续所有 AI 助手在接力开发本项目时，必须严格遵守以下规范：
+1. **持续同步 `project.md`**：完成任何代码修改、架构调整或需求上线后，必须在 `project.md` 中以清晰的小节记录修改背景、改动文件、技术细节以及实机验证状态。
+2. **遵守部署与发布要求**：用户未明确要求发布前，一律仅在本地构建并在测试服务器（`<测试机地址>`）验证，严禁擅自直接推送到 GitHub 远程仓库。
+3. **跨平台编译与嵌入规范**：修改前端代码后需先执行 `npm run build`，并将 `frontend/dist/*` 同步复制至 `web/` 与 `backend/internal/server/web/` 后，再使用 Go 交叉编译出 Linux AMD64 二进制。
+
 ---
 
 ## 🎯 现存待办需求与已完成状态 (Next Steps & Completed Status)

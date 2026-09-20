@@ -90,6 +90,7 @@ export default function Settings() {
   const [tgChatIDsText, setTgChatIDsText] = useState('')
   const [tgNotifyAlerts, setTgNotifyAlerts] = useState(true)
   const [tgNotifyEvents, setTgNotifyEvents] = useState(true)
+  const [tgNotifyLogins, setTgNotifyLogins] = useState(true)
   const [tgProxyURL, setTgProxyURL] = useState('')
   const [savingTelegram, setSavingTelegram] = useState(false)
   const [testingTelegram, setTestingTelegram] = useState(false)
@@ -181,6 +182,7 @@ export default function Settings() {
       setTgChatIDsText((data.admin_chat_ids || []).join('\n'))
       setTgNotifyAlerts(data.notify_alerts)
       setTgNotifyEvents(data.notify_events)
+      setTgNotifyLogins(data.notify_logins)
       setTgProxyURL(data.proxy_url || '')
     } catch (err) {
       console.error(err)
@@ -299,6 +301,7 @@ export default function Settings() {
         admin_chat_ids: parseChatIDs(tgChatIDsText),
         notify_alerts: tgNotifyAlerts,
         notify_events: tgNotifyEvents,
+        notify_logins: tgNotifyLogins,
         proxy_url: tgProxyURL.trim(),
       })
       const data = res.data.data
@@ -309,6 +312,7 @@ export default function Settings() {
         setTgChatIDsText((data.admin_chat_ids || []).join('\n'))
         setTgNotifyAlerts(data.notify_alerts)
         setTgNotifyEvents(data.notify_events)
+        setTgNotifyLogins(data.notify_logins)
         setTgProxyURL(data.proxy_url || '')
       }
       dialog.alert('完成', tgEnabled ? 'Telegram Bot 设置已保存并已自动连接' : 'Telegram Bot 服务已关闭')
@@ -734,27 +738,29 @@ export default function Settings() {
             />
           )}
 
-          {activeSection === 'telegram' && (
-            <TelegramBotCard
-              enabled={tgEnabled}
-              token={tgToken}
-              chatIDsText={tgChatIDsText}
-              notifyAlerts={tgNotifyAlerts}
-              notifyEvents={tgNotifyEvents}
-              proxyURL={tgProxyURL}
-              saving={savingTelegram}
-              testing={testingTelegram}
-              onEnabledChange={setTgEnabled}
-              onTokenChange={setTgToken}
-              onChatIDsTextChange={setTgChatIDsText}
-              onNotifyAlertsChange={setTgNotifyAlerts}
-              onNotifyEventsChange={setTgNotifyEvents}
-              onProxyURLChange={setTgProxyURL}
-              onRefresh={fetchTelegram}
-              onSave={handleSaveTelegram}
-              onTest={handleTestTelegram}
-            />
-          )}
+	          {activeSection === 'telegram' && (
+	            <TelegramBotCard
+	              enabled={tgEnabled}
+	              token={tgToken}
+	              chatIDsText={tgChatIDsText}
+	              notifyAlerts={tgNotifyAlerts}
+	              notifyEvents={tgNotifyEvents}
+	              notifyLogins={tgNotifyLogins}
+	              proxyURL={tgProxyURL}
+	              saving={savingTelegram}
+	              testing={testingTelegram}
+	              onEnabledChange={setTgEnabled}
+	              onTokenChange={setTgToken}
+	              onChatIDsTextChange={setTgChatIDsText}
+	              onNotifyAlertsChange={setTgNotifyAlerts}
+	              onNotifyEventsChange={setTgNotifyEvents}
+	              onNotifyLoginsChange={setTgNotifyLogins}
+	              onProxyURLChange={setTgProxyURL}
+	              onRefresh={fetchTelegram}
+	              onSave={handleSaveTelegram}
+	              onTest={handleTestTelegram}
+	            />
+	          )}
 
           {activeSection === 'access' && (
             <PanelAccessPolicyCard
@@ -921,6 +927,7 @@ interface TelegramBotCardProps {
   chatIDsText: string
   notifyAlerts: boolean
   notifyEvents: boolean
+  notifyLogins: boolean
   proxyURL: string
   saving: boolean
   testing: boolean
@@ -929,6 +936,7 @@ interface TelegramBotCardProps {
   onChatIDsTextChange: (text: string) => void
   onNotifyAlertsChange: (enabled: boolean) => void
   onNotifyEventsChange: (enabled: boolean) => void
+  onNotifyLoginsChange: (enabled: boolean) => void
   onProxyURLChange: (url: string) => void
   onRefresh: () => void
   onSave: () => void
@@ -1059,6 +1067,19 @@ function TelegramBotCard(props: TelegramBotCardProps) {
             <div>
               <div className="font-medium text-gray-800 dark:text-gray-200">推送生命周期与流量通知</div>
               <div className="mt-0.5 text-gray-500 dark:text-gray-400">实例到期提醒或流量超标自动停机时向管理员发送通知</div>
+            </div>
+          </label>
+
+          <label className="flex items-start gap-2.5 rounded-lg border border-gray-200 bg-gray-50/50 p-3 text-xs dark:border-gray-800 dark:bg-gray-950">
+            <input
+              type="checkbox"
+              checked={props.notifyLogins}
+              onChange={(e) => props.onNotifyLoginsChange(e.target.checked)}
+              className="mt-0.5 h-4 w-4 rounded border-gray-300"
+            />
+            <div>
+              <div className="font-medium text-gray-800 dark:text-gray-200">推送登录成功提醒</div>
+              <div className="mt-0.5 text-gray-500 dark:text-gray-400">管理员或子用户成功登录面板时，实时推送账号、来源 IP 与客户端信息（登录失败不推送）</div>
             </div>
           </label>
         </div>

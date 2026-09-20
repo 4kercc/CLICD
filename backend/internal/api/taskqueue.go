@@ -679,47 +679,49 @@ func HandleSingleTaskAction(w http.ResponseWriter, r *http.Request, id int, acti
 		taskType = TaskRestart
 	case "delete":
 		taskType = TaskDelete
-	case "reinstall":
-		var req struct {
-			TemplateID   string `json:"template_id"`
-			SSHAuthMode  string `json:"ssh_auth_mode,omitempty"`
-			SSHPassword  string `json:"ssh_password,omitempty"`
-			SSHPublicKey string `json:"ssh_public_key,omitempty"`
-		}
-		json.NewDecoder(r.Body).Decode(&req)
-		templateID = req.TemplateID
-		if templateID == "" {
-			c := config.FindContainer(id)
-			if c != nil {
-				templateID = c.Template
+		case "reinstall":
+			var req struct {
+				TemplateID   string `json:"template_id"`
+				SSHAuthMode  string `json:"ssh_auth_mode,omitempty"`
+				SSHPassword  string `json:"ssh_password,omitempty"`
+				SSHPublicKey string `json:"ssh_public_key,omitempty"`
+				InitScript   string `json:"init_script,omitempty"`
 			}
-		}
-		runtime := runtimeFromTemplateID(templateID)
-		if c := config.FindContainer(id); c != nil {
-			runtime = c.Runtime()
-		}
-		if !isTemplateAllowedForRequest(r, c, templateID) {
-			jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "Template is not allowed for this user"})
-			return
-		}
-		if !isTemplateAvailableForRequest(r, c, templateID, runtime) {
-			jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "Template is not enabled or downloaded"})
-			return
-		}
-		authCfg := lxc.ContainerConfig{
-			TemplateID:   templateID,
-			SSHAuthMode:  req.SSHAuthMode,
-			SSHPassword:  req.SSHPassword,
-			SSHPublicKey: req.SSHPublicKey,
-		}
-		if lxc.HasSSHAuthOptions(authCfg) {
-			if err := validateReinstallSSHAuth(c, templateID, authCfg); err != nil {
-				jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: err.Error()})
+			json.NewDecoder(r.Body).Decode(&req)
+			templateID = req.TemplateID
+			if templateID == "" {
+				c := config.FindContainer(id)
+				if c != nil {
+					templateID = c.Template
+				}
+			}
+			runtime := runtimeFromTemplateID(templateID)
+			if c := config.FindContainer(id); c != nil {
+				runtime = c.Runtime()
+			}
+			if !isTemplateAllowedForRequest(r, c, templateID) {
+				jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "Template is not allowed for this user"})
 				return
 			}
-			taskConfig = &authCfg
-		}
-		taskType = TaskReinstall
+			if !isTemplateAvailableForRequest(r, c, templateID, runtime) {
+				jsonResponse(w, http.StatusForbidden, APIResponse{Success: false, Message: "Template is not enabled or downloaded"})
+				return
+			}
+			authCfg := lxc.ContainerConfig{
+				TemplateID:   templateID,
+				SSHAuthMode:  req.SSHAuthMode,
+				SSHPassword:  req.SSHPassword,
+				SSHPublicKey: req.SSHPublicKey,
+				InitScript:   req.InitScript,
+			}
+			if lxc.HasSSHAuthOptions(authCfg) || strings.TrimSpace(req.InitScript) != "" {
+				if err := validateReinstallSSHAuth(c, templateID, authCfg); err != nil {
+					jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: err.Error()})
+					return
+				}
+				taskConfig = &authCfg
+			}
+			taskType = TaskReinstall
 	default:
 		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Unknown action"})
 		return

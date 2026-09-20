@@ -172,9 +172,10 @@ type Container struct {
 		BootOrder                     string                 `json:"boot_order,omitempty"`   // "disk", "cdrom", "network"
 		BootMedia                     string                 `json:"boot_media,omitempty"`   // Custom ISO path/ID or ""
 		Firmware                      string                 `json:"firmware,omitempty"`     // "bios", "uefi"
-		NICModel                      string                 `json:"nic_model,omitempty"`    // "virtio", "e1000e", "rtl8139"
-		DiskBus                       string                 `json:"disk_bus,omitempty"`     // "virtio", "sata", "ide", "scsi"
-	}
+			NICModel                      string                 `json:"nic_model,omitempty"`    // "virtio", "e1000e", "rtl8139"
+			DiskBus                       string                 `json:"disk_bus,omitempty"`     // "virtio", "sata", "ide", "scsi"
+			InitScript                    string                 `json:"init_script,omitempty"`
+		}
 
 const (
 	VirtualizationLXC = "lxc"
@@ -876,6 +877,7 @@ type ClicdConfig struct {
 		AdminChatIDs []int64  `json:"admin_chat_ids"` // Whitelisted Telegram Chat IDs
 		NotifyAlerts bool     `json:"notify_alerts"`  // Push security alerts
 		NotifyEvents bool     `json:"notify_events"`  // Push lifecycle / traffic events
+		NotifyLogins bool     `json:"notify_logins"`  // Push successful login notifications
 		ProxyURL     string   `json:"proxy_url,omitempty"`
 	}
 

@@ -191,6 +191,32 @@ func (b *BotClient) SendEventNotification(title, detail string) {
 	}
 }
 
+// SendLoginNotification sends a notification when a user or administrator logs in successfully
+func (b *BotClient) SendLoginNotification(username, role, ip, userAgent string) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	if !b.cfg.Enabled || !b.cfg.NotifyLogins || len(b.cfg.AdminChatIDs) == 0 || b.cfg.BotToken == "" {
+		return
+	}
+
+	hostname := getHostname()
+	msg := fmt.Sprintf("🔐 *【登录提醒】控制面板登录成功*\n\n"+
+		"• *登录账号*：`%s` (%s)\n"+
+		"• *来源 IP*：`%s`\n"+
+		"• *客户端*：`%s`\n"+
+		"• *节点主机*：`%s`\n"+
+		"• *登录时间*：%s",
+		username, role, ip, userAgent, hostname, time.Now().Format("2006-01-02 15:04:05"))
+
+	for _, chatID := range b.cfg.AdminChatIDs {
+		if err := sendRawMessage(b.httpClient, b.cfg.BotToken, chatID, msg, "Markdown", nil); err != nil {
+			log.Printf("[Telegram] Failed to push login notification for %s to chat %d: %v", username, chatID, err)
+		}
+	}
+	log.Printf("[Telegram] Login notification pushed: user=%s role=%s ip=%s", username, role, ip)
+}
+
 // Telegram Bot API Models
 type Update struct {
 	UpdateID      int            `json:"update_id"`

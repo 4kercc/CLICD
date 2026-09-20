@@ -269,6 +269,7 @@ type ContainerConfig struct {
 	SSHAuthMode          string                     `json:"ssh_auth_mode,omitempty"`
 	SSHPassword          string                     `json:"ssh_password,omitempty"`
 	SSHPublicKey         string                     `json:"ssh_public_key,omitempty"`
+	InitScript           string                     `json:"init_script,omitempty"`
 	ExpiresAt            string                     `json:"expires_at"`
 	Progress             func(stage, detail string) `json:"-"`
 }
@@ -651,6 +652,7 @@ func (m *Manager) CreateContainer(cfg ContainerConfig) error {
 		AllowedImageIDs:      append([]string(nil), cfg.AllowedImageIDs...),
 		ImageLimitConfigured: cfg.ImageLimitConfigured,
 		SnapshotLimit:        config.NormalizeSnapshotLimit(cfg.SnapshotLimit),
+		InitScript:           cfg.InitScript,
 		CreatedAt:            now,
 		ExpiresAt:            cfg.ExpiresAt,
 	}
@@ -2767,7 +2769,50 @@ func (m *Manager) EnsureSSH(id int) error {
 	}
 
 	fmt.Printf("SSH ready in container %d (root password login enabled)\n", id)
+	if strings.TrimSpace(c.InitScript) != "" {
+		m.ExecuteInitScriptAsync(id, c.InitScript)
+	}
 	return nil
+}
+
+// ExecuteInitScriptAsync runs the user-defined init script asynchronously inside the container
+func (m *Manager) ExecuteInitScriptAsync(id int, script string) {
+	script = strings.TrimSpace(script)
+	if script == "" {
+		return
+	}
+	go func() {
+		c := config.FindContainer(id)
+		if c == nil {
+			return
+		}
+		lxcName := c.LxcName()
+		// Wait a few seconds to let guest network and background services fully settle
+		time.Sleep(3 * time.Second)
+
+		// Create a temporary script inside container to avoid shell parsing / escaping issues with multiline commands
+		tmpScriptPath := "/tmp/.clicd_init_script.sh"
+		initWrapper := fmt.Sprintf(`cat << 'EOF_CLICD_INIT' > %s
+#!/bin/sh
+set -e
+echo "=== CLICD User Init Script Started at $(date) ==="
+%s
+echo "=== CLICD User Init Script Finished at $(date) ==="
+EOF_CLICD_INIT
+chmod +x %s
+%s >> /var/log/clicd-init-script.log 2>&1 || true
+rm -f %s
+`, tmpScriptPath, script, tmpScriptPath, tmpScriptPath, tmpScriptPath)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 600*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "lxc-attach", "-n", lxcName, "--", "sh", "-c", initWrapper)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			fmt.Printf("Warning: init script execution error in container %s (%d): %v, output: %s\n", lxcName, id, err, string(out))
+		} else {
+			fmt.Printf("Init script executed successfully in container %s (%d)\n", lxcName, id)
+		}
+	}()
 }
 
 func (m *Manager) quickEnsureSSHPassword(lxcName, password string) error {
@@ -3757,6 +3802,7 @@ func (m *Manager) ReinstallContainer(id int, templateID string, authConfig ...Co
 	// Update template and keep everything else the same
 	c.Template = templateID
 	c.SSHHostKey = ""
+	c.InitScript = authCfg.InitScript
 	c.Status = "running"
 	config.SaveConfig()
 

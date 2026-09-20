@@ -137,6 +137,7 @@ export interface Container {
   firmware?: string
   nic_model?: string
   disk_bus?: string
+  init_script?: string
 }
 
 export interface Template {
@@ -190,6 +191,7 @@ export interface CreateContainerRequest {
   ssh_auth_mode?: string
   ssh_password?: string
   ssh_public_key?: string
+  init_script?: string
   allowed_image_ids?: string[]
   image_limit_configured?: boolean
   expires_at: string
@@ -248,6 +250,7 @@ export interface ReinstallContainerOptions {
   ssh_auth_mode?: string
   ssh_password?: string
   ssh_public_key?: string
+  init_script?: string
 }
 
 export interface IPv6PrefixInfo {
@@ -583,6 +586,7 @@ export interface TelegramSettings {
   admin_chat_ids: number[]
   notify_alerts: boolean
   notify_events: boolean
+  notify_logins: boolean
   proxy_url?: string
 }
 

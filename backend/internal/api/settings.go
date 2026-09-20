@@ -218,6 +218,7 @@ type TelegramSettingsResponse struct {
 	AdminChatIDs []int64 `json:"admin_chat_ids"`
 	NotifyAlerts bool    `json:"notify_alerts"`
 	NotifyEvents bool    `json:"notify_events"`
+	NotifyLogins bool    `json:"notify_logins"`
 	ProxyURL     string  `json:"proxy_url"`
 }
 
@@ -227,6 +228,7 @@ type TelegramSettingsRequest struct {
 	AdminChatIDs []int64 `json:"admin_chat_ids"`
 	NotifyAlerts bool    `json:"notify_alerts"`
 	NotifyEvents bool    `json:"notify_events"`
+	NotifyLogins bool    `json:"notify_logins"`
 	ProxyURL     string  `json:"proxy_url"`
 }
 
@@ -257,6 +259,7 @@ func HandleTelegramSettings(w http.ResponseWriter, r *http.Request) {
 				AdminChatIDs: tg.AdminChatIDs,
 				NotifyAlerts: tg.NotifyAlerts,
 				NotifyEvents: tg.NotifyEvents,
+				NotifyLogins: tg.NotifyLogins,
 				ProxyURL:     tg.ProxyURL,
 			},
 		})
@@ -291,6 +294,7 @@ func HandleTelegramSettings(w http.ResponseWriter, r *http.Request) {
 			AdminChatIDs: cleanIDs,
 			NotifyAlerts: req.NotifyAlerts,
 			NotifyEvents: req.NotifyEvents,
+			NotifyLogins: req.NotifyLogins,
 			ProxyURL:     strings.TrimSpace(req.ProxyURL),
 		}
 
@@ -312,6 +316,7 @@ func HandleTelegramSettings(w http.ResponseWriter, r *http.Request) {
 				AdminChatIDs: config.AppConfig.Telegram.AdminChatIDs,
 				NotifyAlerts: config.AppConfig.Telegram.NotifyAlerts,
 				NotifyEvents: config.AppConfig.Telegram.NotifyEvents,
+				NotifyLogins: config.AppConfig.Telegram.NotifyLogins,
 				ProxyURL:     config.AppConfig.Telegram.ProxyURL,
 			},
 		})

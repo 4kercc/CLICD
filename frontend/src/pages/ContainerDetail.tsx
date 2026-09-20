@@ -4,6 +4,8 @@ import {
   ArrowLeft,
   AlertTriangle,
   Camera,
+  ChevronDown,
+  ChevronUp,
   Clock,
   Cloud,
   Copy,
@@ -26,6 +28,7 @@ import {
   Save,
   Settings,
   Square,
+  Terminal,
   TerminalSquare,
   Trash2,
   UserPlus,
@@ -115,6 +118,7 @@ import ResourceStatsPanel, {
   statsRanges,
 } from '../components/ResourceStatsPanel'
 import { generateSSHPassword, sshPasswordError, sshPublicKeyError, type ReinstallSSHAuthMode } from '../utils/sshAuth'
+import { isWindowsTemplate, registerTemplateKinds } from '../utils/templateKind'
 
 const PUBLIC_HOST = window.location.hostname
 const inputClass = 'w-full px-3 py-2 border border-gray-300 rounded-md text-sm text-black bg-white focus:outline-none focus:ring-2 focus:ring-black focus:border-black'
@@ -192,6 +196,8 @@ export default function ContainerDetail() {
   const [reinstallAuthMode, setReinstallAuthMode] = useState<ReinstallSSHAuthMode>('keep')
   const [reinstallPasswordDraft, setReinstallPasswordDraft] = useState('')
   const [reinstallPublicKeyDraft, setReinstallPublicKeyDraft] = useState('')
+  const [reinstallInitScriptDraft, setReinstallInitScriptDraft] = useState('')
+  const [reinstallInitScriptOpen, setReinstallInitScriptOpen] = useState(false)
   const [reinstalling, setReinstalling] = useState(false)
   const [traffic, setTraffic] = useState<TrafficInfo | null>(null)
   const [subUser, setSubUser] = useState<SubUser | null>(null)
@@ -751,6 +757,7 @@ export default function ContainerDetail() {
       const res = await getEnabledImages(container?.virtualization || 'lxc', containerIdentifier)
       if (res.data.data) {
         const data = res.data.data
+        registerTemplateKinds(data)
         setTemplates(data)
         const currentTemplate = container?.template || ''
         setSelectedTemplate(data.some((template) => template.id === currentTemplate) ? currentTemplate : (data[0]?.id || ''))
@@ -758,6 +765,8 @@ export default function ContainerDetail() {
       setReinstallAuthMode('keep')
       setReinstallPasswordDraft('')
       setReinstallPublicKeyDraft('')
+      setReinstallInitScriptDraft(container?.init_script || '')
+      setReinstallInitScriptOpen(!!container?.init_script?.trim())
       setShowReinstall(true)
     } catch (err) {
       console.error(err)
@@ -796,11 +805,12 @@ export default function ContainerDetail() {
     }
     setReinstalling(true)
     try {
-      await reinstallContainer(containerIdentifier, selectedTemplate, linuxTemplate ? {
-        ssh_auth_mode: reinstallAuthMode,
-        ssh_password: reinstallAuthMode === 'password' ? reinstallPasswordDraft.trim() : '',
-        ssh_public_key: reinstallAuthMode === 'key' ? reinstallPublicKeyDraft.trim() : '',
-      } : undefined)
+      await reinstallContainer(containerIdentifier, selectedTemplate, {
+        ssh_auth_mode: linuxTemplate ? reinstallAuthMode : undefined,
+        ssh_password: linuxTemplate && reinstallAuthMode === 'password' ? reinstallPasswordDraft.trim() : undefined,
+        ssh_public_key: linuxTemplate && reinstallAuthMode === 'key' ? reinstallPublicKeyDraft.trim() : undefined,
+        init_script: reinstallInitScriptDraft.trim() || undefined,
+      })
       setShowReinstall(false)
       setShowSSH(false)
       setShowVNC(false)
@@ -3136,6 +3146,69 @@ export default function ContainerDetail() {
                 )}
               </div>
             )}
+
+            <div className="rounded-md border border-gray-200 bg-white">
+              <button
+                type="button"
+                onClick={() => setReinstallInitScriptOpen(!reinstallInitScriptOpen)}
+                className="flex w-full items-center justify-between px-3 py-2.5 text-left text-sm font-medium text-gray-800 hover:bg-gray-50"
+              >
+                <span className="flex items-center gap-1.5">
+                  <Terminal className="h-4 w-4 text-gray-500" />
+                  <span>预设初始化命令 (Init Script)</span>
+                  {reinstallInitScriptDraft?.trim() && (
+                    <span className="ml-1.5 rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-normal text-emerald-700">已配置</span>
+                  )}
+                </span>
+                {reinstallInitScriptOpen ? <ChevronUp className="h-4 w-4 text-gray-400" /> : <ChevronDown className="h-4 w-4 text-gray-400" />}
+              </button>
+              {reinstallInitScriptOpen && (
+                <div className="border-t border-gray-100 p-3 space-y-2.5">
+                  <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                    <span className="text-gray-500">快捷预设:</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const cmd = 'apt-get update && apt-get install -y wget curl lrzsz iftop htop btop net-tools || yum install -y wget curl lrzsz iftop htop btop net-tools'
+                        setReinstallInitScriptDraft(reinstallInitScriptDraft?.trim() ? `${reinstallInitScriptDraft.trim()}\n\n${cmd}` : cmd)
+                      }}
+                      className="rounded border border-gray-200 bg-gray-50 px-2 py-1 text-gray-700 hover:bg-gray-100"
+                    >
+                      📦 常用工具包 (wget/curl/iftop/htop)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const cmd = 'curl -fsSL https://get.docker.com | sh'
+                        setReinstallInitScriptDraft(reinstallInitScriptDraft?.trim() ? `${reinstallInitScriptDraft.trim()}\n\n${cmd}` : cmd)
+                      }}
+                      className="rounded border border-gray-200 bg-gray-50 px-2 py-1 text-gray-700 hover:bg-gray-100"
+                    >
+                      🐳 安装 Docker
+                    </button>
+                    {reinstallInitScriptDraft && (
+                      <button
+                        type="button"
+                        onClick={() => setReinstallInitScriptDraft('')}
+                        className="rounded border border-red-200 bg-red-50 px-2 py-1 text-red-600 hover:bg-red-100 ml-auto"
+                      >
+                        清空
+                      </button>
+                    )}
+                  </div>
+                  <textarea
+                    value={reinstallInitScriptDraft}
+                    onChange={(e) => setReinstallInitScriptDraft(e.target.value)}
+                    placeholder="# 重装后系统首次就绪将在后台自动执行预设命令&#10;# Linux 支持 Shell 命令，Windows 支持 PowerShell 脚本&#10;apt-get update && apt-get install -y curl wget"
+                    className="w-full h-28 rounded-md border border-gray-300 p-2 font-mono text-xs text-gray-800 focus:border-black focus:outline-none focus:ring-1 focus:ring-black"
+                  />
+                  <div className="text-[11px] text-gray-400">
+                    提示：执行日志将保存在实例内部 <code className="text-gray-600">/var/log/clicd-init-script.log</code>（Windows 为 <code className="text-gray-600">C:\CLICD\init.log</code>）。
+                  </div>
+                </div>
+              )}
+            </div>
+
             <div className="flex justify-end gap-3">
               <button onClick={() => setShowReinstall(false)} className="px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded-md">取消</button>
               <button onClick={handleReinstall} disabled={reinstalling} className="px-4 py-2 text-sm bg-black text-white rounded-md hover:bg-gray-800 disabled:opacity-50">
@@ -4414,10 +4487,6 @@ function TrafficBar({ container }: { container: Container }) {
       </div>
     </div>
   )
-}
-
-function isWindowsTemplate(templateID: string) {
-  return templateID.toLowerCase().includes('windows')
 }
 
 function getTemplateIcon(id: string): ReactNode {

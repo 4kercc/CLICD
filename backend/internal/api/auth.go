@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"clicd/internal/config"
+	"clicd/internal/telegram"
 
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
@@ -300,7 +301,8 @@ func HandleLogin(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	RecordLoginLog(req.Username, ip, ua, true)
+		RecordLoginLog(req.Username, ip, ua, true)
+		go telegram.Global().SendLoginNotification(req.Username, "超级管理员", ip, ua)
 
 	// Generate JWT token
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
