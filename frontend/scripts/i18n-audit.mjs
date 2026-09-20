@@ -17,9 +17,9 @@ const dictSrc = readFileSync(join(ROOT, 'utils', 'i18n.ts'), 'utf8')
 // --- dictionary: exact map + regex replacements, parsed from source ---
 const exactBlock = dictSrc.slice(dictSrc.indexOf('const exact'), dictSrc.indexOf('const replacements'))
 const exact = {}
-const entryRe = /^\s*'((?:[^'\\]|\\.)*)':\s*'((?:[^'\\]|\\.)*)',/gm
+const entryRe = /^\s*'((?:[^'\\]|\\.)*)':\s*(?:'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)")\s*,/gm
 for (const m of exactBlock.matchAll(entryRe)) {
-  exact[unescape(m[1])] = unescape(m[2])
+  exact[unescape(m[1])] = unescape(m[2] !== undefined ? m[2] : m[3])
 }
 
 const replBlock = dictSrc.slice(dictSrc.indexOf('const replacements'), dictSrc.indexOf('export function translateText'))

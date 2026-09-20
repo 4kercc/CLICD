@@ -14,7 +14,7 @@ const lines = readFileSync(file, 'utf8').split('\n')
 
 const start = lines.findIndex((l) => l.includes('const exact'))
 const end = lines.findIndex((l) => l.includes('const replacements'))
-const entryRe = /^\s*'((?:[^'\\]|\\.)*)':\s*'((?:[^'\\]|\\.)*)',\s*$/
+const entryRe = /^\s*'((?:[^'\\]|\\.)*)':\s*(?:'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)")\s*,$/
 
 const first = new Map()
 const duplicates = []
@@ -22,7 +22,7 @@ for (let i = start; i < end; i++) {
   const m = lines[i].match(entryRe)
   if (!m) continue
   if (first.has(m[1])) {
-    duplicates.push({ key: m[1], firstLine: first.get(m[1]), dupLine: i, value: m[2] })
+    duplicates.push({ key: m[1], firstLine: first.get(m[1]), dupLine: i, value: m[2] !== undefined ? m[2] : m[3] })
   } else {
     first.set(m[1], i)
   }

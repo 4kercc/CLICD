@@ -1259,3 +1259,16 @@ func removeImageEnabled(id string) {
 		config.SaveConfig()
 	}
 }
+
+// HandleKVMmedia lists the ISO/disk files an operator can attach to a KVM
+// instance, so the UI can offer a picker instead of asking for a host path.
+func HandleKVMMedia(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{Success: false, Message: "Method not allowed"})
+		return
+	}
+	if !requireScope(w, r, "image:read") {
+		return
+	}
+	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Data: kvm.ListAttachableMedia()})
+}

@@ -238,6 +238,30 @@
   - `i18n-duplicates.mjs`：重复键 **0**（清理 12 处，保留原有措辞以免影响既有页面）。
 - **重要排查提示**：英文模式的翻译由 `AutoTranslate` 组件在 `requestAnimationFrame` 回调中批量应用，**标签页处于后台/隐藏时浏览器不会触发 rAF**，此时实时抓取页面会看到未翻译文本；判断覆盖率请以可见标签页或上述静态校验脚本为准。
 
+### 14. 💿 额外挂载光盘（独立光驱）+ 服务器镜像选择器 (最新改进 - 2026-09-20)
+- **需求背景**：
+  1. 「自定义挂载 ISO 路径」会**整体替换**镜像自带的光盘。对于 `firepe` 这类 PE 镜像，用户期望的是「先由自带 PE 盘启动进入 PE，再从另一块光驱读 Windows 安装盘」，而不是被自定义 ISO 抢占启动盘。
+  2. 该输入框要求手填宿主机绝对路径，容易写错。
+- **改动内容**：
+  - **新增独立「额外挂载光盘」字段 (`ExtraISO` / `extra_iso`)**：
+    - `backend/internal/config/config.go` 新增 `Container.ExtraISO`，`store_sqlite.go` 增加 `containers.extra_iso` 列与自动迁移、读写与占位符同步。
+    - `backend/internal/lxc/lxc.go` 的 `ContainerConfig` 增加 `ExtraISO`（创建/重装透传）。
+    - `backend/internal/kvm/kvm.go`：新增 `extraCDROMXML()` 与保留槽位常量 `extraCDROMDevice = "sdc"`，Windows/Linux 两个 Domain XML 生成器均在**独立 SATA 光驱**上挂载该 ISO，镜像自带光盘（winISO / seed.iso）完全不受影响；两个生成器同时显式声明 `<controller type='sata' index='0'/>`，保证该光驱可被热插拔。
+    - **热插拔**：`syncExtraISO()` 在实例运行中即时生效——若运行中的域还没有该光驱，先 `virsh attach-device` 挂上（libvirt 要求附带介质，因此设备 XML 直接带 `<source>`），之后变更走 `change-media --insert/--update`，清空则 `--eject`；旧实例（域内尚无 SATA 控制器）无法热附加时会打印明确提示并在下次开机自动生效。
+    - `applyContainerLimits` 中原先"把 BootMedia 热插到 hdb"的逻辑已移除——那正是抢占启动盘的元凶。
+  - **新增服务器端镜像选择接口 `GET /api/kvm-media`**（`/api` 与 `/api/v1` 双前缀）：`kvm.ListAttachableMedia()` 汇总「已下载的注册镜像」与「镜像缓存目录内其它 `.iso`」，返回 `path / name / kind / source / size_bytes`，路径范围与 `boot_media`/`extra_iso` 的白名单一致，不会暴露任意宿主机文件。
+  - **前端改为下拉选择**（`ContainerDetail.tsx` 引导与硬件弹窗）：
+    - 「启动光盘覆盖 (留空为使用镜像自带光盘)」——默认使用镜像自带光盘；
+    - 「额外挂载光盘 (独立光驱，不影响启动光盘)」——默认不挂载；
+    - 两者共用服务器镜像列表，并提供「自定义路径…」项回退到手填；`mediaSelection()` 保证已保存但不在列表中的历史路径不会被静默清空。
+  - 补充上述新文案的 i18n 词条；同时修正 4 个 i18n 自检脚本解析器只识别单引号值的问题（新增词条使用双引号值时会漏解析）。
+- **实机验证 (<测试机地址>)**：
+  - 新建带额外光盘的实例，`virsh domblklist` 显示：`hdb` = 镜像自带 PE 盘（`custom-kvm-c836cfa104.iso`）、`sdc` = 额外 Windows 安装盘（`custom-kvm-42e957647c.iso`）；
+  - **运行时切换额外光盘**：`sdc` 由 Windows 2019 镜像换成另一 ISO，**`hdb` 保持不动**；
+  - **运行时清空额外光盘**：`sdc` 变为空托盘，`hdb` 依旧不动；
+  - `GET /api/kvm-media` 正确返回 5 项可选介质（含用户新加的 `firepe`），前端弹窗两个选择器均正确渲染并默认选中预期项；
+  - 验证实例已删除，服务器仅保留原有 10 个实例。
+
 ---
 
 ## 📝 AI 接力开发与修改记录规范 (Development Guidelines for AI Assistants)

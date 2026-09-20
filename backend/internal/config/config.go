@@ -171,6 +171,11 @@ type Container struct {
 		PolicyBlockedAt               string                 `json:"policy_blocked_at,omitempty"`
 		BootOrder                     string                 `json:"boot_order,omitempty"`   // "disk", "cdrom", "network"
 		BootMedia                     string                 `json:"boot_media,omitempty"`   // Custom ISO path/ID or ""
+		// ExtraISO is mounted as an ADDITIONAL CD-ROM drive. Unlike BootMedia it
+		// never replaces the image's own boot/install disc, so a bootable image
+		// (e.g. a PE maintenance ISO) keeps booting while the extra ISO (e.g. a
+		// Windows install disc) is available inside the guest.
+		ExtraISO                      string                 `json:"extra_iso,omitempty"`
 		Firmware                      string                 `json:"firmware,omitempty"`     // "bios", "uefi"
 			NICModel                      string                 `json:"nic_model,omitempty"`    // "virtio", "e1000e", "rtl8139"
 			DiskBus                       string                 `json:"disk_bus,omitempty"`     // "virtio", "sata", "ide", "scsi"

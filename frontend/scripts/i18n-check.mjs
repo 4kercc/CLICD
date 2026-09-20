@@ -14,8 +14,8 @@ const src = readFileSync(join(ROOT, 'utils', 'i18n.ts'), 'utf8')
 
 const exactBlock = src.slice(src.indexOf('const exact'), src.indexOf('const replacements'))
 const exact = {}
-for (const m of exactBlock.matchAll(/^\s*'((?:[^'\\]|\\.)*)':\s*'((?:[^'\\]|\\.)*)',/gm)) {
-  exact[m[1].replace(/\\'/g, "'")] = m[2].replace(/\\'/g, "'")
+for (const m of exactBlock.matchAll(/^\s*'((?:[^'\\]|\\.)*)':\s*(?:'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)")\s*,/gm)) {
+  exact[m[1].replace(/\\'/g, "'")] = (m[2] !== undefined ? m[2] : m[3]).replace(/\\'/g, "'")
 }
 const replBlock = src.slice(src.indexOf('const replacements'), src.indexOf('export function translateText'))
 const replacements = []

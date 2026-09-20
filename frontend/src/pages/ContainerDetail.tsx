@@ -119,6 +119,7 @@ import ResourceStatsPanel, {
 } from '../components/ResourceStatsPanel'
 import { generateSSHPassword, sshPasswordError, sshPublicKeyError, type ReinstallSSHAuthMode } from '../utils/sshAuth'
 import { isWindowsTemplate, registerTemplateKinds } from '../utils/templateKind'
+import { getKVMMedia, type KVMMedia } from '../services/api'
 
 const PUBLIC_HOST = window.location.hostname
 const inputClass = 'w-full px-3 py-2 border border-gray-300 rounded-md text-sm text-black bg-white focus:outline-none focus:ring-2 focus:ring-black focus:border-black'
@@ -242,7 +243,8 @@ export default function ContainerDetail() {
   const [backups, setBackups] = useState<Backup[]>([])
   const [backupBusy, setBackupBusy] = useState('')
   const [showHardwareModal, setShowHardwareModal] = useState(false)
-  const [hardwareDraft, setHardwareDraft] = useState({ boot_order: 'disk', boot_media: '', nic_model: 'virtio', disk_bus: 'virtio' })
+  const [kvmMedia, setKvmMedia] = useState<KVMMedia[]>([])
+  const [hardwareDraft, setHardwareDraft] = useState({ boot_order: 'disk', boot_media: '', extra_iso: '', nic_model: 'virtio', disk_bus: 'virtio' })
   const [savingHardware, setSavingHardware] = useState(false)
   const [showResizeDiskModal, setShowResizeDiskModal] = useState(false)
   const [resizeDiskDraft, setResizeDiskDraft] = useState(50)
@@ -1503,6 +1505,15 @@ export default function ContainerDetail() {
     }
   }
 
+  const fetchKVMMedia = async () => {
+    try {
+      const res = await getKVMMedia()
+      setKvmMedia(res.data.data || [])
+    } catch {
+      setKvmMedia([])
+    }
+  }
+
   const saveHardwareConfig = async () => {
     if (!containerIdentifier) return
     setSavingHardware(true)
@@ -1510,7 +1521,9 @@ export default function ContainerDetail() {
       await updateHardwareConfig(containerIdentifier, hardwareDraft)
       await fetchContainer()
       setShowHardwareModal(false)
-      dialog.alert('保存成功', '硬件与引导配置已更新，下次启动时生效。')
+      dialog.alert('保存成功', hardwareDraft.extra_iso?.trim() || container?.extra_iso?.trim()
+        ? '硬件与引导配置已更新，额外光盘已即时挂载/弹出。'
+        : '硬件与引导配置已更新，下次启动时生效。')
     } catch (err: unknown) {
       const error = err as { response?: { data?: { message?: string } } }
       dialog.alert('保存失败', error.response?.data?.message || '请稍后重试')
@@ -1953,9 +1966,11 @@ export default function ContainerDetail() {
                     setHardwareDraft({
                       boot_order: container.boot_order || 'disk',
                       boot_media: container.boot_media || '',
+                      extra_iso: container.extra_iso || '',
                       nic_model: container.nic_model || (isWindows ? 'e1000e' : 'virtio'),
                       disk_bus: container.disk_bus || (isWindows ? 'sata' : 'virtio'),
                     })
+                    fetchKVMMedia()
                     setShowHardwareModal(true)
                   }} disabled={!!taskStatus || isSubUserPolicyBlocked}>
                     <Settings className="w-3.5 h-3.5" />
@@ -3504,13 +3519,58 @@ export default function ContainerDetail() {
                 <option value="ide">IDE (hda - 旧版 Legacy 兼容)</option>
               </select>
             </Field>
-            <Field label="自定义挂载 ISO 路径 (留空为使用系统默认)">
-              <input
-                value={hardwareDraft.boot_media}
-                onChange={(e) => setHardwareDraft({ ...hardwareDraft, boot_media: e.target.value })}
-                placeholder="例如: /var/lib/clicd/images/kvm/custom.iso"
+            <Field label="启动光盘覆盖 (留空为使用镜像自带光盘)">
+              <select
+                value={mediaSelection(hardwareDraft.boot_media, kvmMedia)}
+                onChange={(e) => setHardwareDraft({ ...hardwareDraft, boot_media: e.target.value === MEDIA_CUSTOM ? hardwareDraft.boot_media : e.target.value })}
                 className={inputClass}
-              />
+              >
+                <option value="">使用镜像自带光盘（推荐）</option>
+                {kvmMedia.map((item) => (
+                  <option key={item.path} value={item.path}>
+                    {item.name}{item.kind === 'disk' ? ' (磁盘镜像)' : ''}
+                  </option>
+                ))}
+                <option value={MEDIA_CUSTOM}>自定义路径…</option>
+              </select>
+              {mediaSelection(hardwareDraft.boot_media, kvmMedia) === MEDIA_CUSTOM && (
+                <input
+                  value={hardwareDraft.boot_media}
+                  onChange={(e) => setHardwareDraft({ ...hardwareDraft, boot_media: e.target.value })}
+                  placeholder="例如: /var/lib/clicd/images/kvm/custom.iso"
+                  className={`${inputClass} mt-2 font-mono text-xs`}
+                />
+              )}
+              <p className="mt-1 text-[11px] leading-4 text-gray-400">
+                覆盖后会替换虚拟机原本挂载的安装/引导光盘，一般不需要修改。
+              </p>
+            </Field>
+
+            <Field label="额外挂载光盘 (独立光驱，不影响启动光盘)">
+              <select
+                value={mediaSelection(hardwareDraft.extra_iso, kvmMedia)}
+                onChange={(e) => setHardwareDraft({ ...hardwareDraft, extra_iso: e.target.value === MEDIA_CUSTOM ? hardwareDraft.extra_iso : e.target.value })}
+                className={inputClass}
+              >
+                <option value="">不挂载</option>
+                {kvmMedia.map((item) => (
+                  <option key={item.path} value={item.path}>
+                    {item.name}{item.kind === 'disk' ? ' (磁盘镜像)' : ''}
+                  </option>
+                ))}
+                <option value={MEDIA_CUSTOM}>自定义路径…</option>
+              </select>
+              {mediaSelection(hardwareDraft.extra_iso, kvmMedia) === MEDIA_CUSTOM && (
+                <input
+                  value={hardwareDraft.extra_iso}
+                  onChange={(e) => setHardwareDraft({ ...hardwareDraft, extra_iso: e.target.value })}
+                  placeholder="例如: /var/lib/clicd/images/kvm/cn_windows_server_2019.iso"
+                  className={`${inputClass} mt-2 font-mono text-xs`}
+                />
+              )}
+              <p className="mt-1 text-[11px] leading-4 text-gray-400">
+                挂到独立光驱（SATA <span className="font-mono">sdc</span>）：PE 启动盘可以继续从自带光盘启动 PE，进入 PE 后再从这块光驱安装系统。虚拟机运行中修改会即时热插拔。
+              </p>
             </Field>
             <div className="flex justify-end gap-2 pt-2">
               <button onClick={() => setShowHardwareModal(false)} className="px-4 py-2 text-sm text-gray-600 border border-gray-200 rounded-md hover:bg-gray-50">取消</button>
@@ -4502,6 +4562,21 @@ function TrafficBar({ container }: { container: Container }) {
       </div>
     </div>
   )
+}
+
+/** Sentinel shown in the media pickers for "type a path by hand". */
+const MEDIA_CUSTOM = '__custom__'
+
+/**
+ * Maps a stored path onto the picker value: an empty path means "not set", a
+ * path present in the server-side list keeps that option selected, and anything
+ * else (a hand-typed or now-missing file) switches the picker to custom mode so
+ * the existing value is never silently dropped.
+ */
+function mediaSelection(path: string | undefined, media: KVMMedia[]) {
+  const value = (path || '').trim()
+  if (!value) return ''
+  return media.some((item) => item.path === value) ? value : MEDIA_CUSTOM
 }
 
 function getTemplateIcon(id: string): ReactNode {

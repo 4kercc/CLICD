@@ -820,6 +820,7 @@ func handleUpdateHardwareConfig(w http.ResponseWriter, r *http.Request, id int) 
 	var req struct {
 		BootOrder string `json:"boot_order"`
 		BootMedia string `json:"boot_media"`
+		ExtraISO  string `json:"extra_iso"`
 		Firmware  string `json:"firmware"`
 		NICModel  string `json:"nic_model"`
 		DiskBus   string `json:"disk_bus"`
@@ -851,6 +852,15 @@ func handleUpdateHardwareConfig(w http.ResponseWriter, r *http.Request, id int) 
 		}
 	}
 	c.BootMedia = bootMedia
+
+	extraISO := strings.TrimSpace(req.ExtraISO)
+	if extraISO != "" {
+		if err := kvm.ValidateImportSourcePath(extraISO); err != nil {
+			jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Invalid extra_iso path: " + err.Error()})
+			return
+		}
+	}
+	c.ExtraISO = extraISO
 
 	if req.Firmware != "" {
 		firmware := strings.ToLower(strings.TrimSpace(req.Firmware))
@@ -888,7 +898,7 @@ func handleUpdateHardwareConfig(w http.ResponseWriter, r *http.Request, id int) 
 	}
 	_ = applyLimitsByRuntime(c)
 	user := requestUser(r)
-	config.AddAuditLog("container.hardware_update", c.Name, fmt.Sprintf("boot=%s, nic=%s, bus=%s", c.BootOrder, c.NICModel, c.DiskBus), user)
+	config.AddAuditLog("container.hardware_update", c.Name, fmt.Sprintf("boot=%s, nic=%s, bus=%s, extra_iso=%s", c.BootOrder, c.NICModel, c.DiskBus, c.ExtraISO), user)
 	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: "Hardware settings updated", Data: c})
 }
 

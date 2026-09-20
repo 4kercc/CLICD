@@ -229,49 +229,52 @@ func NewManager() *Manager {
 
 // ContainerConfig defines container creation parameters
 type ContainerConfig struct {
-	Name                 string                     `json:"name"`
-	Virtualization       string                     `json:"virtualization,omitempty"`
-	TemplateID           string                     `json:"template_id"`
-	StoragePoolID        string                     `json:"storage_pool_id,omitempty"`
-	VCPU                 float64                    `json:"vcpu"`
-	CPUPercent           int                        `json:"cpu_percent"`
-	RAMMB                int                        `json:"ram_mb"`
-	DiskGB               int                        `json:"disk_gb"`
-	NetworkBWMbps        int                        `json:"network_bw_mbps"`
-	NetworkDownMbps      int                        `json:"network_down_mbps"`
-	NetworkUpMbps        int                        `json:"network_up_mbps"`
-	MonthlyTrafficGB     int                        `json:"monthly_traffic_gb"`
-	TrafficMode          string                     `json:"traffic_mode"`   // "total" or "in_out"
-	TrafficInGB          int                        `json:"traffic_in_gb"`  // 0=unlimited
-	TrafficOutGB         int                        `json:"traffic_out_gb"` // 0=unlimited
-	IOSpeedMBps          int                        `json:"io_speed_mbps"`
-	IOReadMBps           int                        `json:"io_read_mbps"`
-	IOWriteMBps          int                        `json:"io_write_mbps"`
-	ExtraPorts           []int                      `json:"extra_ports"`
-	NATPortMappings      []config.PortMapping       `json:"nat_port_mappings,omitempty"`
-	ManagementPort       int                        `json:"management_port,omitempty"`
-	PortMappingCount     int                        `json:"port_mapping_count"`
-	AssignNAT            *bool                      `json:"assign_nat,omitempty"`
-	LANIPv4Mode          string                     `json:"lan_ipv4_mode,omitempty"`
-	LANInterface         string                     `json:"lan_interface,omitempty"`
-	LANIPv4Address       string                     `json:"lan_ipv4_address,omitempty"`
-	LANIPv4PrefixLen     int                        `json:"lan_ipv4_prefix_len,omitempty"`
-	LANIPv4Gateway       string                     `json:"lan_ipv4_gateway,omitempty"`
-	SnapshotLimit        int                        `json:"snapshot_limit"`
-	AllowedImageIDs      []string                   `json:"allowed_image_ids,omitempty"`
-	ImageLimitConfigured bool                       `json:"image_limit_configured,omitempty"`
-	AssignIPv4           bool                       `json:"assign_ipv4"`
-	IPv4Count            int                        `json:"ipv4_count,omitempty"`
-	PublicIPv4s          []string                   `json:"public_ipv4s,omitempty"`
-	AssignIPv6           bool                       `json:"assign_ipv6"`
-	IPv6Count            int                        `json:"ipv6_count,omitempty"`
-	IPv6Addresses        []string                   `json:"ipv6_addresses,omitempty"`
-	SSHAuthMode          string                     `json:"ssh_auth_mode,omitempty"`
-	SSHPassword          string                     `json:"ssh_password,omitempty"`
-	SSHPublicKey         string                     `json:"ssh_public_key,omitempty"`
-	InitScript           string                     `json:"init_script,omitempty"`
-	ExpiresAt            string                     `json:"expires_at"`
-	Progress             func(stage, detail string) `json:"-"`
+	Name                 string               `json:"name"`
+	Virtualization       string               `json:"virtualization,omitempty"`
+	TemplateID           string               `json:"template_id"`
+	StoragePoolID        string               `json:"storage_pool_id,omitempty"`
+	VCPU                 float64              `json:"vcpu"`
+	CPUPercent           int                  `json:"cpu_percent"`
+	RAMMB                int                  `json:"ram_mb"`
+	DiskGB               int                  `json:"disk_gb"`
+	NetworkBWMbps        int                  `json:"network_bw_mbps"`
+	NetworkDownMbps      int                  `json:"network_down_mbps"`
+	NetworkUpMbps        int                  `json:"network_up_mbps"`
+	MonthlyTrafficGB     int                  `json:"monthly_traffic_gb"`
+	TrafficMode          string               `json:"traffic_mode"`   // "total" or "in_out"
+	TrafficInGB          int                  `json:"traffic_in_gb"`  // 0=unlimited
+	TrafficOutGB         int                  `json:"traffic_out_gb"` // 0=unlimited
+	IOSpeedMBps          int                  `json:"io_speed_mbps"`
+	IOReadMBps           int                  `json:"io_read_mbps"`
+	IOWriteMBps          int                  `json:"io_write_mbps"`
+	ExtraPorts           []int                `json:"extra_ports"`
+	NATPortMappings      []config.PortMapping `json:"nat_port_mappings,omitempty"`
+	ManagementPort       int                  `json:"management_port,omitempty"`
+	PortMappingCount     int                  `json:"port_mapping_count"`
+	AssignNAT            *bool                `json:"assign_nat,omitempty"`
+	LANIPv4Mode          string               `json:"lan_ipv4_mode,omitempty"`
+	LANInterface         string               `json:"lan_interface,omitempty"`
+	LANIPv4Address       string               `json:"lan_ipv4_address,omitempty"`
+	LANIPv4PrefixLen     int                  `json:"lan_ipv4_prefix_len,omitempty"`
+	LANIPv4Gateway       string               `json:"lan_ipv4_gateway,omitempty"`
+	SnapshotLimit        int                  `json:"snapshot_limit"`
+	AllowedImageIDs      []string             `json:"allowed_image_ids,omitempty"`
+	ImageLimitConfigured bool                 `json:"image_limit_configured,omitempty"`
+	AssignIPv4           bool                 `json:"assign_ipv4"`
+	IPv4Count            int                  `json:"ipv4_count,omitempty"`
+	PublicIPv4s          []string             `json:"public_ipv4s,omitempty"`
+	AssignIPv6           bool                 `json:"assign_ipv6"`
+	IPv6Count            int                  `json:"ipv6_count,omitempty"`
+	IPv6Addresses        []string             `json:"ipv6_addresses,omitempty"`
+	SSHAuthMode          string               `json:"ssh_auth_mode,omitempty"`
+	SSHPassword          string               `json:"ssh_password,omitempty"`
+	SSHPublicKey         string               `json:"ssh_public_key,omitempty"`
+	InitScript           string               `json:"init_script,omitempty"`
+	// ExtraISO is mounted as an additional CD-ROM (KVM only); it never replaces
+	// the boot/install disc of the chosen image.
+	ExtraISO  string                     `json:"extra_iso,omitempty"`
+	ExpiresAt string                     `json:"expires_at"`
+	Progress  func(stage, detail string) `json:"-"`
 }
 
 // ReportProgress reports a best-effort creation phase to the task queue.

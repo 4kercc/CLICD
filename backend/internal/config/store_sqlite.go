@@ -250,7 +250,8 @@ func ensureSchema() error {
 					firmware TEXT NOT NULL DEFAULT '',
 					nic_model TEXT NOT NULL DEFAULT '',
 					disk_bus TEXT NOT NULL DEFAULT '',
-					init_script TEXT NOT NULL DEFAULT ''
+					init_script TEXT NOT NULL DEFAULT '',
+					extra_iso TEXT NOT NULL DEFAULT ''
 				)`,
 		`CREATE TABLE IF NOT EXISTS port_mappings (
 			container_id INTEGER NOT NULL,
@@ -512,6 +513,7 @@ func ensureSchemaMigrations() error {
 					{"containers", "disk_bus", "TEXT NOT NULL DEFAULT ''"},
 					{"containers", "snapshot_schedule_max_copies", "INTEGER NOT NULL DEFAULT 0"},
 					{"containers", "init_script", "TEXT NOT NULL DEFAULT ''"},
+					{"containers", "extra_iso", "TEXT NOT NULL DEFAULT ''"},
 					{"tasks", "cfg_init_script", "TEXT NOT NULL DEFAULT ''"},
 				} {
 		wasAdded, err := ensureColumn(column.table, column.name, column.def)
@@ -848,8 +850,8 @@ func saveContainers(tx *sql.Tx) error {
 				snapshot_schedule_last_run, snapshot_schedule_next_run, snapshot_schedule_created_by,
 					policy_blocked, policy_blocked_reason, policy_blocked_at,
 						firewall_enabled, firewall_default_action, firewall_rules, allowed_image_ids, image_limit_configured,
-						boot_order, boot_media, firmware, nic_model, disk_bus, init_script
-					) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+						boot_order, boot_media, firmware, nic_model, disk_bus, init_script, extra_iso
+					) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 						c.ID, c.UUID, c.Name, c.Virtualization, c.LXCName, c.KVMName, c.DiskImage, c.StoragePoolID, c.StoragePath, c.MACAddress, c.Template,
 						c.VCPU, c.RAMMB, c.DiskGB, c.NetworkBWMbps, c.NetworkDownMbps, c.NetworkUpMbps,
 						c.MonthlyTrafficGB, c.TrafficMode, c.TrafficInGB,
@@ -863,7 +865,7 @@ func saveContainers(tx *sql.Tx) error {
 						c.SnapshotScheduleLastRun, c.SnapshotScheduleNextRun, c.SnapshotScheduleCreatedBy,
 						boolInt(c.PolicyBlocked), c.PolicyBlockedReason, c.PolicyBlockedAt,
 					boolInt(c.FirewallEnabled), normalizeFirewallDefaultAction(c.FirewallDefaultAction), marshalFirewallRules(c.FirewallRules), allowedImageIDs, boolInt(c.ImageLimitConfigured),
-					c.BootOrder, c.BootMedia, c.Firmware, c.NICModel, c.DiskBus, c.InitScript,
+					c.BootOrder, c.BootMedia, c.Firmware, c.NICModel, c.DiskBus, c.InitScript, c.ExtraISO,
 				); err != nil {
 			return err
 		}
@@ -1091,7 +1093,7 @@ func loadContainers() ([]Container, error) {
 		snapshot_schedule_last_run, snapshot_schedule_next_run, snapshot_schedule_created_by,
 			policy_blocked, policy_blocked_reason, policy_blocked_at,
 			firewall_enabled, firewall_default_action, firewall_rules, allowed_image_ids, image_limit_configured,
-			boot_order, boot_media, firmware, nic_model, disk_bus, init_script
+			boot_order, boot_media, firmware, nic_model, disk_bus, init_script, extra_iso
 			FROM containers ORDER BY id`)
 		if err != nil {
 			return nil, err
@@ -1108,7 +1110,7 @@ func loadContainers() ([]Container, error) {
 			var lanIPv4Mode, lanInterface sql.NullString
 			var lanIPv4Address, lanIPv4Gateway sql.NullString
 			var lanIPv4PrefixLen sql.NullInt64
-			var bootOrder, bootMedia, firmware, nicModel, diskBus, initScript sql.NullString
+			var bootOrder, bootMedia, firmware, nicModel, diskBus, initScript, extraISO sql.NullString
 			if err := rows.Scan(
 				&c.ID, &c.UUID, &c.Name, &c.Virtualization, &c.LXCName, &c.KVMName, &c.DiskImage, &storagePoolID, &storagePath, &c.MACAddress, &c.Template,
 				&c.VCPU, &c.RAMMB, &c.DiskGB, &c.NetworkBWMbps, &c.NetworkDownMbps, &c.NetworkUpMbps,
@@ -1123,7 +1125,7 @@ func loadContainers() ([]Container, error) {
 					&c.SnapshotScheduleLastRun, &c.SnapshotScheduleNextRun, &c.SnapshotScheduleCreatedBy,
 					&policyBlocked, &c.PolicyBlockedReason, &c.PolicyBlockedAt,
 				&firewallEnabled, &firewallDefaultAction, &firewallRulesJSON, &allowedImageIDs, &imageLimitConfigured,
-				&bootOrder, &bootMedia, &firmware, &nicModel, &diskBus, &initScript,
+				&bootOrder, &bootMedia, &firmware, &nicModel, &diskBus, &initScript, &extraISO,
 			); err != nil {
 				return nil, err
 			}
@@ -1148,6 +1150,7 @@ func loadContainers() ([]Container, error) {
 				c.NICModel = nicModel.String
 				c.DiskBus = diskBus.String
 				c.InitScript = initScript.String
+			c.ExtraISO = extraISO.String
 		if firewallRulesJSON.Valid && strings.TrimSpace(firewallRulesJSON.String) != "" {
 			_ = json.Unmarshal([]byte(firewallRulesJSON.String), &c.FirewallRules)
 		}

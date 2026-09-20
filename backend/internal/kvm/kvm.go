@@ -246,11 +246,11 @@ func DownloadImageWithProgress(ctx context.Context, image Image, progress Downlo
 			return err
 		}
 	}
-		if image.IsWindows() {
-			if err := validateWindowsISO(tmp, target, image.IsWindowsPE()); err != nil {
-				_ = os.Remove(tmp)
-				return err
-			}
+	if image.IsWindows() {
+		if err := validateWindowsISO(tmp, target, image.IsWindowsPE()); err != nil {
+			_ = os.Remove(tmp)
+			return err
+		}
 		// Keep Windows ISO as-is, don't convert to qcow2
 		if err := os.Rename(tmp, target); err != nil {
 			_ = os.Remove(tmp)
@@ -569,31 +569,31 @@ func (m *Manager) defineContainer(id int, vmName string, cfg lxc.ContainerConfig
 		if err := ensureVirtioWinISO(); err != nil {
 			return nil, err
 		}
-			winAdminPassword = generateWindowsPassword()
-			unattendPath := filepath.Join(m.instanceDir(vmName), "unattend.iso")
-			cfg.ReportProgress("cloud_init", "生成 Windows 自动应答配置")
-			if err := createWindowsUnattendISO(unattendPath, cfg.Name, winAdminPassword, mac, ipv6List, ipv4List, IsWindows11Image(image.ID), cfg.InitScript); err != nil {
-				return nil, err
+		winAdminPassword = generateWindowsPassword()
+		unattendPath := filepath.Join(m.instanceDir(vmName), "unattend.iso")
+		cfg.ReportProgress("cloud_init", "生成 Windows 自动应答配置")
+		if err := createWindowsUnattendISO(unattendPath, cfg.Name, winAdminPassword, mac, ipv6List, ipv4List, IsWindows11Image(image.ID), cfg.InitScript); err != nil {
+			return nil, err
+		}
+		xml = windowsDomainXML(vmName, int(cfg.VCPU), cfg.RAMMB, diskPath, ImagePath(image.ID), unattendPath, cfg.ExtraISO, mac, cfg.IOReadMBps, cfg.IOWriteMBps, cfg.NetworkDownMbps, cfg.NetworkUpMbps)
+	} else {
+		if image.Desktop != "" {
+			if cfg.RAMMB < 2048 {
+				cfg.RAMMB = 2048
 			}
-			xml = windowsDomainXML(vmName, int(cfg.VCPU), cfg.RAMMB, diskPath, ImagePath(image.ID), unattendPath, mac, cfg.IOReadMBps, cfg.IOWriteMBps, cfg.NetworkDownMbps, cfg.NetworkUpMbps)
-		} else {
-			if image.Desktop != "" {
-				if cfg.RAMMB < 2048 {
-					cfg.RAMMB = 2048
-				}
-				if cfg.DiskGB < 20 {
-					cfg.DiskGB = 20
-				}
+			if cfg.DiskGB < 20 {
+				cfg.DiskGB = 20
 			}
-			cfg.ReportProgress("disk", "创建 KVM 系统磁盘")
-			if err := createOverlayDisk(ImagePath(image.ID), diskPath, cfg.DiskGB); err != nil {
-				return nil, err
-			}
-			cfg.ReportProgress("cloud_init", "生成 cloud-init 初始化配置")
-			if err := createSeedISO(seedPath, vmName, cfg.Name, sshPassword, sshPublicKey, mac, ipv6List, ipv4List, *image, sshAuthMode, cfg.InitScript); err != nil {
-				return nil, err
-			}
-		xml = domainXML(vmName, int(cfg.VCPU), cfg.RAMMB, diskPath, seedPath, mac, cfg.IOReadMBps, cfg.IOWriteMBps, cfg.NetworkDownMbps, cfg.NetworkUpMbps, image.Desktop != "")
+		}
+		cfg.ReportProgress("disk", "创建 KVM 系统磁盘")
+		if err := createOverlayDisk(ImagePath(image.ID), diskPath, cfg.DiskGB); err != nil {
+			return nil, err
+		}
+		cfg.ReportProgress("cloud_init", "生成 cloud-init 初始化配置")
+		if err := createSeedISO(seedPath, vmName, cfg.Name, sshPassword, sshPublicKey, mac, ipv6List, ipv4List, *image, sshAuthMode, cfg.InitScript); err != nil {
+			return nil, err
+		}
+		xml = domainXML(vmName, int(cfg.VCPU), cfg.RAMMB, diskPath, seedPath, cfg.ExtraISO, mac, cfg.IOReadMBps, cfg.IOWriteMBps, cfg.NetworkDownMbps, cfg.NetworkUpMbps, image.Desktop != "")
 	}
 	xmlPath := filepath.Join(m.instanceDir(vmName), "domain.xml")
 	if err := os.WriteFile(xmlPath, []byte(xml), 0644); err != nil {
@@ -687,10 +687,11 @@ func (m *Manager) defineContainer(id int, vmName string, cfg lxc.ContainerConfig
 		PortMappingLimit:     cfg.PortMappingCount,
 		AllowedImageIDs:      append([]string(nil), cfg.AllowedImageIDs...),
 		ImageLimitConfigured: cfg.ImageLimitConfigured,
-			SnapshotLimit:        config.NormalizeSnapshotLimit(cfg.SnapshotLimit),
-			InitScript:           cfg.InitScript,
-			CreatedAt:            now,
-			ExpiresAt:            cfg.ExpiresAt,
+		SnapshotLimit:        config.NormalizeSnapshotLimit(cfg.SnapshotLimit),
+		InitScript:           cfg.InitScript,
+		ExtraISO:             cfg.ExtraISO,
+		CreatedAt:            now,
+		ExpiresAt:            cfg.ExpiresAt,
 	}
 	container.NormalizeNetworkAssignments()
 	cfg.ReportProgress("metadata", "保存虚拟机配置")
@@ -1014,34 +1015,34 @@ func (m *Manager) ReinstallContainer(id int, templateID string, authConfig ...lx
 		SnapshotLimit:    c.SnapshotLimit,
 		ExpiresAt:        c.ExpiresAt,
 	}
-		if len(authConfig) > 0 {
-			if lxc.HasSSHAuthOptions(authConfig[0]) && !IsWindowsImage(templateID) {
-				sshAccess, err := lxc.ResolveReinstallSSHAccess(c.SSHPassword, authConfig[0])
-				if err != nil {
-					return err
-				}
-				if sshAccess.PublicKey != "" {
-					cfg.SSHAuthMode = lxc.SSHAuthKey
-					cfg.SSHPublicKey = sshAccess.PublicKey
-				} else {
-					cfg.SSHAuthMode = lxc.SSHAuthPassword
-				}
-				cfg.SSHPassword = sshAccess.Password
+	if len(authConfig) > 0 {
+		if lxc.HasSSHAuthOptions(authConfig[0]) && !IsWindowsImage(templateID) {
+			sshAccess, err := lxc.ResolveReinstallSSHAccess(c.SSHPassword, authConfig[0])
+			if err != nil {
+				return err
 			}
-			if authConfig[0].InitScript != "" {
-				cfg.InitScript = authConfig[0].InitScript
+			if sshAccess.PublicKey != "" {
+				cfg.SSHAuthMode = lxc.SSHAuthKey
+				cfg.SSHPublicKey = sshAccess.PublicKey
+			} else {
+				cfg.SSHAuthMode = lxc.SSHAuthPassword
 			}
+			cfg.SSHPassword = sshAccess.Password
 		}
-		next, err := m.defineContainer(id, name, cfg, false, 0)
-		if err != nil {
-			return err
+		if authConfig[0].InitScript != "" {
+			cfg.InitScript = authConfig[0].InitScript
 		}
-		c.Template = templateID
-		c.DiskImage = next.DiskImage
-		c.MACAddress = next.MACAddress
-		c.SSHPassword = next.SSHPassword
-		c.InitScript = cfg.InitScript
-		c.SSHHostKey = ""
+	}
+	next, err := m.defineContainer(id, name, cfg, false, 0)
+	if err != nil {
+		return err
+	}
+	c.Template = templateID
+	c.DiskImage = next.DiskImage
+	c.MACAddress = next.MACAddress
+	c.SSHPassword = next.SSHPassword
+	c.InitScript = cfg.InitScript
+	c.SSHHostKey = ""
 	c.IP = ""
 	c.VNCPort = 0
 	normalizeKVMManagementPortMapping(c)
@@ -1119,24 +1120,98 @@ func (m *Manager) ApplyContainerLimits(c *config.Container) error {
 	if err := m.ensureDomainDefinition(c); err != nil {
 		return err
 	}
-		// If VM is running and bootMedia changed, live-update the CD-ROM drive
-		if c.Status == "running" {
-			targetISO := ""
-			if c.BootMedia != "" {
-				targetISO = c.BootMedia
-			} else if img := FindImage(c.Template); img != nil && img.IsWindows() {
-				isoCandidate := ImagePath(c.Template)
-				if _, err := os.Stat(isoCandidate); err == nil {
-					targetISO = isoCandidate
-				}
-			}
-			if targetISO != "" {
-				_ = exec.Command("virsh", "change-media", c.VirshName(), "hdb", targetISO, "--insert", "--live").Run()
-				_ = exec.Command("virsh", "change-media", c.VirshName(), "hdb", targetISO, "--update", "--live").Run()
-			} else {
-				_ = exec.Command("virsh", "change-media", c.VirshName(), "hdb", "--eject", "--live").Run()
-			}
+	// Extra ISO: hot-plug it into the reserved drive, so changing it never
+	// disturbs the image's own boot/install disc. That disc only changes on the
+	// next start, through the redefined domain XML above.
+	if c.Status == "running" {
+		m.syncExtraISO(c)
+	}
+	return nil
+}
+
+// syncExtraISO inserts or ejects the operator's additional ISO on a running VM.
+//
+// A VM defined before this feature existed has no reserved drive in its live
+// device set (redefining the domain only updates the persisted config), so the
+// empty drive is hot-attached first. That keeps the promise made in the UI:
+// changing the extra disc takes effect immediately and never touches the boot
+// disc.
+func (m *Manager) syncExtraISO(c *config.Container) {
+	if c == nil {
+		return
+	}
+	name := c.VirshName()
+	target := strings.TrimSpace(c.ExtraISO)
+
+	hasExtraDrive := m.domainHasExtraCDROM(name)
+	if target != "" && !hasExtraDrive {
+		if err := attachExtraCDROMDevice(name, target); err != nil {
+			fmt.Printf("Warning: could not hot-attach the extra CD-ROM drive to %s (%v); it will be mounted at the next start\n", name, err)
+			return
 		}
+		hasExtraDrive = true
+	}
+	if !hasExtraDrive {
+		return
+	}
+
+	if target == "" {
+		_ = exec.Command("virsh", "change-media", name, extraCDROMDevice, "--eject", "--live").Run()
+		return
+	}
+	if _, err := os.Stat(target); err != nil {
+		fmt.Printf("Warning: extra ISO not found for %s: %v\n", name, err)
+		return
+	}
+	// insert fills an empty tray; update replaces media already in the drive.
+	if out, err := exec.Command("virsh", "change-media", name, extraCDROMDevice, target, "--insert", "--live").CombinedOutput(); err != nil {
+		if _, err2 := exec.Command("virsh", "change-media", name, extraCDROMDevice, target, "--update", "--live").CombinedOutput(); err2 != nil {
+			fmt.Printf("Warning: failed to mount extra ISO for %s: %v (%s)\n", name, err, strings.TrimSpace(string(out)))
+		}
+	}
+}
+
+// domainHasExtraCDROM reports whether the running domain exposes the reserved
+// extra-ISO drive.
+func (m *Manager) domainHasExtraCDROM(name string) bool {
+	out, err := virshOutput(10*time.Second, "domblklist", name)
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), extraCDROMDevice+" ") {
+			return true
+		}
+	}
+	return false
+}
+
+// attachExtraCDROMDevice hot-plugs the reserved drive, media included, into a
+// running VM. libvirt rejects attaching a CD-ROM with an empty tray, so the ISO
+// is part of the device XML; later swaps go through change-media.
+func attachExtraCDROMDevice(name, isoPath string) error {
+	xml := "<disk type='file' device='cdrom'>\n" +
+		"  <driver name='qemu' type='raw'/>\n" +
+		"  <source file='" + xmlEscape(isoPath) + "'/>\n" +
+		"  <target dev='" + extraCDROMDevice + "' bus='sata'/>\n" +
+		"  <readonly/>\n" +
+		"</disk>"
+	file, err := os.CreateTemp("", "clicd-extra-cdrom-*.xml")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(file.Name())
+	if _, err := file.WriteString(xml); err != nil {
+		file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	out, err := virshCombinedOutput(20*time.Second, "attach-device", name, file.Name(), "--live")
+	if err != nil {
+		return fmt.Errorf("%v, output: %s", err, strings.TrimSpace(out))
+	}
 	return nil
 }
 
@@ -1165,23 +1240,23 @@ func (m *Manager) ensureDomainDefinition(c *config.Container) error {
 		}
 	}
 
-		if IsWindowsImage(c.Template) {
-			winISO := ""
-			if c.BootMedia != "" {
-				winISO = c.BootMedia
-			} else if img := FindImage(c.Template); img != nil && img.IsWindows() {
-				isoCandidate := ImagePath(c.Template)
-				if _, err := os.Stat(isoCandidate); err == nil {
-					winISO = isoCandidate
-				}
+	if IsWindowsImage(c.Template) {
+		winISO := ""
+		if c.BootMedia != "" {
+			winISO = c.BootMedia
+		} else if img := FindImage(c.Template); img != nil && img.IsWindows() {
+			isoCandidate := ImagePath(c.Template)
+			if _, err := os.Stat(isoCandidate); err == nil {
+				winISO = isoCandidate
 			}
-			unattendISO := existingWindowsUnattendISO(m.instanceDir(c.VirshName()))
-			xml = generateWindowsDomainXML(c.VirshName(), int(c.VCPU), c.RAMMB, c.DiskImage, winISO, unattendISO, c.MACAddress, c.IOReadMBps, c.IOWriteMBps, c.NetworkDownMbps, c.NetworkUpMbps, bootOrder, nicModel, diskBus)
-		} else {
-			seedPath := filepath.Join(m.instanceDir(c.VirshName()), "seed.iso")
-			xml = generateLinuxDomainXML(c.VirshName(), int(c.VCPU), c.RAMMB, c.DiskImage, seedPath, c.MACAddress, c.IOReadMBps, c.IOWriteMBps, c.NetworkDownMbps, c.NetworkUpMbps, isKVMDesktopTemplate(c.Template), bootOrder, nicModel, diskBus, c.BootMedia)
 		}
-		if err := os.WriteFile(xmlPath, []byte(xml), 0644); err != nil {
+		unattendISO := existingWindowsUnattendISO(m.instanceDir(c.VirshName()))
+		xml = generateWindowsDomainXML(c.VirshName(), int(c.VCPU), c.RAMMB, c.DiskImage, winISO, unattendISO, c.ExtraISO, c.MACAddress, c.IOReadMBps, c.IOWriteMBps, c.NetworkDownMbps, c.NetworkUpMbps, bootOrder, nicModel, diskBus)
+	} else {
+		seedPath := filepath.Join(m.instanceDir(c.VirshName()), "seed.iso")
+		xml = generateLinuxDomainXML(c.VirshName(), int(c.VCPU), c.RAMMB, c.DiskImage, seedPath, c.ExtraISO, c.MACAddress, c.IOReadMBps, c.IOWriteMBps, c.NetworkDownMbps, c.NetworkUpMbps, isKVMDesktopTemplate(c.Template), bootOrder, nicModel, diskBus, c.BootMedia)
+	}
+	if err := os.WriteFile(xmlPath, []byte(xml), 0644); err != nil {
 		return err
 	}
 	cmd := exec.Command("virsh", "define", xmlPath)
@@ -1493,15 +1568,15 @@ func (m *Manager) runDueSnapshotSchedules() {
 		if now.Before(nextRun) {
 			continue
 		}
-			createdBy := c.SnapshotScheduleCreatedBy
-			if createdBy == "" {
-				createdBy = "admin"
-			}
-			rotateLimit := c.SnapshotScheduleMaxCopies
-			if rotateLimit <= 0 && strings.HasPrefix(createdBy, "user:") {
-				rotateLimit = config.ContainerSnapshotLimit(&c)
-			}
-			if _, err := m.CreateSnapshot(c.ID, createdBy, true, rotateLimit); err != nil {
+		createdBy := c.SnapshotScheduleCreatedBy
+		if createdBy == "" {
+			createdBy = "admin"
+		}
+		rotateLimit := c.SnapshotScheduleMaxCopies
+		if rotateLimit <= 0 && strings.HasPrefix(createdBy, "user:") {
+			rotateLimit = config.ContainerSnapshotLimit(&c)
+		}
+		if _, err := m.CreateSnapshot(c.ID, createdBy, true, rotateLimit); err != nil {
 			fmt.Printf("Warning: scheduled KVM snapshot failed for %s: %v\n", c.Name, err)
 			continue
 		}
@@ -2040,47 +2115,47 @@ func (m *Manager) GetResourceUsage(id int) (map[string]interface{}, error) {
 		"load15":             0.0,
 		"guest_metrics":      false,
 	}
-		if c.DiskImage != "" {
-			if info, err := os.Stat(c.DiskImage); err == nil {
-				usage["disk_usage_bytes"] = info.Size()
-			}
-		} else {
-			defaultDiskPath := filepath.Join(m.instanceDir(name), "disk.qcow2")
-			if info, err := os.Stat(defaultDiskPath); err == nil {
-				usage["disk_usage_bytes"] = info.Size()
-			}
+	if c.DiskImage != "" {
+		if info, err := os.Stat(c.DiskImage); err == nil {
+			usage["disk_usage_bytes"] = info.Size()
 		}
-		// If Guest Agent is connected, check guest-get-fsinfo for real internal OS disk usage
-		if c.Status == "running" && qemuGuestPing(name) == nil {
-			if out, err := exec.Command("virsh", "qemu-agent-command", name, `{"execute":"guest-get-fsinfo"}`).Output(); err == nil {
-				var fsResp struct {
-					Return []struct {
-						Mountpoint string `json:"mountpoint"`
-						Type       string `json:"type"`
-						UsedBytes  int64  `json:"used-bytes"`
-						TotalBytes int64  `json:"total-bytes"`
-					} `json:"return"`
-				}
-				if json.Unmarshal(out, &fsResp) == nil && len(fsResp.Return) > 0 {
-					var totalUsed int64
-					for _, fs := range fsResp.Return {
-						// Skip read-only optical drives (CDFS/iso9660)
-						if strings.EqualFold(fs.Type, "cdfs") || strings.EqualFold(fs.Type, "iso9660") {
-							continue
-						}
-						// For Windows match C: drive, for Linux match /
-						if strings.HasPrefix(strings.ToUpper(fs.Mountpoint), "C:") || fs.Mountpoint == "/" || totalUsed == 0 {
-							if fs.UsedBytes > 0 {
-								totalUsed += fs.UsedBytes
-							}
+	} else {
+		defaultDiskPath := filepath.Join(m.instanceDir(name), "disk.qcow2")
+		if info, err := os.Stat(defaultDiskPath); err == nil {
+			usage["disk_usage_bytes"] = info.Size()
+		}
+	}
+	// If Guest Agent is connected, check guest-get-fsinfo for real internal OS disk usage
+	if c.Status == "running" && qemuGuestPing(name) == nil {
+		if out, err := exec.Command("virsh", "qemu-agent-command", name, `{"execute":"guest-get-fsinfo"}`).Output(); err == nil {
+			var fsResp struct {
+				Return []struct {
+					Mountpoint string `json:"mountpoint"`
+					Type       string `json:"type"`
+					UsedBytes  int64  `json:"used-bytes"`
+					TotalBytes int64  `json:"total-bytes"`
+				} `json:"return"`
+			}
+			if json.Unmarshal(out, &fsResp) == nil && len(fsResp.Return) > 0 {
+				var totalUsed int64
+				for _, fs := range fsResp.Return {
+					// Skip read-only optical drives (CDFS/iso9660)
+					if strings.EqualFold(fs.Type, "cdfs") || strings.EqualFold(fs.Type, "iso9660") {
+						continue
+					}
+					// For Windows match C: drive, for Linux match /
+					if strings.HasPrefix(strings.ToUpper(fs.Mountpoint), "C:") || fs.Mountpoint == "/" || totalUsed == 0 {
+						if fs.UsedBytes > 0 {
+							totalUsed += fs.UsedBytes
 						}
 					}
-					if totalUsed > 0 {
-						usage["disk_usage_bytes"] = totalUsed
-					}
+				}
+				if totalUsed > 0 {
+					usage["disk_usage_bytes"] = totalUsed
 				}
 			}
 		}
+	}
 	if c.Status == "running" {
 		if mem := virshMemBytes(name); mem > 0 {
 			usage["memory_usage_bytes"] = mem
@@ -2523,31 +2598,31 @@ func (m *Manager) MountVirtioISO(id int, mount bool) error {
 		return fmt.Errorf("instance is not KVM: %d", id)
 	}
 	name := c.VirshName()
-		if mount {
-			if err := ensureVirtioWinISO(); err != nil {
-				return err
-			}
-			virtioPath := virtioWinISOPath()
-			// Try eject first, then insert into hdc or hdb
-			_ = exec.Command("virsh", "change-media", name, "hdc", "--eject", "--config", "--live").Run()
-			_ = exec.Command("virsh", "change-media", name, "hdc", "--eject").Run()
-			cmd := exec.Command("virsh", "change-media", name, "hdc", virtioPath, "--insert", "--config", "--live")
-			if _, err := cmd.CombinedOutput(); err != nil {
-				// Fallback without config/live flags
-				cmd2 := exec.Command("virsh", "change-media", name, "hdc", virtioPath, "--insert")
-				if out2, err2 := cmd2.CombinedOutput(); err2 != nil {
-					return fmt.Errorf("failed to mount virtio-win.iso to hdc: %v (%s)", err2, string(out2))
-				}
-			}
-			return nil
-		} else {
-			cmd := exec.Command("virsh", "change-media", name, "hdc", "--eject", "--config", "--live")
-			if _, err := cmd.CombinedOutput(); err != nil {
-				cmd2 := exec.Command("virsh", "change-media", name, "hdc", "--eject")
-				_ = cmd2.Run()
-			}
-			return nil
+	if mount {
+		if err := ensureVirtioWinISO(); err != nil {
+			return err
 		}
+		virtioPath := virtioWinISOPath()
+		// Try eject first, then insert into hdc or hdb
+		_ = exec.Command("virsh", "change-media", name, "hdc", "--eject", "--config", "--live").Run()
+		_ = exec.Command("virsh", "change-media", name, "hdc", "--eject").Run()
+		cmd := exec.Command("virsh", "change-media", name, "hdc", virtioPath, "--insert", "--config", "--live")
+		if _, err := cmd.CombinedOutput(); err != nil {
+			// Fallback without config/live flags
+			cmd2 := exec.Command("virsh", "change-media", name, "hdc", virtioPath, "--insert")
+			if out2, err2 := cmd2.CombinedOutput(); err2 != nil {
+				return fmt.Errorf("failed to mount virtio-win.iso to hdc: %v (%s)", err2, string(out2))
+			}
+		}
+		return nil
+	} else {
+		cmd := exec.Command("virsh", "change-media", name, "hdc", "--eject", "--config", "--live")
+		if _, err := cmd.CombinedOutput(); err != nil {
+			cmd2 := exec.Command("virsh", "change-media", name, "hdc", "--eject")
+			_ = cmd2.Run()
+		}
+		return nil
+	}
 }
 
 func (m *Manager) GetGuestAgentStatus(id int) (bool, map[string]interface{}, error) {
@@ -3105,11 +3180,34 @@ func isKVMDesktopTemplate(templateID string) bool {
 	return image != nil && image.Desktop != ""
 }
 
-func domainXML(name string, vcpu int, ramMB int, diskPath, seedPath, mac string, ioReadMBps int, ioWriteMBps int, networkDownMbps int, networkUpMbps int, desktop bool) string {
-	return generateLinuxDomainXML(name, vcpu, ramMB, diskPath, seedPath, mac, ioReadMBps, ioWriteMBps, networkDownMbps, networkUpMbps, desktop, "disk", "virtio", "virtio", "")
+// extraCDROMDevice is the dedicated slot reserved for the operator's additional
+// ISO. It is emitted as an always-present (possibly empty) SATA CD-ROM so that:
+//   - the image's own boot/install disc is never displaced;
+//   - the extra disc can be inserted or ejected on a running VM via change-media
+//     without redefining the domain first.
+const extraCDROMDevice = "sdc"
+
+// extraCDROMXML renders the reserved extra-ISO drive. A non-empty path mounts it
+// directly; an empty path leaves an empty tray that can be filled live later.
+func extraCDROMXML(isoPath string) string {
+	source := ""
+	if strings.TrimSpace(isoPath) != "" {
+		source = fmt.Sprintf(`
+      <source file='%s'/>`, xmlEscape(isoPath))
+	}
+	return fmt.Sprintf(`
+    <disk type='file' device='cdrom'>
+      <driver name='qemu' type='raw'/>%s
+      <target dev='%s' bus='sata'/>
+      <readonly/>
+    </disk>`, source, extraCDROMDevice)
 }
 
-func generateLinuxDomainXML(name string, vcpu int, ramMB int, diskPath, seedPath, mac string, ioReadMBps int, ioWriteMBps int, networkDownMbps int, networkUpMbps int, desktop bool, bootOrder, nicModel, diskBus, bootMedia string) string {
+func domainXML(name string, vcpu int, ramMB int, diskPath, seedPath, extraISOPath, mac string, ioReadMBps int, ioWriteMBps int, networkDownMbps int, networkUpMbps int, desktop bool) string {
+	return generateLinuxDomainXML(name, vcpu, ramMB, diskPath, seedPath, extraISOPath, mac, ioReadMBps, ioWriteMBps, networkDownMbps, networkUpMbps, desktop, "disk", "virtio", "virtio", "")
+}
+
+func generateLinuxDomainXML(name string, vcpu int, ramMB int, diskPath, seedPath, extraISOPath, mac string, ioReadMBps int, ioWriteMBps int, networkDownMbps int, networkUpMbps int, desktop bool, bootOrder, nicModel, diskBus, bootMedia string) string {
 	if vcpu < 1 {
 		vcpu = 1
 	}
@@ -3200,6 +3298,11 @@ func generateLinuxDomainXML(name string, vcpu int, ramMB int, diskPath, seedPath
     </disk>`, xmlEscape(isoPath))
 		}
 	}
+	// Reserved extra-ISO drive, next to the cloud-init seed: the bootable system
+	// image keeps booting from its own disc while the extra ISO is also available.
+	if strings.TrimSpace(extraISOPath) != "" {
+		seedDisk += extraCDROMXML(extraISOPath)
+	}
 	return fmt.Sprintf(`<domain type='kvm'>
   <name>%s</name>
   %s
@@ -3230,6 +3333,7 @@ func generateLinuxDomainXML(name string, vcpu int, ramMB int, diskPath, seedPath
       <source network='default'/>
       <model type='%s'/>%s
     </interface>
+    <controller type='sata' index='0'/>
     <serial type='pty'><target port='0'/></serial>
     <console type='pty'><target type='serial' port='0'/></console>
     <channel type='unix'>
@@ -3244,11 +3348,11 @@ func generateLinuxDomainXML(name string, vcpu int, ramMB int, diskPath, seedPath
 </domain>`, xmlEscape(name), domainUUIDXML(name), ramMB, ramMB, vcpu, vcpu, osAttrs, kvmLibvirtArch(), kvmMachineType(), bootTag, features, xmlEscape(kvmEmulatorPath()), xmlEscape(diskPath), xmlEscape(diskDev), xmlEscape(diskBus), iotune, seedDisk, xmlEscape(mac), xmlEscape(nicModel), bandwidth, input, video)
 }
 
-func windowsDomainXML(name string, vcpu int, ramMB int, diskPath, winISOPath, unattendISOPath, mac string, ioReadMBps int, ioWriteMBps int, networkDownMbps int, networkUpMbps int) string {
-	return generateWindowsDomainXML(name, vcpu, ramMB, diskPath, winISOPath, unattendISOPath, mac, ioReadMBps, ioWriteMBps, networkDownMbps, networkUpMbps, "disk", "e1000e", "sata")
+func windowsDomainXML(name string, vcpu int, ramMB int, diskPath, winISOPath, unattendISOPath, extraISOPath, mac string, ioReadMBps int, ioWriteMBps int, networkDownMbps int, networkUpMbps int) string {
+	return generateWindowsDomainXML(name, vcpu, ramMB, diskPath, winISOPath, unattendISOPath, extraISOPath, mac, ioReadMBps, ioWriteMBps, networkDownMbps, networkUpMbps, "disk", "e1000e", "sata")
 }
 
-func generateWindowsDomainXML(name string, vcpu int, ramMB int, diskPath, winISOPath, unattendISOPath, mac string, ioReadMBps int, ioWriteMBps int, networkDownMbps int, networkUpMbps int, bootOrder, nicModel, diskBus string) string {
+func generateWindowsDomainXML(name string, vcpu int, ramMB int, diskPath, winISOPath, unattendISOPath, extraISOPath, mac string, ioReadMBps int, ioWriteMBps int, networkDownMbps int, networkUpMbps int, bootOrder, nicModel, diskBus string) string {
 	if vcpu < 1 {
 		vcpu = 1
 	}
@@ -3326,6 +3430,11 @@ func generateWindowsDomainXML(name string, vcpu int, ramMB int, diskPath, winISO
       <readonly/>
     </disk>`, xmlEscape(unattendISOPath))
 	}
+	// Reserved extra-ISO drive: an ADDITIONAL CD-ROM, so a bootable image keeps
+	// booting from its own disc while the extra ISO is also available in the guest.
+	if strings.TrimSpace(extraISOPath) != "" {
+		cdromDisks += extraCDROMXML(extraISOPath)
+	}
 
 	// Hard disk first, CD-ROM as fallback: a freshly created Windows VM has an
 	// empty (non-bootable) disk, so SeaBIOS must fall through to the install ISO
@@ -3379,6 +3488,7 @@ func generateWindowsDomainXML(name string, vcpu int, ramMB int, diskPath, winISO
       <source network='default'/>
       <model type='%s'/>%s
     </interface>
+    <controller type='sata' index='0'/>
     <channel type='unix'>
       <target type='virtio' name='org.qemu.guest_agent.0'/>
     </channel>

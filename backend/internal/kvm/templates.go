@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 
 	"clicd/internal/config"
@@ -272,4 +273,79 @@ func IsWindows11Image(id string) bool {
 
 func virtioWinISOPath() string {
 	return filepath.Join(CacheDir(), "virtio-win.iso")
+}
+
+// AttachableMedia is one selectable file offered to the operator when choosing a
+// boot or extra ISO, so the UI can present a picker instead of a free-text path.
+type AttachableMedia struct {
+	Path      string `json:"path"`
+	Name      string `json:"name"`
+	Kind      string `json:"kind"`             // "iso" or "disk"
+	Source    string `json:"source"`           // "image" (registered image) or "cache"
+	SizeBytes int64  `json:"size_bytes"`
+}
+
+// ListAttachableMedia returns the ISO/disk files an operator may attach: every
+// downloaded registered image plus any other ISO sitting in the image cache.
+// Paths are restricted to the same directories the API already accepts for
+// boot_media/extra_iso, so the picker can never surface an arbitrary host file.
+func ListAttachableMedia() []AttachableMedia {
+	result := make([]AttachableMedia, 0)
+	seen := map[string]bool{}
+
+	add := func(path, name, kind, source string) {
+		path = strings.TrimSpace(path)
+		if path == "" || seen[path] {
+			return
+		}
+		info, err := os.Stat(path)
+		if err != nil || info.IsDir() {
+			return
+		}
+		seen[path] = true
+		result = append(result, AttachableMedia{
+			Path:      path,
+			Name:      name,
+			Kind:      kind,
+			Source:    source,
+			SizeBytes: info.Size(),
+		})
+	}
+
+	for _, image := range GetImages() {
+		if downloaded, _ := ImageDownloadedInfo(image.ID); !downloaded {
+			continue
+		}
+		kind := "disk"
+		if image.IsWindows() {
+			kind = "iso"
+		}
+		label := image.Name
+		if label == "" {
+			label = image.ID
+		}
+		add(ImagePath(image.ID), label, kind, "image")
+	}
+
+	// Extra ISOs dropped into the cache directory by hand are attachable too.
+	for _, dir := range []string{CacheDir(), filepath.Join(BaseDir(), "images")} {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.EqualFold(filepath.Ext(entry.Name()), ".iso") {
+				continue
+			}
+			add(filepath.Join(dir, entry.Name()), entry.Name(), "iso", "cache")
+		}
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Kind != result[j].Kind {
+			return result[i].Kind == "iso"
+		}
+		return result[i].Name < result[j].Name
+	})
+	return result
 }

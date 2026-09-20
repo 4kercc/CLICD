@@ -138,6 +138,7 @@ export interface Container {
   nic_model?: string
   disk_bus?: string
   init_script?: string
+  extra_iso?: string
 }
 
 export interface Template {
@@ -890,6 +891,17 @@ export const deleteImage = (templateId: string) =>
 export const toggleImage = (templateId: string, enabled: boolean) =>
   api.put<APIResponse>('/images/toggle', { template_id: templateId, enabled })
 
+export interface KVMMedia {
+  path: string
+  name: string
+  kind: 'iso' | 'disk'
+  source: 'image' | 'cache'
+  size_bytes: number
+}
+
+export const getKVMMedia = () =>
+  api.get<APIResponse<KVMMedia[]>>('/kvm-media')
+
 export const getEnabledImages = (virtualization = 'lxc', container?: ContainerIdentifier) =>
   api.get<APIResponse<Template[]>>('/images/enabled', { params: { type: virtualization, ...(container ? { container: String(container) } : {}) } })
 
@@ -1077,6 +1089,7 @@ export const importContainerDisk = (id: ContainerIdentifier, sourcePath: string,
 export const updateHardwareConfig = (id: ContainerIdentifier, data: {
   boot_order?: string
   boot_media?: string
+  extra_iso?: string
   firmware?: string
   nic_model?: string
   disk_bus?: string
