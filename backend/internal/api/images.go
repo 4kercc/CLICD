@@ -440,6 +440,22 @@ func handleCustomKVMImageCreate(w http.ResponseWriter, r *http.Request) {
 			}
 			req.Distro = "windows"
 			req.Release = "11"
+		case config.KVMProvisionerWindowsPE:
+			// WinPE / WePE maintenance ISOs are boot-only images: no unattended
+			// answer file is generated for them, they just boot from the ISO.
+			if req.Arch != "amd64" {
+				jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "WinPE/WePE boot images currently require an amd64 host"})
+				return
+			}
+			if !customImageFieldPattern.MatchString(req.Distro) {
+				jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "distro contains unsupported characters"})
+				return
+			}
+			req.Distro = strings.ToLower(strings.TrimSpace(req.Distro))
+			if req.Distro == "" {
+				req.Distro = "wepe"
+			}
+			req.Release = "pe"
 		default:
 			jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "unsupported unattended installation template"})
 			return

@@ -210,6 +210,16 @@
 - **实机验证 (<测试机地址>)**：浏览器实测确认默认选中 20、下拉含 10/20/50/100、选择 100 后刷新仍为 100、「取消选择」可清空勾选。
 - **后续调整**：「选择本页」按钮经实际使用反馈价值有限，已移除（分页栏保留 `首页/上一页/下一页/末页`，批量勾选仍可通过表头复选框跨分页全选 + 「取消选择」清空）。
 
+### 12. 🧩 第三方 WinPE / WePE 镜像无法添加修复 (最新修复 - 2026-09-20)
+- **问题现象**：在「镜像管理 → 第三方镜像」中选择 **WinPE / WePE** 模板并点击 Add and Download，弹窗底部报错 `unsupported unattended installation template`，镜像无法注册。
+- **根因分析**：后端 `backend/internal/api/images.go` 的 `handleCustomKVMImageCreate` 中，`switch req.Provisioner` 只处理了 `linux-cloud-init` / `windows-10` / `windows-11` 三种无人值守模板，**遗漏了早已在 `config.KVMProvisionerWindowsPE`（`windows-pe`）中定义、前端也已提供入口的 WinPE 类型**，于是落入 `default` 分支直接返回该错误。下载校验（`validateWindowsISO` 的 `isPE` 分支）与 PE 识别（`Image.IsWindowsPE()`）本就已支持，因此仅需补齐注册分支。
+- **修复方案（`backend/internal/api/images.go`）**：新增 `case config.KVMProvisionerWindowsPE`：
+  - 校验架构必须为 `amd64`（WinPE 引导镜像仅支持 x86_64）；
+  - 校验 `distro` 字符集（沿用 `customImageFieldPattern`），为空时归一为 `wepe`；
+  - 统一将 `release` 归一为 `pe`，保证 `IsWindowsPE()` 判定稳定；
+  - WinPE 属纯引导维护镜像，不生成无人值守应答文件（注释已注明）。
+- **实机验证 (<测试机地址>)**：用弹窗实际提交的完整载荷（`provisioner=windows-pe`、`distro=wepe`、`release=pe`、`arch=amd64`）调用接口，注册由原先的 400 报错变为 **201 成功**（`custom-kvm-*`），并确认已正确落盘到 SQLite `app_meta.custom_kvm_images`；重复 URL 会按既有规则返回 409 去重提示。验证用的临时镜像条目已删除，镜像列表恢复原状。
+
 ---
 
 ## 📝 AI 接力开发与修改记录规范 (Development Guidelines for AI Assistants)
