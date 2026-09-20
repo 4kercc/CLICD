@@ -8,8 +8,8 @@
 - **项目名称**：CLICD (Container & KVM Lifecycle Controller Daemon)
 - **当前版本**：`v1.20.8`
 - **代码仓库**：[https://github.com/4kercc/CLICD](https://github.com/4kercc/CLICD)
-- **测试验证服务器**：`<测试机地址>:<端口>` （凭据单独保管）
-- **面板运行地址**：`http://<测试机地址>:<面板端口>/` （凭据单独保管）
+- **测试验证服务器**：部署与验证均在自备测试机上进行（主机地址与账号凭据单独保管，不入库、不写入本文档）
+- **面板运行地址**：测试机 `http://<测试机地址>:<面板端口>/`（凭据单独保管）
 - **后端技术栈**：Go 1.24+（原生标准库 + Libvirt + LXC + Cgroup v2 + Iptables，无重型框架，纯静态二进制打包）
 - **前端技术栈**：React 18 + TypeScript + Vite + Tailwind CSS + Lucide Icons（打包产物嵌入在 `backend/internal/server/web/` 中）
 
@@ -131,7 +131,7 @@
   - `frontend/src/components/CreateContainerModal.tsx`（创建容器向导）：在镜像配置步中增加「预设初始化命令 (Init Script)」折叠面板，提供等宽代码框与常用预设按钮，并在第 4 步预览清单中展示配置状态。
   - `frontend/src/pages/ContainerDetail.tsx`（重装系统）：重装弹窗中新增「预设初始化命令 (Init Script)」配置与快捷填充按钮。
   - 提供快捷预设：📦 *常用工具包 (`wget/curl/iftop/htop`)*、🐳 *安装 Docker* 与清空功能。
-- **实机验证与多行脚本执行优化 (<测试机地址>)**：
+- **实机验证与多行脚本执行优化（测试机）**：
   - **排查修复多行执行异常**：此前若用户多行命令包含 `&&` 换行拼接（如同时点击了工��包和 Docker 安装），直接作为 `sh -c` 字符串执行时触发了 `sh: Syntax error: "&&" unexpected` 语法错误。
   - **脚本执行器封装增强**：在 `backend/internal/lxc/lxc.go` 的 `ExecuteInitScriptAsync` 中改为生成沙箱临时脚本 `/tmp/.clicd_init_script.sh`（带 `chmod +x` 与 `set -e` 自动保护），并优化前端预设填充逻辑采用换行分割拼接，彻底消除多行 Shell 命令的语法解析隐患。
   - **实机全量验证通过**：在测试服务器上创建实例 `ccc-good`，注入「常用工具包 (`wget/curl/lrzsz/iftop/htop/btop/net-tools`) + 官方 Docker Engine 安装脚本」，验证客机内 `/usr/bin/htop`、`/usr/sbin/iftop`、`/usr/bin/wget`、`/usr/bin/curl` 及 `docker-ce` 全部安装就绪，日志记录完整。
@@ -150,7 +150,7 @@
   - `backend/internal/api/settings.go`：`TelegramSettingsRequest/Response` 增加 `notify_logins`，GET 返回当前状态、PUT 保存并 `telegram.Global().Restart()` 即时生效。
   - `frontend/src/services/api.ts`：`TelegramSettings` 接口增加 `notify_logins: boolean`。
   - `frontend/src/pages/Settings.tsx`：Telegram Bot 卡片新增「推送登录成功提醒」复选框（默认开启），并接入 `handleSaveTelegram` / `fetchTelegram` 的读写回填。
-- **实机验证 (<测试机地址>)**：
+- **实机验证（测试机）**：
   - 部署新二进制并启用 `notify_logins` 后，通过接口创建一个临时子用户并完成一次成功登录，服务端日志输出：
     `[Telegram] Login notification pushed: user=user-668ed93b role=子用户 ip=192.168.122.84:62463`，确认消息已成功投递至管理员 TG（无发送失败日志）。
   - 验证结束后已清理临时子用户数据并重启服务，环境恢复原状。
@@ -164,7 +164,7 @@
     - 若未指定，则仅当镜像库中存在且物理文件真实存在时才作为光驱挂载；
     - 否则 `winISO` 保持为空字符串，Domain XML 生成器自动跳过生成该虚拟光驱，不再写入任何无效占位符。
   - 支持热挂载/热更新：当虚拟机在运行中调整硬件配置修改 `BootMedia` 时，底层自动调用 `virsh change-media` 对光盘进行 `--insert` / `--update` / `--eject` 动态热插拔。
-- **实机验证 (<测试机地址>)**：
+- **实机验证（测试机）**：
   - 成功为运行中的 Windows 虚拟机 `vm-4`（`jsq-windows`）热挂载 `/var/lib/clicd/images/kvm/custom-kvm-770d5fc03f.iso` 到虚拟光驱 `hdb`，`virsh domblklist vm-4` 确认光驱源已正确更新为自定义 ISO。
 
 ### 9. 🪟 创建向导「选 Windows 却装出 Debian 12」根因修复 (最新修复 - 2026-09-20)
@@ -177,7 +177,7 @@
   - **新增共享工具 `frontend/src/utils/templateKind.ts`**：以 API 返回的 `distro` 字段为准注册 Windows 模板（`registerTemplateKinds`），`isWindowsTemplate` 优先查注册表、再退化为 ID 关键字匹配。`CreateContainerModal.tsx` 与 `ContainerDetail.tsx` 均改为引用该共享实现，删除各自原有的错误字符串匹配。
   - **重做创建向导「镜像选择」步骤**：把「系统模板」下拉框改为**大卡片单选**（标题明确为「要安装的系统（单选，决定本次装出的系统）」，Windows 卡片额外标注 `· Windows`）；「子用户可用镜像」改为虚线框区块并注明「仅控制子用户能看到/重装哪些系统，不影响上面选的安装系统」。
   - **修正 KVM 引导顺序（`backend/internal/kvm/kvm.go`）**：Windows 与 Linux Domain XML 的默认引导项改为 `hd → cdrom` 回退链，`network` 引导时为 `network → cdrom → hd`。空盘时 SeaBIOS 自动回退到安装光盘；系统装好后硬盘可引导则优先走硬盘，光驱中的 ISO 被自动忽略，无需人工弹出。
-- **实机验证 (<测试机地址>)**：
+- **实机验证（测试机）**：
   - 通过浏览器实际驱动面板创建向导：选 KVM 后 Windows 卡片正确识别（网络步骤显示 **RDP: 22015 -> 3389**，vCPU/内存/磁盘自动提升为 2C/2048MB/30GB）；预览清单「系统镜像」正确显示为所选 Windows 镜像。
   - 创建实例并抓取控制台截图，确认 SeaBIOS 走 `hd → cdrom` 回退并成功进入 **Windows Server 2019 安装程序（“安装程序正在启动”）**，系统盘为空盘（`<backingStore/>`）而非 Debian 覆盖层，彻底闭环。
   - **重要提示**：镜像 `custom-kvm-770d5fc03f`（`windows server 2019` / `2019-virto.iso`，2.2GB）经校验 **缺少 El Torito 引导记录（第 17 扇区为终止描述符，且 Boot System ID 为 LINUX）**，属不可引导的数据盘，任何平台都无法用它安装系统；请改用 `custom-kvm-42e957647c`（`cn_windows_server_2019_x64_dvd_4de40f33_virtio_20190225.iso`，5.3GB，第 17 扇区为 `EL TORITO SPECIFICATION`）等可引导安装镜像。
@@ -193,7 +193,7 @@
   - **自适应关机等待窗口**：新增 `stopGracefulWindow()` 与 `systemDiskAllocatedBytes()`，用 `virsh domblkinfo` 读取系统盘真实分配量（运行中也安全）。当模板判定为 Windows 且系统盘分配量 < 512 MiB（无系统、无可丢数据）时，优雅关机窗口由 45 秒缩短为 5 秒；一旦盘上已有实际数据（含安装程序写入）或为 Linux 云镜像覆盖盘，仍保留完整 45 秒优雅窗口，确保不丢数据、不损坏文件系统。
   - **放宽 Windows 标签识别**：新增 `looksLikeWindowsTemplate()`，在 `IsWindowsImage()` 基础上兼容运维手动改写的模板标签（含 `windows` 关键字），开机路径不再对空盘 Windows 实例死等 180 秒 IP。
   - **前端不再残留假死页面**：`ContainerDetail` 的 `fetchContainer` 遇到 404（实例已被删除）时提示并自动返回列表页，不再长时间渲染旧快照；操作失败时改为直接展示服务端返回的中文原因，并对 409（已有任务排队）给出明确的「请等待当前任务结束」提示。
-- **实机验证 (<测试机地址>)**：
+- **实机验证（测试机）**：
   - 修复前实测：新建 Windows 实例关机耗时 **48 秒**；运维改标签的 `1111` 实例开机任务卡住并在其后堆积挂起的关机任务。
   - 修复后实测：同样的关机耗时 **6 秒**；`1111` 实例开机 20 秒、关机 10 秒全部正常结束，堆积任务清空。
   - 全链路复测（新建 → 关机 → 删除）：关机 6 秒、删除 2 秒，实例彻底移除；`virsh domblkinfo` 校验阈值判定正确（已装 Linux 28534 MiB / 已装 Windows 35432 MiB → 走 45 秒优雅窗口；空盘 36 MiB → 走 5 秒快速断电）。
@@ -207,7 +207,7 @@
   - **新增「选择本页」按钮**：只勾选当前分页显示的实例，配合表头复选框（跨分页作用于全部筛选结果）覆盖两种批量场景；表头复选框补充提示文案说明其作用范围。
   - **新增「取消选择」按钮**：选中若干实例后工具条左侧一键清空勾选，避免逐台取消。
 - **国际化**：为新增文案（`取消选择` / 表头提示）补充 `utils/i18n.ts` 词条，英文界面下正常显示。
-- **实机验证 (<测试机地址>)**：浏览器实测确认默认选中 20、下拉含 10/20/50/100、选择 100 后刷新仍为 100、「取消选择」可清空勾选。
+- **实机验证（测试机）**：浏览器实测确认默认选中 20、下拉含 10/20/50/100、选择 100 后刷新仍为 100、「取消选择」可清空勾选。
 - **后续调整**：「选择本页」按钮经实际使用反馈价值有限，已移除（分页栏保留 `首页/上一页/下一页/末页`，批量勾选仍可通过表头复选框跨分页全选 + 「取消选择」清空）。
 
 ### 12. 🧩 第三方 WinPE / WePE 镜像无法添加修复 (最新修复 - 2026-09-20)
@@ -218,7 +218,7 @@
   - 校验 `distro` 字符集（沿用 `customImageFieldPattern`），为空时归一为 `wepe`；
   - 统一将 `release` 归一为 `pe`，保证 `IsWindowsPE()` 判定稳定；
   - WinPE 属纯引导维护镜像，不生成无人值守应答文件（注释已注明）。
-- **实机验证 (<测试机地址>)**：用弹窗实际提交的完整载荷（`provisioner=windows-pe`、`distro=wepe`、`release=pe`、`arch=amd64`）调用接口，注册由原先的 400 报错变为 **201 成功**（`custom-kvm-*`），并确认已正确落盘到 SQLite `app_meta.custom_kvm_images`；重复 URL 会按既有规则返回 409 去重提示。验证用的临时镜像条目已删除，镜像列表恢复原状。
+- **实机验证（测试机）**：用弹窗实际提交的完整载荷（`provisioner=windows-pe`、`distro=wepe`、`release=pe`、`arch=amd64`）调用接口，注册由原先的 400 报错变为 **201 成功**（`custom-kvm-*`），并确认已正确落盘到 SQLite `app_meta.custom_kvm_images`；重复 URL 会按既有规则返回 409 去重提示。验证用的临时镜像条目已删除，镜像列表恢复原状。
 
 ### 13. 🌐 英文界面残留中文清理与 i18n 覆盖补全 (最新修复 - 2026-09-20)
 - **问题现象**：切换到英文后面板仍夹杂中文，且存在「半翻译」混合串，例如 `Disk总线`、`Network InterfacesDriver`、`Page 台Container`、`同步Failed`、`已Config`。
@@ -255,7 +255,7 @@
     - 「额外挂载光盘 (独立光驱，不影响启动光盘)」——默认不挂载；
     - 两者共用服务器镜像列表，并提供「自定义路径…」项回退到手填；`mediaSelection()` 保证已保存但不在列表中的历史路径不会被静默清空。
   - 补充上述新文案的 i18n 词条；同时修正 4 个 i18n 自检脚本解析器只识别单引号值的问题（新增词条使用双引号值时会漏解析）。
-- **实机验证 (<测试机地址>)**：
+- **实机验证（测试机）**：
   - 新建带额外光盘的实例，`virsh domblklist` 显示：`hdb` = 镜像自带 PE 盘（`custom-kvm-c836cfa104.iso`）、`sdc` = 额外 Windows 安装盘（`custom-kvm-42e957647c.iso`）；
   - **运行时切换额外光盘**：`sdc` 由 Windows 2019 镜像换成另一 ISO，**`hdb` 保持不动**；
   - **运行时清空额外光盘**：`sdc` 变为空托盘，`hdb` 依旧不动；
@@ -267,7 +267,7 @@
 ## 📝 AI 接力开发与修改记录规范 (Development Guidelines for AI Assistants)
 后续所有 AI 助手在接力开发本项目时，必须严格遵守以下规范：
 1. **持续同步 `project.md`**：完成任何代码修改、架构调整或需求上线后，必须在 `project.md` 中以清晰的小节记录修改背景、改动文件、技术细节以及实机验证状态。
-2. **遵守部署与发布要求**：用户未明确要求发布前，一律仅在本地构建并在测试服务器（`<测试机地址>`）验证，严禁擅自直接推送到 GitHub 远程仓库。
+2. **遵守部署与发布要求**：用户未明确要求发布前，一律仅在本地构建并在测试服务器上验证，严禁擅自直接推送到 GitHub 远程仓库。
 3. **跨平台编译与嵌入规范**：修改前端代码后需先执行 `npm run build`，并将 `frontend/dist/*` 同步复制至 `web/` 与 `backend/internal/server/web/` 后，再使用 Go 交叉编译出 Linux AMD64 二进制。
 
 ---
@@ -304,7 +304,7 @@ cd backend
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o clicd-linux-amd64 main.go
 ```
 
-### 2. 测试机 (`<测试机地址>`) 部署与服务管理
+### 2. 测试机部署与服务管理
 ```bash
 # 查看服务状态
 systemctl status clicd --no-pager
