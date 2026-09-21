@@ -262,6 +262,9 @@ func (image Image) IsWindows11() bool {
 
 // IsWindowsImage returns true if the image uses Windows unattended installation.
 func IsWindowsImage(id string) bool {
+	if strings.Contains(strings.ToLower(id), "win") {
+		return true
+	}
 	img := FindImage(id)
 	return img != nil && img.IsWindows()
 }

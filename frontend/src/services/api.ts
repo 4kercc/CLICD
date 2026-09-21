@@ -629,7 +629,7 @@ export const resetSSHPassword = (id: ContainerIdentifier, password?: string) =>
   api.post<APIResponse<{ password: string }>>(`/containers/${id}/reset-password`, password ? { password } : {})
 
 export const getContainerUsage = (id: ContainerIdentifier) =>
-  api.get<APIResponse<ContainerUsage>>(`/containers/${id}/usage`)
+  api.get<APIResponse<ContainerUsage>>(`/containers/${id}/usage`, { timeout: 5000 })
 
 export const getContainerHistory = (id: ContainerIdentifier) =>
   api.get<APIResponse<ContainerMetricPoint[]>>(`/containers/${id}/history`)

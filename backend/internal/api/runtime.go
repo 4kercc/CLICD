@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"os"
@@ -285,10 +286,46 @@ func updateIPv6ByRuntime(id int, requested []string, count int, auto bool) (*con
 
 func usageByRuntime(id int) (map[string]interface{}, error) {
 	c := config.FindContainer(id)
-	if c != nil && c.IsKVM() {
-		return kvmManager.GetResourceUsage(id)
+	if c == nil {
+		return nil, fmt.Errorf("container not found: %d", id)
 	}
-	return lxcManager.GetResourceUsage(id)
+
+	type result struct {
+		usage map[string]interface{}
+		err   error
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	ch := make(chan result, 1)
+	go func() {
+		if c.IsKVM() {
+			u, err := kvmManager.GetResourceUsage(id)
+			ch <- result{usage: u, err: err}
+			return
+		}
+		u, err := lxcManager.GetResourceUsage(id)
+		ch <- result{usage: u, err: err}
+	}()
+
+	select {
+	case res := <-ch:
+		return res.usage, res.err
+	case <-ctx.Done():
+		// 5秒超时直接返回兜底空指标，避免阻塞整体请求
+		fallback := map[string]interface{}{
+			"memory_usage_bytes": int64(0),
+			"memory_total_bytes": int64(c.RAMMB) * 1024 * 1024,
+			"cpu_usage_usec":     uint64(0),
+			"cpu_usage_pct":      0.0,
+			"disk_usage_bytes":   int64(0),
+			"network_rx_bytes":   uint64(0),
+			"network_tx_bytes":   uint64(0),
+			"timed_out":          true,
+		}
+		return fallback, nil
+	}
 }
 
 func trafficByRuntime(id int) map[string]interface{} {

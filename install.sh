@@ -1779,6 +1779,22 @@ EOF
     log "libvirt default NAT 网络已启用。"
 }
 
+setup_libvirt_security_driver() {
+    if [ -d /etc/libvirt ]; then
+        qemu_conf="/etc/libvirt/qemu.conf"
+        if [ ! -f "$qemu_conf" ] || ! grep -q '^[[:space:]]*security_driver[[:space:]]*=' "$qemu_conf" 2>/dev/null; then
+            log "正在配置 libvirt 安全驱动 (security_driver = 'none')..."
+            mkdir -p /etc/libvirt
+            echo 'security_driver = "none"' >> "$qemu_conf"
+            if is_systemd && systemctl is-active libvirtd >/dev/null 2>&1; then
+                systemctl restart libvirtd >/dev/null 2>&1 || true
+            elif is_openrc && rc-service libvirtd status >/dev/null 2>&1; then
+                rc-service libvirtd restart >/dev/null 2>&1 || true
+            fi
+        fi
+    fi
+}
+
 setup_subids() {
     log "正在配置 subordinate UID/GID 范围..."
     touch /etc/subuid /etc/subgid
@@ -2154,6 +2170,7 @@ run_step "配置内核网络参数" configure_kernel_networking
 run_step "配置 LXC NAT 网络" configure_lxc_nat_network
 run_step "配置运行时服务" setup_runtime_services
 run_step "配置 libvirt default NAT 网络" setup_default_libvirt_network
+run_step "配置 libvirt 安全驱动" setup_libvirt_security_driver
 run_step "配置 UID/GID 映射" setup_subids
 run_step "配置 LXC 存储权限" configure_lxc_storage_access
 run_step "检查 project quota" try_enable_project_quota

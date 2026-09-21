@@ -105,7 +105,8 @@ export default function Containers() {
       const res = await getContainers()
       const nextContainers = res.data.data || []
       setContainers(nextContainers)
-      await refreshUsage(nextContainers)
+      // 异步静默刷新指标，不阻塞主列表展示
+      refreshUsage(nextContainers).catch(() => {})
     } catch (err) {
       console.error(err)
     } finally {
