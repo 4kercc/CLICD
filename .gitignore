@@ -74,3 +74,4 @@ api.md
 deploy-arm.ps1
 deploy-dhcp.ps1
 deploy-pve-windows.ps1
+.tmp-check-snap.py
