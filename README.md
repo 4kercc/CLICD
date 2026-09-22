@@ -172,6 +172,17 @@ curl -fsSL https://raw.githubusercontent.com/4kercc/CLICD/main/install.sh | sudo
   - 走批量队列（`/batch-action` + `description`）拍快照，备注同样落到快照记录上；
   - 验证用的两份测试快照已删除，环境恢复原状（快照总数 14、实例 `ccc-good` 运行中且内网 IP 不变）。
 
+### 17. 📊 快照占用拆分为「逻辑占用 / 实际独占」(Snapshot Usage Accuracy - v1.20.9)
+- **问题背景**：面板只显示 `du` 口径的快照体积，容易被误读成"删掉就能回收这么多"。实测发现宿主文件系统（XFS `reflink=1`）会把快照做成写时复制克隆——`jsq-windows` 那份显示 **29.3 GiB** 的快照，用 `filefrag` 逐 extent 统计后真正的独占部分只有 **约 0.1~0.2 GiB**，其余 29.17 GiB 与运行中的磁盘共享同一批物理块。
+- **实现（`backend/internal/api/snapshot_usage_linux.go`）**：`x/sys/unix` 没有 FIEMAP 封装，故直接实现 `FS_IOC_FIEMAP` ioctl，按 `FIEMAP_EXTENT_SHARED` 位统计单个快照镜像中"无其他文件引用"的字节数：
+  - 语义：**实际独占 = 逻辑占用 − 共享字节 = 删除该快照能真正释放的空间**；
+  - 配 20 秒 TTL 内存缓存（guest 持续写入会不断把共享块转为独占，结果本身在变），冷启动全量扫描约 1 秒，命中缓存后约 50ms；
+  - 非 Linux 走 `snapshot_usage_fallback.go` 返回 `nil`；LXC 快照是 rootfs 目录树而非单个可克隆镜像，同样返回 `nil`，前端显示 `-`。
+- **接口**：`config.Snapshot` 新增只读字段 `UniqueBytes`（`json:"unique_bytes,omitempty"`，**不落库**），全局列表 / 单实例列表 / 创建 / 同步四个返回快照的接口统一经 decorator 填充。
+- **前端**：容器详情快照表与「快照管理」全局列表把原来的「大小 / 占用空间」拆成 **「逻辑占用」** 与 **「实际独占」** 两列，独占值绿色标注、不可测时显示 `-`，两列表头均带悬浮说明解释 reflink 共享以及"随系统继续写入逐步变大"的机制；全局表改为可横向滚动并加宽以容纳新列。
+- **附带结论（写给后续维护者）**：`du` 会把 reflink 共享块在每个文件里各算一遍，因此面板上所有基于 `du` 的体积（含快照目录合计）都是**上界**而非真实物理占用；同一台机上实测 3 份 `jsq-windows` 快照逻辑合计 61.55 GiB，真正独占仅 18.14 GiB。**该特性依赖宿主文件系统**：ext4 或无 reflink 的 XFS 上同一份代码会退化为真实全量复制（几十 GB、耗时数分钟）。
+- **实机验证**：接口返回 `unique_bytes` 数值与 `filefrag` 独立统计一致（`jsq-windows` 最新快照逻辑 29.26 GiB / 独占 0.18→0.24 GiB，随时间增长；`kylin-v10` 0.21 / 0.00 GiB），全局列表首次 1.02s、缓存后 0.05s，LXC 快照正确返回 `null`；前端 `tsc + vite build` 通过，i18n 重复键 0。
+
 
 
 
