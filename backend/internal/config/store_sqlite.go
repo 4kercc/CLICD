@@ -250,12 +250,8 @@ func ensureSchema() error {
 					firmware TEXT NOT NULL DEFAULT '',
 					nic_model TEXT NOT NULL DEFAULT '',
 					disk_bus TEXT NOT NULL DEFAULT '',
-<<<<<<< HEAD
 					init_script TEXT NOT NULL DEFAULT '',
 					extra_iso TEXT NOT NULL DEFAULT ''
-=======
-					init_script TEXT NOT NULL DEFAULT ''
->>>>>>> 39bb873 (release: v1.20.7 - init scripts, telegram login alerts, win ISO guard, usage timeout & libvirt sec driver)
 				)`,
 		`CREATE TABLE IF NOT EXISTS port_mappings (
 			container_id INTEGER NOT NULL,
@@ -1154,10 +1150,7 @@ func loadContainers() ([]Container, error) {
 				c.NICModel = nicModel.String
 				c.DiskBus = diskBus.String
 				c.InitScript = initScript.String
-<<<<<<< HEAD
-			c.ExtraISO = extraISO.String
-=======
->>>>>>> 39bb873 (release: v1.20.7 - init scripts, telegram login alerts, win ISO guard, usage timeout & libvirt sec driver)
+				c.ExtraISO = extraISO.String
 		if firewallRulesJSON.Valid && strings.TrimSpace(firewallRulesJSON.String) != "" {
 			_ = json.Unmarshal([]byte(firewallRulesJSON.String), &c.FirewallRules)
 		}

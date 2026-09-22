@@ -687,18 +687,11 @@ func (m *Manager) defineContainer(id int, vmName string, cfg lxc.ContainerConfig
 		PortMappingLimit:     cfg.PortMappingCount,
 		AllowedImageIDs:      append([]string(nil), cfg.AllowedImageIDs...),
 		ImageLimitConfigured: cfg.ImageLimitConfigured,
-<<<<<<< HEAD
 		SnapshotLimit:        config.NormalizeSnapshotLimit(cfg.SnapshotLimit),
 		InitScript:           cfg.InitScript,
 		ExtraISO:             cfg.ExtraISO,
 		CreatedAt:            now,
 		ExpiresAt:            cfg.ExpiresAt,
-=======
-			SnapshotLimit:        config.NormalizeSnapshotLimit(cfg.SnapshotLimit),
-			InitScript:           cfg.InitScript,
-			CreatedAt:            now,
-			ExpiresAt:            cfg.ExpiresAt,
->>>>>>> 39bb873 (release: v1.20.7 - init scripts, telegram login alerts, win ISO guard, usage timeout & libvirt sec driver)
 	}
 	container.NormalizeNetworkAssignments()
 	cfg.ReportProgress("metadata", "保存虚拟机配置")
@@ -1127,7 +1120,6 @@ func (m *Manager) ApplyContainerLimits(c *config.Container) error {
 	if err := m.ensureDomainDefinition(c); err != nil {
 		return err
 	}
-<<<<<<< HEAD
 	// Extra ISO: hot-plug it into the reserved drive, so changing it never
 	// disturbs the image's own boot/install disc. That disc only changes on the
 	// next start, through the redefined domain XML above.
@@ -1220,26 +1212,6 @@ func attachExtraCDROMDevice(name, isoPath string) error {
 	if err != nil {
 		return fmt.Errorf("%v, output: %s", err, strings.TrimSpace(out))
 	}
-=======
-		// If VM is running and bootMedia changed, live-update the CD-ROM drive
-		if c.Status == "running" {
-			targetISO := ""
-			if c.BootMedia != "" {
-				targetISO = c.BootMedia
-			} else if img := FindImage(c.Template); img != nil && img.IsWindows() {
-				isoCandidate := ImagePath(c.Template)
-				if _, err := os.Stat(isoCandidate); err == nil {
-					targetISO = isoCandidate
-				}
-			}
-			if targetISO != "" {
-				_ = exec.Command("virsh", "change-media", c.VirshName(), "hdb", targetISO, "--insert", "--live").Run()
-				_ = exec.Command("virsh", "change-media", c.VirshName(), "hdb", targetISO, "--update", "--live").Run()
-			} else {
-				_ = exec.Command("virsh", "change-media", c.VirshName(), "hdb", "--eject", "--live").Run()
-			}
-		}
->>>>>>> 39bb873 (release: v1.20.7 - init scripts, telegram login alerts, win ISO guard, usage timeout & libvirt sec driver)
 	return nil
 }
 
@@ -1268,7 +1240,6 @@ func (m *Manager) ensureDomainDefinition(c *config.Container) error {
 		}
 	}
 
-<<<<<<< HEAD
 	if IsWindowsImage(c.Template) {
 		winISO := ""
 		if c.BootMedia != "" {
@@ -1286,25 +1257,6 @@ func (m *Manager) ensureDomainDefinition(c *config.Container) error {
 		xml = generateLinuxDomainXML(c.VirshName(), int(c.VCPU), c.RAMMB, c.DiskImage, seedPath, c.ExtraISO, c.MACAddress, c.IOReadMBps, c.IOWriteMBps, c.NetworkDownMbps, c.NetworkUpMbps, isKVMDesktopTemplate(c.Template), bootOrder, nicModel, diskBus, c.BootMedia)
 	}
 	if err := os.WriteFile(xmlPath, []byte(xml), 0644); err != nil {
-=======
-		if IsWindowsImage(c.Template) {
-			winISO := ""
-			if c.BootMedia != "" {
-				winISO = c.BootMedia
-			} else if img := FindImage(c.Template); img != nil && img.IsWindows() {
-				isoCandidate := ImagePath(c.Template)
-				if _, err := os.Stat(isoCandidate); err == nil {
-					winISO = isoCandidate
-				}
-			}
-			unattendISO := existingWindowsUnattendISO(m.instanceDir(c.VirshName()))
-			xml = generateWindowsDomainXML(c.VirshName(), int(c.VCPU), c.RAMMB, c.DiskImage, winISO, unattendISO, c.MACAddress, c.IOReadMBps, c.IOWriteMBps, c.NetworkDownMbps, c.NetworkUpMbps, bootOrder, nicModel, diskBus)
-		} else {
-			seedPath := filepath.Join(m.instanceDir(c.VirshName()), "seed.iso")
-			xml = generateLinuxDomainXML(c.VirshName(), int(c.VCPU), c.RAMMB, c.DiskImage, seedPath, c.MACAddress, c.IOReadMBps, c.IOWriteMBps, c.NetworkDownMbps, c.NetworkUpMbps, isKVMDesktopTemplate(c.Template), bootOrder, nicModel, diskBus, c.BootMedia)
-		}
-		if err := os.WriteFile(xmlPath, []byte(xml), 0644); err != nil {
->>>>>>> 39bb873 (release: v1.20.7 - init scripts, telegram login alerts, win ISO guard, usage timeout & libvirt sec driver)
 		return err
 	}
 	cmd := exec.Command("virsh", "define", xmlPath)
@@ -3228,7 +3180,6 @@ func isKVMDesktopTemplate(templateID string) bool {
 	return image != nil && image.Desktop != ""
 }
 
-<<<<<<< HEAD
 // extraCDROMDevice is the dedicated slot reserved for the operator's additional
 // ISO. It is emitted as an always-present (possibly empty) SATA CD-ROM so that:
 //   - the image's own boot/install disc is never displaced;
@@ -3257,13 +3208,6 @@ func domainXML(name string, vcpu int, ramMB int, diskPath, seedPath, extraISOPat
 }
 
 func generateLinuxDomainXML(name string, vcpu int, ramMB int, diskPath, seedPath, extraISOPath, mac string, ioReadMBps int, ioWriteMBps int, networkDownMbps int, networkUpMbps int, desktop bool, bootOrder, nicModel, diskBus, bootMedia string) string {
-=======
-func domainXML(name string, vcpu int, ramMB int, diskPath, seedPath, mac string, ioReadMBps int, ioWriteMBps int, networkDownMbps int, networkUpMbps int, desktop bool) string {
-	return generateLinuxDomainXML(name, vcpu, ramMB, diskPath, seedPath, mac, ioReadMBps, ioWriteMBps, networkDownMbps, networkUpMbps, desktop, "disk", "virtio", "virtio", "")
-}
-
-func generateLinuxDomainXML(name string, vcpu int, ramMB int, diskPath, seedPath, mac string, ioReadMBps int, ioWriteMBps int, networkDownMbps int, networkUpMbps int, desktop bool, bootOrder, nicModel, diskBus, bootMedia string) string {
->>>>>>> 39bb873 (release: v1.20.7 - init scripts, telegram login alerts, win ISO guard, usage timeout & libvirt sec driver)
 	if vcpu < 1 {
 		vcpu = 1
 	}
