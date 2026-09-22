@@ -1,12 +1,12 @@
 # CLICD 项目架构、功能设计与全景接力文档 (Project Handover Documentation)
 
-本文档面向后续 AI 接力开发与架构维护，全面汇总了 **CLICD (LXC/KVM 虚拟化管理面板)** 的系统架构、各模块代码职责、核心技术设计、近期的关键改动与演进记录（涵盖 v1.20 ~ v1.20.8，含 Telegram Bot、预设初始化命令、Windows 装机链路与额外挂载光盘等），并附带现存待办需求与运维指令。
+本文档面向后续 AI 接力开发与架构维护，全面汇总了 **CLICD (LXC/KVM 虚拟化管理面板)** 的系统架构、各模块代码职责、核心技术设计、近期的关键改动与演进记录（涵盖 v1.20 ~ v1.20.9，含 Telegram Bot、预设初始化命令、Windows 装机链路、额外挂载光盘与快照备注等），并附带现存待办需求与运维指令。
 
 ---
 
 ## 📌 项目基本信息
 - **项目名称**：CLICD (Container & KVM Lifecycle Controller Daemon)
-- **当前版本**：`v1.20.8`
+- **当前版本**：`v1.20.9`
 - **代码仓库**：[https://github.com/4kercc/CLICD](https://github.com/4kercc/CLICD)
 - **测试验证服务器**：部署与验证均在自备测试机上进行（主机地址与账号凭据单独保管，不入库、不写入本文档）
 - **面板运行地址**：测试机 `http://<测试机地址>:<面板端口>/`（凭据单独保管）
@@ -55,9 +55,17 @@
 
 ---
 
-## 🚀 近期重要功能演进与技术改动 (v1.20.4 ~ v1.20.8)
+## 🚀 近期重要功能演进与技术改动 (v1.20.4 ~ v1.20.9)
 
-### 1. 🤖 原生内置 Telegram Bot 模块 (v1.20.4)
+### 1. 📝 快照备注：回退时一眼看清是哪一版 (v1.20.9)
+- **需求背景**：打快照时提示用户输入备注，方便后续回退时知道是哪一版。原先快照只有时间/类型/创建者/体积，一份实例攒了多份快照后无法分辨。
+- **数据结构**：`config.Snapshot` 新增 `Description`（`json:"description,omitempty"`），SQLite `snapshots` 表新增 `description TEXT NOT NULL DEFAULT ''`（`CREATE TABLE` 与 `ensureSchemaMigrations` 里的 `ensureColumn` 双写，旧库启动自动补列）；`saveSnapshots` / `loadSnapshots` 同步读写（load 用 `sql.NullString` 兜底），远程同步链路只搬文件、无需改元数据。
+- **后端接口**：`POST /api/containers/{id}/snapshots` 解析 `description`；批量接口 `POST /api/batch-action` 在 `action=snapshot` 时把 `description` 存入任务（`Task.Name`）并透传给快照。`createSnapshotByRuntime` 的变参语义为位置化的 `descriptionAndStoragePool`（第 0 个备注、第 1 个存储池），三处调用点均按此传参并加注释说明。
+- **前端**：`ContainerDetail` 的 `openCreateSnapshot` 改为先弹出备注窗口（200 字上限 + 实时计数 + 存储磁盘选择 + 「运行中需先关机」提示），确认后由 `handleCreateSnapshot` 提交；批量弹窗 `BatchSnapshotModal` 新增备注输入；容器详情 `SnapshotTable` 与 `Snapshots.tsx` 全局列表均新增「备注」列（长文本换行 + `title` 悬浮全文，空值显示 `-`）。
+- **涉及文件**：`backend/internal/config/{config,store_sqlite}.go`、`backend/internal/kvm/kvm.go`、`backend/internal/lxc/snapshot.go`、`backend/internal/api/{runtime,snapshots,taskqueue}.go`、`frontend/src/pages/{ContainerDetail,Snapshots}.tsx`、`frontend/src/components/BatchSnapshotModal.tsx`、`frontend/src/services/api.ts`、`frontend/src/utils/i18n.ts`。
+- **实机验证（测试机）**：带备注拍快照后，创建响应、单实例列表、全局列表均正确回显 `description`；重启 `clicd` 后备注仍在（验证 SQLite 列映射与迁移）；批量队列路径（`/batch-action` + `description`）备注亦正确落库；验证用测试快照已删除，环境恢复原状（快照总数 14、`ccc-good` 运行中且内网 IP 不变）。
+
+### 2. 🤖 原生内置 Telegram Bot 模块 (v1.20.4)
 - **免公网 Webhook**：基于 Go 标准库 `net/http` 原生实现 Telegram 长轮询 (`getUpdates`)，母鸡无需额外域名和 SSL 反代即可直接通信。
 - **安全白名单鉴权**：强制校验请求来源 `Chat ID`，非白名单请求直接忽略丢弃。
 - **快捷指令菜单自动下发**：服务启动及更新 Token 时自动调用 Telegram 官方 API (`setMyCommands`) 同步注册 `/menu`、`/status`、`/list`、`/batch`、`/web`、`/help` 菜单。

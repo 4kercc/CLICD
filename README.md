@@ -157,6 +157,22 @@ curl -fsSL https://raw.githubusercontent.com/4kercc/CLICD/main/install.sh | sudo
 - **🧩 修复第三方 WinPE / WePE 镜像无法添加**：后端注册接口的 `switch req.Provisioner` 漏了 `windows-pe` 分支，导致选择「WinPE / WePE」模板必然报 `unsupported unattended installation template`。已补齐该分支（校验 amd64、归一 `distro`/`release`，WinPE 属纯引导镜像不生成无人值守应答文件）。
 - **🌐 英文界面完整汉化**：补齐约 260 条中英对照词条并新增 10 条正则规则处理数字插值模板（`第 N 台容器` → `Container #N` 等），修掉 `Disk总线`、`Network InterfacesDriver`、`Page 台容器` 这类半中半英混合串；同时从源头简化了两句会产生混合翻译的文案。新增 4 个自检脚本（`frontend/scripts/i18n-{audit,check,coverage,duplicates}.mjs`）用于持续校验覆盖率与词典重复键。
 
+### 16. 📝 快照备注：回退时一眼看清是哪一版 (Snapshot Note - v1.20.9)
+- **需求背景**：快照列表原先只有时间、类型、创建者与体积，实例攒了多份快照后无法分辨「哪一份是升级前的基线、哪一份是装完环境后的」；回退时只能靠时间猜，风险很高。
+- **改动内容**：
+  - **数据结构**：`config.Snapshot` 新增 `description` 字段，SQLite `snapshots` 表新增同名列（`CREATE TABLE` 与 `ensureColumn` 迁移双写，旧库启动时自动补列并回填空串），读写与远程同步链路一并打通。
+  - **详情页**：点「新建快照」后先弹出小窗口填写备注（200 字上限并实时计数，留空则只记时间与创建者），窗口内同时提供存储磁盘选择；若实例正在运行会提示「需先关机、完成后自动重启」。确认后才真正开拍。
+  - **批量快照**：批量弹窗新增备注输入，一份备注写入本批全部快照（任务队列路径同样支持）。
+  - **列表展示**：容器详情快照表与「快照管理」全局列表均新增独立「备注」列，长备注自动换行并以 `title` 悬浮显示全文；历史快照无备注时显示占位符 `-`。
+  - **i18n**：新增词条已补英文对照，词典重复键保持 0。
+- **涉及文件**：`backend/internal/config/{config,store_sqlite}.go`、`backend/internal/kvm/kvm.go`、`backend/internal/lxc/snapshot.go`、`backend/internal/api/{runtime,snapshots,taskqueue}.go`、`frontend/src/pages/{ContainerDetail,Snapshots}.tsx`、`frontend/src/components/BatchSnapshotModal.tsx`、`frontend/src/services/api.ts`、`frontend/src/utils/i18n.ts`。
+- **实机验证**：
+  - 走 HTTP 接口对测试实例 `ccc-good` 带备注拍快照，返回体与列表接口（单实例 + 全局）均正确回显 `description`；
+  - 重启 `clicd` 服务后备注依然存在，确认 SQLite 列映射与迁移正确；
+  - 走批量队列（`/batch-action` + `description`）拍快照，备注同样落到快照记录上；
+  - 验证用的两份测试快照已删除，环境恢复原状（快照总数 14、实例 `ccc-good` 运行中且内网 IP 不变）。
+
+
 
 
 ## Features / 功能介绍
