@@ -119,7 +119,7 @@ export default function Snapshots() {
         </div>
       </div>
 
-      <div className="overflow-hidden rounded-lg border border-gray-200 bg-white">
+      <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
         {activeTab === 'snapshots' ? (
           snapshots.length === 0 ? (
             <div className="flex flex-col items-center justify-center px-6 py-16 text-center">
@@ -129,7 +129,7 @@ export default function Snapshots() {
               <div className="text-sm font-medium text-gray-700">暂无轻量增量快照</div>
             </div>
           ) : (
-            <table className="w-full min-w-[920px] text-sm">
+            <table className="w-full min-w-[1060px] text-sm">
               <thead className="border-b border-gray-200 bg-gray-50 text-xs text-gray-500">
                 <tr>
                   <th className="px-4 py-3 text-left font-medium">容器</th>
