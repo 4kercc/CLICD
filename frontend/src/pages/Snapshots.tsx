@@ -138,7 +138,8 @@ export default function Snapshots() {
                   <th className="px-4 py-3 text-left font-medium">快照时间</th>
                   <th className="px-4 py-3 text-left font-medium">类型</th>
                   <th className="px-4 py-3 text-left font-medium">创建者</th>
-                  <th className="px-4 py-3 text-right font-medium">占用空间</th>
+                  <th className="px-4 py-3 text-right font-medium" title="快照文件自身的大小，包含与运行磁盘共享的块">逻辑占用</th>
+                  <th className="px-4 py-3 text-right font-medium" title="删除该快照能真正释放的空间。若主机文件系统支持 reflink 写时复制，刚拍完的快照几乎全部与运行磁盘共享，独占值会远小于逻辑占用，并随着系统继续写入逐步变大">实际独占</th>
                   <th className="px-4 py-3 text-center font-medium">操作</th>
                 </tr>
               </thead>
@@ -177,6 +178,13 @@ export default function Snapshots() {
                     </td>
                     <td className="px-4 py-3 text-gray-600">{snapshot.created_by || '-'}</td>
                     <td className="px-4 py-3 text-right font-mono text-xs text-gray-600">{formatBytes(snapshot.size_bytes || 0)}</td>
+                    <td className="px-4 py-3 text-right font-mono text-xs">
+                      {snapshot.unique_bytes === null || snapshot.unique_bytes === undefined ? (
+                        <span className="text-gray-300" title="该主机或该类型快照无法统计独占大小">-</span>
+                      ) : (
+                        <span className="text-emerald-700">{formatBytes(snapshot.unique_bytes)}</span>
+                      )}
+                    </td>
                     <td className="px-4 py-3 text-center">
                       <button
                         onClick={() => handleDeleteSnapshot(snapshot)}

@@ -943,6 +943,9 @@ export interface Snapshot {
   scheduled: boolean
   path: string
   size_bytes: number
+  /** Bytes this snapshot alone holds, i.e. what deleting it frees. null when the
+   *  host cannot measure it (reflink sharing is host-filesystem dependent). */
+  unique_bytes?: number | null
   remote_synced?: boolean
   remote_storage_pool_id?: string
   remote_path?: string

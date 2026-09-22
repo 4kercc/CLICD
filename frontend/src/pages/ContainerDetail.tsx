@@ -4085,6 +4085,7 @@ function SnapshotTable({ snapshots, busy, onRestore, onDelete }: {
   onRestore: (snapshot: Snapshot) => void
   onDelete: (snapshot: Snapshot) => void
 }) {
+  const { t } = useLanguage()
   if (snapshots.length === 0) {
     return <p className="rounded-lg border border-dashed border-gray-200 px-4 py-8 text-center text-sm text-gray-400">暂无快照</p>
   }
@@ -4098,7 +4099,8 @@ function SnapshotTable({ snapshots, busy, onRestore, onDelete }: {
             <TableHead>备注</TableHead>
             <TableHead>类型</TableHead>
             <TableHead>创建者</TableHead>
-            <TableHead>大小</TableHead>
+            <TableHead title={t('快照文件自身的大小，包含与运行磁盘共享的块')}>逻辑占用</TableHead>
+            <TableHead title={t('删除该快照能真正释放的空间。若主机文件系统支持 reflink 写时复制，刚拍完的快照几乎全部与运行磁盘共享，独占值会远小于逻辑占用，并随着系统继续写入逐步变大')}>实际独占</TableHead>
             <th className="px-3 py-2 text-right text-xs font-medium text-gray-500">操作</th>
           </tr>
         </thead>
@@ -4127,6 +4129,13 @@ function SnapshotTable({ snapshots, busy, onRestore, onDelete }: {
               </td>
               <td className="px-3 py-2 text-xs text-gray-600 whitespace-nowrap">{snapshot.created_by || '-'}</td>
               <td className="px-3 py-2 font-mono text-xs text-gray-600 whitespace-nowrap">{formatBytes(snapshot.size_bytes || 0)}</td>
+              <td className="px-3 py-2 font-mono text-xs whitespace-nowrap">
+                {snapshot.unique_bytes === null || snapshot.unique_bytes === undefined ? (
+                  <span className="text-gray-300" title={t('该主机或该类型快照无法统计独占大小')}>-</span>
+                ) : (
+                  <span className="text-emerald-700">{formatBytes(snapshot.unique_bytes)}</span>
+                )}
+              </td>
               <td className="px-3 py-2">
                 <div className="flex justify-end gap-1.5">
                   <button
@@ -4354,8 +4363,8 @@ function MappingTable({ mappings, publicHost, onEdit, onDelete, compact = false,
   )
 }
 
-function TableHead({ children }: { children: ReactNode }) {
-  return <th className="text-left px-3 py-2 text-xs font-medium text-gray-500">{children}</th>
+function TableHead({ children, title }: { children: ReactNode; title?: string }) {
+  return <th title={title} className="text-left px-3 py-2 text-xs font-medium text-gray-500">{children}</th>
 }
 
 function Field({ label, children, hint }: { label: string; children: ReactNode; hint?: string }) {

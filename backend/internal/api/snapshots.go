@@ -25,6 +25,7 @@ func HandleSnapshots(w http.ResponseWriter, r *http.Request) {
 	snapshots := append([]config.Snapshot(nil), config.AppConfig.Snapshots...)
 	snapshots = filterSnapshotsForRequest(r, snapshots)
 	sortSnapshotsNewestFirst(snapshots)
+	snapshots = decorateSnapshotUsage(snapshots)
 	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Data: snapshots})
 }
 
@@ -86,6 +87,7 @@ func listContainerSnapshots(w http.ResponseWriter, r *http.Request, containerID 
 	}
 	snapshots := config.ContainerSnapshots(containerID)
 	sortSnapshotsNewestFirst(snapshots)
+	snapshots = decorateSnapshotUsage(snapshots)
 	jsonResponse(w, http.StatusOK, APIResponse{Success: true, Data: map[string]interface{}{
 		"snapshots": snapshots,
 		"quota":     config.ContainerSnapshotLimit(c),
@@ -135,6 +137,7 @@ func createContainerSnapshot(w http.ResponseWriter, r *http.Request, containerID
 	// Auto sync snapshot to remote storage if enabled
 	remote.SyncSnapshotToRemoteStorage(&snapshot)
 	config.AddAuditLog("snapshot.create", snapshot.ContainerName, snapshot.ID, user)
+	snapshot.UniqueBytes = snapshotUniqueBytes(&snapshot)
 	jsonResponse(w, http.StatusCreated, APIResponse{Success: true, Data: snapshot})
 }
 
@@ -273,6 +276,7 @@ func restoreContainerSnapshot(w http.ResponseWriter, r *http.Request, containerI
 		}
 		user := requestUser(r)
 		config.AddAuditLog("snapshot.sync", snapshot.ContainerName, snapshot.ID, user)
+		snapshot.UniqueBytes = snapshotUniqueBytes(snapshot)
 		jsonResponse(w, http.StatusOK, APIResponse{Success: true, Message: "快照已成功同步至远程存储", Data: snapshot})
 	}
 

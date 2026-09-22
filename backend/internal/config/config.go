@@ -770,6 +770,10 @@ type Snapshot struct {
 	Scheduled           bool   `json:"scheduled"`
 	Path                string `json:"path"`
 	SizeBytes           int64  `json:"size_bytes"`
+	// UniqueBytes is computed on read (an extent-map scan) and never persisted:
+	// it is the part of the snapshot no other file references, i.e. what deleting
+	// it would free. Omitted when it cannot be measured (see the API decorator).
+	UniqueBytes         *int64 `json:"unique_bytes,omitempty"`
 	RemoteSynced        bool   `json:"remote_synced,omitempty"`
 	RemoteStoragePoolID string `json:"remote_storage_pool_id,omitempty"`
 	RemotePath          string `json:"remote_path,omitempty"`
