@@ -327,6 +327,7 @@ export interface HostInfo {
 }
 
 export interface CreateSnapshotOptions {
+  description?: string
   storage_pool_id?: string
 }
 
@@ -936,6 +937,7 @@ export interface Snapshot {
   container_id: number
   container_name: string
   lxc_name: string
+  description?: string
   created_at: string
   created_by: string
   scheduled: boolean
@@ -1139,8 +1141,8 @@ export const deleteTask = (taskId: string) =>
 export const batchCreate = (containers: CreateContainerRequest[]) =>
   api.post<APIResponse<string[]>>('/batch-create', { containers })
 
-export const batchAction = (action: string, containers: number[], templateId?: string, storagePoolId?: string) =>
-  api.post<APIResponse>('/batch-action', { action, containers, template_id: templateId, storage_pool_id: storagePoolId })
+export const batchAction = (action: string, containers: number[], templateId?: string, storagePoolId?: string, description?: string) =>
+  api.post<APIResponse>('/batch-action', { action, containers, template_id: templateId, storage_pool_id: storagePoolId, description })
 
 export interface BatchConfigRequest {
   containers: number[]

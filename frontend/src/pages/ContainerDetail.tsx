@@ -224,6 +224,8 @@ export default function ContainerDetail() {
   const [storageInfo, setStorageInfo] = useState<StorageInfo | null>(null)
   const [storageLoading, setStorageLoading] = useState(!isSubUser)
   const [snapshotStoragePoolID, setSnapshotStoragePoolID] = useState('')
+  const [showSnapshotCreate, setShowSnapshotCreate] = useState(false)
+  const [snapshotNoteDraft, setSnapshotNoteDraft] = useState('')
   const [showSnapshotSchedule, setShowSnapshotSchedule] = useState(false)
   const [snapshotScheduleDraft, setSnapshotScheduleDraft] = useState({ intervalHours: 24, time: '03:00', maxCopies: 0 })
   const [showFirewall, setShowFirewall] = useState(false)
@@ -1104,7 +1106,7 @@ export default function ContainerDetail() {
     }
   }
 
-  const handleCreateSnapshot = async () => {
+  const openCreateSnapshot = async () => {
     if (!containerIdentifier) return
     if (!(await ensureSubUserCanOperate())) return
     if (!snapshotStorageReady) {
@@ -1115,6 +1117,12 @@ export default function ContainerDetail() {
       await dialog.alert('快照配额已满', '已达到管理员设置的快照配额，请先删除旧快照。')
       return
     }
+    setSnapshotNoteDraft('')
+    setShowSnapshotCreate(true)
+  }
+
+  const handleCreateSnapshot = async () => {
+    if (!containerIdentifier) return
     if (container?.status === 'running') {
       const confirmed = await dialog.confirm(
         '拍摄快照',
@@ -1124,7 +1132,12 @@ export default function ContainerDetail() {
     }
     setSnapshotBusy('create')
     try {
-      await createContainerSnapshot(containerIdentifier, { storage_pool_id: snapshotStoragePoolID || undefined })
+      await createContainerSnapshot(containerIdentifier, {
+        description: snapshotNoteDraft.trim() || undefined,
+        storage_pool_id: snapshotStoragePoolID || undefined,
+      })
+      setShowSnapshotCreate(false)
+      setSnapshotNoteDraft('')
       await Promise.all([fetchSnapshots(), fetchContainer()])
     } catch (err: unknown) {
       const error = err as { response?: { data?: { message?: string } } }
@@ -2445,7 +2458,7 @@ export default function ContainerDetail() {
                 {snapshotBusy === 'schedule' ? '处理中...' : snapshotSchedule?.enabled ? '定时设置' : '定时快照'}
               </button>
               <button
-                onClick={handleCreateSnapshot}
+                onClick={openCreateSnapshot}
                 disabled={!!snapshotBusy || storageLoading || !snapshotStorageReady || (isSubUser && snapshots.length >= snapshotQuota)}
                 className="inline-flex items-center gap-1.5 rounded-md bg-black px-3 py-1.5 text-xs text-white hover:bg-gray-800 disabled:opacity-50"
               >
@@ -2570,6 +2583,65 @@ export default function ContainerDetail() {
               onRestore={handleRestoreSnapshot}
               onDelete={handleDeleteSnapshot}
             />
+          </div>
+        </Modal>
+      )}
+
+      {showSnapshotCreate && (
+        <Modal title="新建快照" onClose={() => { if (snapshotBusy !== 'create') setShowSnapshotCreate(false) }}>
+          <div className="space-y-4">
+            <Field label="备注 (可选，便于日后回退时辨认版本)">
+              <textarea
+                value={snapshotNoteDraft}
+                onChange={(e) => setSnapshotNoteDraft(e.target.value)}
+                maxLength={200}
+                rows={3}
+                placeholder="例如：装完宝塔面板、升级内核前、部署上线前基线…"
+                className={`${inputClass} resize-none font-sans`}
+              />
+              <div className="mt-1 flex items-center justify-between text-[11px] text-gray-400">
+                <span>留空则仅记录时间与创建者。</span>
+                <span className="font-mono">{snapshotNoteDraft.length}/200</span>
+              </div>
+            </Field>
+            {!isSubUser && snapshotStoragePools.length > 0 && (
+              <Field label="存储磁盘">
+                <select
+                  value={snapshotStoragePoolID}
+                  onChange={(event) => setSnapshotStoragePoolID(event.target.value)}
+                  className={inputClass}
+                >
+                  <option value="">自动选择（默认盘优先，空间不足自动切换）</option>
+                  {snapshotStoragePools.map((pool) => (
+                    <option key={pool.id} value={pool.id}>
+                      {pool.name} · {pool.mount_point || pool.path}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            )}
+            {container?.status === 'running' && (
+              <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                当前实例运行中，拍摄快照需要先关机，完成后会自动重启。
+              </div>
+            )}
+            <div className="flex justify-end gap-2 pt-1">
+              <button
+                onClick={() => setShowSnapshotCreate(false)}
+                disabled={snapshotBusy === 'create'}
+                className="rounded-md border border-gray-300 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+              >
+                取消
+              </button>
+              <button
+                onClick={handleCreateSnapshot}
+                disabled={snapshotBusy === 'create'}
+                className="inline-flex items-center gap-1.5 rounded-md bg-black px-4 py-2 text-sm text-white hover:bg-gray-800 disabled:opacity-50"
+              >
+                <Camera className="w-4 h-4" />
+                {snapshotBusy === 'create' ? '创建中...' : '创建快照'}
+              </button>
+            </div>
           </div>
         </Modal>
       )}
@@ -4019,10 +4091,11 @@ function SnapshotTable({ snapshots, busy, onRestore, onDelete }: {
 
   return (
     <div className="overflow-x-auto rounded-lg border border-gray-200">
-      <table className="w-full min-w-[760px] text-sm">
+      <table className="w-full min-w-[880px] text-sm">
         <thead className="border-b border-gray-200 bg-gray-50 text-xs text-gray-500">
           <tr>
             <TableHead>快照时间</TableHead>
+            <TableHead>备注</TableHead>
             <TableHead>类型</TableHead>
             <TableHead>创建者</TableHead>
             <TableHead>大小</TableHead>
@@ -4032,7 +4105,14 @@ function SnapshotTable({ snapshots, busy, onRestore, onDelete }: {
         <tbody className="divide-y divide-gray-100">
           {snapshots.map((snapshot) => (
             <tr key={snapshot.id}>
-              <td className="px-3 py-2 font-mono text-xs text-gray-800">{snapshot.created_at}</td>
+              <td className="px-3 py-2 font-mono text-xs text-gray-800 whitespace-nowrap">{snapshot.created_at}</td>
+              <td className="px-3 py-2 text-xs text-gray-700 max-w-[240px]">
+                {snapshot.description ? (
+                  <span className="break-words" title={snapshot.description}>{snapshot.description}</span>
+                ) : (
+                  <span className="text-gray-300">-</span>
+                )}
+              </td>
               <td className="px-3 py-2">
                 <div className="inline-flex items-center gap-1">
                   <span className={`rounded px-2 py-0.5 text-xs ${snapshot.scheduled ? 'bg-blue-50 text-blue-700' : 'bg-gray-100 text-gray-700'}`}>
@@ -4045,8 +4125,8 @@ function SnapshotTable({ snapshots, busy, onRestore, onDelete }: {
                   )}
                 </div>
               </td>
-              <td className="px-3 py-2 text-xs text-gray-600">{snapshot.created_by || '-'}</td>
-              <td className="px-3 py-2 font-mono text-xs text-gray-600">{formatBytes(snapshot.size_bytes || 0)}</td>
+              <td className="px-3 py-2 text-xs text-gray-600 whitespace-nowrap">{snapshot.created_by || '-'}</td>
+              <td className="px-3 py-2 font-mono text-xs text-gray-600 whitespace-nowrap">{formatBytes(snapshot.size_bytes || 0)}</td>
               <td className="px-3 py-2">
                 <div className="flex justify-end gap-1.5">
                   <button

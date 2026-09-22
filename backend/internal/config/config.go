@@ -764,6 +764,7 @@ type Snapshot struct {
 	ContainerID         int    `json:"container_id"`
 	ContainerName       string `json:"container_name"`
 	LXCName             string `json:"lxc_name"`
+	Description         string `json:"description,omitempty"`
 	CreatedAt           string `json:"created_at"`
 	CreatedBy           string `json:"created_by"`
 	Scheduled           bool   `json:"scheduled"`

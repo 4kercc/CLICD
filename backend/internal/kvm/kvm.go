@@ -1266,9 +1266,18 @@ func (m *Manager) ensureDomainDefinition(c *config.Container) error {
 	return nil
 }
 
-func (m *Manager) CreateSnapshot(id int, createdBy string, scheduled bool, rotateLimit int, storagePoolID ...string) (config.Snapshot, error) {
+func (m *Manager) CreateSnapshot(id int, createdBy string, scheduled bool, rotateLimit int, descriptionAndStoragePool ...string) (config.Snapshot, error) {
 	releaseLock := acquireVMLock(id)
 	defer releaseLock()
+
+	description := ""
+	storagePoolID := ""
+	if len(descriptionAndStoragePool) > 0 {
+		description = strings.TrimSpace(descriptionAndStoragePool[0])
+	}
+	if len(descriptionAndStoragePool) > 1 {
+		storagePoolID = strings.TrimSpace(descriptionAndStoragePool[1])
+	}
 
 	c := config.FindContainer(id)
 	if c == nil {
@@ -1305,7 +1314,7 @@ func (m *Manager) CreateSnapshot(id int, createdBy string, scheduled bool, rotat
 	}
 	pool, err := config.SelectStoragePoolForContent(
 		config.StorageContentSnapshots,
-		firstString(storagePoolID),
+		storagePoolID,
 		dirSizeBytes(instanceDir),
 	)
 	if err != nil {
@@ -1388,6 +1397,7 @@ func (m *Manager) CreateSnapshot(id int, createdBy string, scheduled bool, rotat
 		ContainerID:   c.ID,
 		ContainerName: c.Name,
 		LXCName:       name,
+		Description:   description,
 		CreatedAt:     now.Format("2006-01-02 15:04:05"),
 		CreatedBy:     createdBy,
 		Scheduled:     scheduled,

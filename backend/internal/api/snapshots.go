@@ -104,6 +104,7 @@ func listContainerSnapshots(w http.ResponseWriter, r *http.Request, containerID 
 func createContainerSnapshot(w http.ResponseWriter, r *http.Request, containerID int) {
 	user := requestUser(r)
 	var req struct {
+		Description   string `json:"description"`
 		StoragePoolID string `json:"storage_pool_id"`
 	}
 	if r.Body != nil {
@@ -112,6 +113,7 @@ func createContainerSnapshot(w http.ResponseWriter, r *http.Request, containerID
 			return
 		}
 	}
+	req.Description = strings.TrimSpace(req.Description)
 	req.StoragePoolID = strings.TrimSpace(req.StoragePoolID)
 	if _, err := config.SelectStoragePoolForContent(config.StorageContentSnapshots, req.StoragePoolID, 0); err != nil {
 		jsonResponse(w, http.StatusConflict, APIResponse{Success: false, Message: err.Error()})
@@ -125,15 +127,15 @@ func createContainerSnapshot(w http.ResponseWriter, r *http.Request, containerID
 			return
 		}
 	}
-		snapshot, err := createSnapshotByRuntime(containerID, user, false, 0, req.StoragePoolID)
-		if err != nil {
-			jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: err.Error()})
-			return
-		}
-		// Auto sync snapshot to remote storage if enabled
-		remote.SyncSnapshotToRemoteStorage(&snapshot)
-		config.AddAuditLog("snapshot.create", snapshot.ContainerName, snapshot.ID, user)
-		jsonResponse(w, http.StatusCreated, APIResponse{Success: true, Data: snapshot})
+	snapshot, err := createSnapshotByRuntime(containerID, user, false, 0, req.Description, req.StoragePoolID)
+	if err != nil {
+		jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: err.Error()})
+		return
+	}
+	// Auto sync snapshot to remote storage if enabled
+	remote.SyncSnapshotToRemoteStorage(&snapshot)
+	config.AddAuditLog("snapshot.create", snapshot.ContainerName, snapshot.ID, user)
+	jsonResponse(w, http.StatusCreated, APIResponse{Success: true, Data: snapshot})
 }
 
 func updateSnapshotQuota(w http.ResponseWriter, r *http.Request, containerID int) {

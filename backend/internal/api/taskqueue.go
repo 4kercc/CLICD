@@ -164,6 +164,12 @@ func (q *TaskQueue) EnqueueBatchWithUser(taskType TaskType, ids []int, templateI
 }
 
 func (q *TaskQueue) EnqueueBatchWithAudit(taskType TaskType, ids []int, templateID string, user string, ip string, userAgent string) []string {
+	return q.EnqueueBatchWithNote(taskType, ids, templateID, "", user, ip, userAgent)
+}
+
+// EnqueueBatchWithNote is EnqueueBatchWithAudit with an optional note that
+// snapshot tasks store alongside the created snapshot.
+func (q *TaskQueue) EnqueueBatchWithNote(taskType TaskType, ids []int, templateID string, note string, user string, ip string, userAgent string) []string {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	var result []string
@@ -173,7 +179,7 @@ func (q *TaskQueue) EnqueueBatchWithAudit(taskType TaskType, ids []int, template
 		if c != nil {
 			name = c.Name
 		}
-		result = append(result, q.enqueueSingleWithAudit(id, name, taskType, templateID, user, ip, userAgent))
+		result = append(result, q.enqueueSingleWithAudit(id, name, taskType, templateID, note, user, ip, userAgent))
 	}
 	q.persistTasks()
 	return result
@@ -242,10 +248,12 @@ func (q *TaskQueue) enqueueSingle(containerID int, containerName string, taskTyp
 }
 
 func (q *TaskQueue) enqueueSingleWithUser(containerID int, containerName string, taskType TaskType, templateID string, user string) string {
-	return q.enqueueSingleWithAudit(containerID, containerName, taskType, templateID, user, "", "")
+	return q.enqueueSingleWithAudit(containerID, containerName, taskType, templateID, "", user, "", "")
 }
 
-func (q *TaskQueue) enqueueSingleWithAudit(containerID int, containerName string, taskType TaskType, templateID string, user string, ip string, userAgent string) string {
+// enqueueSingleWithAudit queues one task. taskName carries an optional free-form
+// label: for snapshot tasks it is persisted as the snapshot note.
+func (q *TaskQueue) enqueueSingleWithAudit(containerID int, containerName string, taskType TaskType, templateID string, taskName string, user string, ip string, userAgent string) string {
 	id := q.nextID
 	q.nextID++
 	task := &Task{
@@ -258,6 +266,7 @@ func (q *TaskQueue) enqueueSingleWithAudit(containerID int, containerName string
 		StageDetail:   "排队等待",
 		CreatedAt:     time.Now().Format("2006-01-02 15:04:05"),
 		TemplateID:    templateID,
+		Name:          taskName,
 		User:          user,
 		IP:            ip,
 		UserAgent:     userAgent,
@@ -283,7 +292,7 @@ func (q *TaskQueue) EnqueueSecurityStop(containerID int, containerName string) (
 		}
 	}
 
-	taskID := q.enqueueSingleWithAudit(containerID, containerName, TaskStop, "", "system:security", "", "")
+	taskID := q.enqueueSingleWithAudit(containerID, containerName, TaskStop, "", "", "system:security", "", "")
 	q.persistTasks()
 	return taskID, true
 }
@@ -535,7 +544,7 @@ func (q *TaskQueue) runOperationTask(task *Task) {
 			}
 		case TaskSnapshot:
 			var snap config.Snapshot
-			snap, err = createSnapshotByRuntime(task.ContainerID, auditUser, false, 0, task.TemplateID)
+			snap, err = createSnapshotByRuntime(task.ContainerID, auditUser, false, 0, task.Name, task.TemplateID)
 			if err == nil {
 				remote.SyncSnapshotToRemoteStorage(&snap)
 			}
@@ -901,6 +910,7 @@ func HandleBatchAction(w http.ResponseWriter, r *http.Request) {
 		Action        string `json:"action"`
 		Containers    []int  `json:"containers"`
 		TemplateID    string `json:"template_id,omitempty"`
+		Description   string `json:"description,omitempty"`
 		StoragePoolID string `json:"storage_pool_id,omitempty"`
 		SSHAuthMode   string `json:"ssh_auth_mode,omitempty"`
 		SSHPassword   string `json:"ssh_password,omitempty"`
@@ -990,7 +1000,7 @@ func HandleBatchAction(w http.ResponseWriter, r *http.Request) {
 			ids = append(ids, queued...)
 		}
 	} else {
-		ids = globalQueue.EnqueueBatchWithAudit(taskType, req.Containers, req.TemplateID, requestActor(r), clientIP(r), r.UserAgent())
+		ids = globalQueue.EnqueueBatchWithNote(taskType, req.Containers, req.TemplateID, strings.TrimSpace(req.Description), requestActor(r), clientIP(r), r.UserAgent())
 	}
 	jsonResponse(w, http.StatusAccepted, APIResponse{Success: true, Data: ids})
 }

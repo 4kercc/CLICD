@@ -417,17 +417,18 @@ func ensureSchema() error {
 			position INTEGER PRIMARY KEY,
 			image_id TEXT NOT NULL
 		)`,
-			`CREATE TABLE IF NOT EXISTS snapshots (
-				id TEXT PRIMARY KEY,
-				container_id INTEGER,
-				container_name TEXT,
-				lxc_name TEXT,
-				created_at TEXT,
-				created_by TEXT,
-				scheduled INTEGER,
-				path TEXT,
-				size_bytes INTEGER
-			)`,
+				`CREATE TABLE IF NOT EXISTS snapshots (
+					id TEXT PRIMARY KEY,
+					container_id INTEGER,
+					container_name TEXT,
+					lxc_name TEXT,
+					description TEXT NOT NULL DEFAULT '',
+					created_at TEXT,
+					created_by TEXT,
+					scheduled INTEGER,
+					path TEXT,
+					size_bytes INTEGER
+				)`,
 			`CREATE TABLE IF NOT EXISTS backups (
 				id TEXT PRIMARY KEY,
 				container_id INTEGER,
@@ -510,12 +511,13 @@ func ensureSchemaMigrations() error {
 			{"containers", "boot_media", "TEXT NOT NULL DEFAULT ''"},
 			{"containers", "firmware", "TEXT NOT NULL DEFAULT ''"},
 			{"containers", "nic_model", "TEXT NOT NULL DEFAULT ''"},
-						{"containers", "disk_bus", "TEXT NOT NULL DEFAULT ''"},
-						{"containers", "snapshot_schedule_max_copies", "INTEGER NOT NULL DEFAULT 0"},
-						{"containers", "init_script", "TEXT NOT NULL DEFAULT ''"},
-						{"containers", "extra_iso", "TEXT NOT NULL DEFAULT ''"},
-						{"tasks", "cfg_init_script", "TEXT NOT NULL DEFAULT ''"},
-				} {
+							{"containers", "disk_bus", "TEXT NOT NULL DEFAULT ''"},
+							{"containers", "snapshot_schedule_max_copies", "INTEGER NOT NULL DEFAULT 0"},
+							{"containers", "init_script", "TEXT NOT NULL DEFAULT ''"},
+							{"containers", "extra_iso", "TEXT NOT NULL DEFAULT ''"},
+							{"tasks", "cfg_init_script", "TEXT NOT NULL DEFAULT ''"},
+							{"snapshots", "description", "TEXT NOT NULL DEFAULT ''"},
+					} {
 		wasAdded, err := ensureColumn(column.table, column.name, column.def)
 		if err != nil {
 			return err
@@ -1060,8 +1062,8 @@ func saveEnabledImages(tx *sql.Tx) error {
 
 func saveSnapshots(tx *sql.Tx) error {
 	for _, snapshot := range AppConfig.Snapshots {
-		if _, err := tx.Exec(`INSERT INTO snapshots(id, container_id, container_name, lxc_name, created_at, created_by, scheduled, path, size_bytes)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, snapshot.ID, snapshot.ContainerID, snapshot.ContainerName, snapshot.LXCName, snapshot.CreatedAt, snapshot.CreatedBy, boolInt(snapshot.Scheduled), snapshot.Path, snapshot.SizeBytes); err != nil {
+		if _, err := tx.Exec(`INSERT INTO snapshots(id, container_id, container_name, lxc_name, description, created_at, created_by, scheduled, path, size_bytes)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, snapshot.ID, snapshot.ContainerID, snapshot.ContainerName, snapshot.LXCName, snapshot.Description, snapshot.CreatedAt, snapshot.CreatedBy, boolInt(snapshot.Scheduled), snapshot.Path, snapshot.SizeBytes); err != nil {
 			return err
 		}
 	}
@@ -1512,7 +1514,7 @@ func loadEnabledImages() ([]string, error) {
 }
 
 func loadSnapshots() ([]Snapshot, error) {
-	rows, err := db.Query(`SELECT id, container_id, container_name, lxc_name, created_at, created_by, scheduled, path, size_bytes FROM snapshots ORDER BY created_at, id`)
+	rows, err := db.Query(`SELECT id, container_id, container_name, lxc_name, description, created_at, created_by, scheduled, path, size_bytes FROM snapshots ORDER BY created_at, id`)
 	if err != nil {
 		return nil, err
 	}
@@ -1521,9 +1523,11 @@ func loadSnapshots() ([]Snapshot, error) {
 	for rows.Next() {
 		var snapshot Snapshot
 		var scheduled int
-		if err := rows.Scan(&snapshot.ID, &snapshot.ContainerID, &snapshot.ContainerName, &snapshot.LXCName, &snapshot.CreatedAt, &snapshot.CreatedBy, &scheduled, &snapshot.Path, &snapshot.SizeBytes); err != nil {
+		var description sql.NullString
+		if err := rows.Scan(&snapshot.ID, &snapshot.ContainerID, &snapshot.ContainerName, &snapshot.LXCName, &description, &snapshot.CreatedAt, &snapshot.CreatedBy, &scheduled, &snapshot.Path, &snapshot.SizeBytes); err != nil {
 			return nil, err
 		}
+		snapshot.Description = description.String
 		snapshot.Scheduled = scheduled != 0
 		result = append(result, snapshot)
 	}

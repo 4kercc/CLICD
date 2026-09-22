@@ -25,6 +25,7 @@ export default function BatchSnapshotModal({
   const [submitting, setSubmitting] = useState(false)
   const [storagePools, setStoragePools] = useState<StoragePool[]>([])
   const [selectedPoolID, setSelectedPoolID] = useState<string>('')
+  const [note, setNote] = useState('')
 
   useEffect(() => {
     if (isOpen) {
@@ -44,8 +45,9 @@ export default function BatchSnapshotModal({
     setSubmitting(true)
     try {
       const containerIDs = selectedContainers.map((c) => c.id)
-      await batchAction('snapshot', containerIDs, undefined, selectedPoolID || undefined)
+      await batchAction('snapshot', containerIDs, undefined, selectedPoolID || undefined, note.trim() || undefined)
       dialog.alert('已加入任务队列', `已成功将 ${selectedContainers.length} 个快照任务加入任务队列，系统将在后台自动排队执行`)
+      setNote('')
       onSuccess()
       onClose()
     } catch (err: any) {
@@ -88,6 +90,22 @@ export default function BatchSnapshotModal({
                   </span>
                 </div>
               ))}
+            </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-gray-700">备注 (可选，便于日后回退时辨认版本)：</label>
+            <textarea
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              maxLength={200}
+              rows={2}
+              placeholder="例如：批量升级前基线、装完业务环境…"
+              className="w-full resize-none rounded-md border border-gray-300 bg-white px-3 py-2 text-xs text-black focus:border-black focus:outline-none"
+            />
+            <div className="flex items-center justify-between text-[11px] text-gray-400">
+              <span>该备注会写入本批全部快照。</span>
+              <span className="font-mono">{note.length}/200</span>
             </div>
           </div>
 

@@ -129,11 +129,12 @@ export default function Snapshots() {
               <div className="text-sm font-medium text-gray-700">暂无轻量增量快照</div>
             </div>
           ) : (
-            <table className="w-full min-w-[820px] text-sm">
+            <table className="w-full min-w-[920px] text-sm">
               <thead className="border-b border-gray-200 bg-gray-50 text-xs text-gray-500">
                 <tr>
                   <th className="px-4 py-3 text-left font-medium">容器</th>
                   <th className="px-4 py-3 text-left font-medium">内部标识</th>
+                  <th className="px-4 py-3 text-left font-medium">备注</th>
                   <th className="px-4 py-3 text-left font-medium">快照时间</th>
                   <th className="px-4 py-3 text-left font-medium">类型</th>
                   <th className="px-4 py-3 text-left font-medium">创建者</th>
@@ -154,7 +155,14 @@ export default function Snapshots() {
                       </button>
                     </td>
                     <td className="px-4 py-3 font-mono text-xs text-gray-600">{snapshot.lxc_name}</td>
-                    <td className="px-4 py-3 text-gray-700">{snapshot.created_at}</td>
+                    <td className="max-w-[240px] px-4 py-3 text-xs text-gray-700">
+                      {snapshot.description ? (
+                        <span className="break-words" title={snapshot.description}>{snapshot.description}</span>
+                      ) : (
+                        <span className="text-gray-300">-</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 whitespace-nowrap text-gray-700">{snapshot.created_at}</td>
                     <td className="px-4 py-3">
                       <div className="inline-flex items-center gap-1">
                         <span className={`rounded px-2 py-0.5 text-xs ${snapshot.scheduled ? 'bg-blue-50 text-blue-700' : 'bg-gray-100 text-gray-700'}`}>
