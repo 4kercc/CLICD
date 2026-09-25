@@ -117,6 +117,23 @@ func ensureIndependentIPv4Ingress(c *config.Container, tag string) {
 			}
 			fmt.Printf("IPv4 passthrough (%s): %s -> %s (all ports)\n", proto, hostIP, c.IP)
 		}
+		// Echo requests belong to the container too. Without this the host answers
+		// pings on the container's public address, so a VM that never came up (or
+		// whose firewall blocks ICMP) still looks reachable.
+		icmpArgs := []string{
+			"-t", "nat",
+			"-I", "PREROUTING", "1",
+			"-d", hostIP,
+			"-p", "icmp",
+			"--icmp-type", "echo-request",
+			"-j", "DNAT",
+			"--to-destination", c.IP,
+			"-m", "comment", "--comment", fmt.Sprintf("clicd-%s-%s-all-icmp", tag, natRuleIPTag(hostIP)),
+		}
+		if output, err := exec.Command("iptables", icmpArgs...).CombinedOutput(); err != nil {
+			fmt.Printf("Warning: failed to apply icmp passthrough %s->%s: %v, output: %s\n",
+				hostIP, c.IP, err, strings.TrimSpace(string(output)))
+		}
 	}
 }
 
@@ -580,6 +597,10 @@ func (m *Manager) UpdatePublicIPv4Assignments(id int, requested []string, count 
 
 	_ = m.CleanPortMappings(id)
 	EnsureAssignedPublicIPv4s(c.PublicIPv4s)
+	// An address that just left this container must be unbound and stop being
+	// answered by the host; newly assigned ones must be guarded.
+	ReconcilePublicIPv4Aliases()
+	EnsurePublicIPv4LocalDeliveryGuard()
 	if c.Status == "running" && c.IP != "" {
 		if err := m.ApplyPortMappings(id); err != nil {
 			return nil, err

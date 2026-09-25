@@ -4823,6 +4823,10 @@ func (m *Manager) UpdatePublicIPv4Assignments(id int, requested []string, count 
 	lxcManager := lxc.NewManager()
 	_ = lxcManager.CleanPortMappings(id)
 	lxc.EnsureAssignedPublicIPv4s(c.PublicIPv4s)
+	// Releasing an address means releasing it everywhere: unbind the host alias
+	// and keep the local-delivery guard in step with the pool.
+	lxc.ReconcilePublicIPv4Aliases()
+	lxc.EnsurePublicIPv4LocalDeliveryGuard()
 	if c.Status == "running" && c.IP != "" {
 		if err := lxcManager.ApplyPortMappings(id); err != nil {
 			return nil, err

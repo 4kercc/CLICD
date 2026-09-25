@@ -3,6 +3,7 @@ package lxc
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"net/netip"
@@ -1006,6 +1007,192 @@ func EnsureAllAssignedPublicIPv4s() {
 	for i := range config.AppConfig.Containers {
 		EnsureAssignedPublicIPv4s(config.AppConfig.Containers[i].PublicIPv4s)
 	}
+	ReconcilePublicIPv4Aliases()
+	EnsurePublicIPv4LocalDeliveryGuard()
+}
+
+// publicIPv4HostAliasLabel marks the interface aliases CLICD adds for assigned
+// public IPv4 addresses. Only aliases carrying this label are ever cleaned up.
+const publicIPv4HostAliasLabel = ":clicd"
+
+// ReconcilePublicIPv4Aliases keeps host aliases in step with the assignment
+// table: an address that is no longer assigned to any container is removed from
+// the interface entirely.
+//
+// Without this, an address stays bound forever and the host keeps answering for
+// it — a released or never-assigned public IP would still reply on every port
+// from the host's own services instead of belonging to nobody.
+func ReconcilePublicIPv4Aliases() {
+	if config.AppConfig == nil {
+		return
+	}
+	assigned := assignedPublicIPv4Map(0)
+	for _, iface := range publicIPv4AliasInterfaces() {
+		for _, alias := range listPublicIPv4Aliases(iface) {
+			if assigned[alias.Address] {
+				continue
+			}
+			cidr := fmt.Sprintf("%s/%d", alias.Address, alias.PrefixLen)
+			if output, err := exec.Command("ip", "addr", "del", cidr, "dev", iface).CombinedOutput(); err != nil {
+				// The kernel may have dropped the alias already; only report
+				// unexpected failures to avoid noisy logs at every start.
+				if !strings.Contains(string(output), "Cannot assign requested address") {
+					fmt.Printf("Warning: failed to release unassigned public IPv4 %s from %s: %v, output: %s\n",
+						cidr, iface, err, strings.TrimSpace(string(output)))
+				}
+				continue
+			}
+			fmt.Printf("Released public IPv4 %s from %s (no longer assigned)\n", cidr, iface)
+		}
+	}
+}
+
+type publicIPv4HostAlias struct {
+	Address   string
+	PrefixLen int
+}
+
+// publicIPv4AliasInterfaces lists interfaces that currently carry a CLICD alias.
+func publicIPv4AliasInterfaces() []string {
+	addresses := detectPublicIPv4LocalAddresses()
+	seen := map[string]bool{}
+	result := []string{}
+	for _, item := range addresses {
+		if item.Interface == "" || seen[item.Interface] {
+			continue
+		}
+		seen[item.Interface] = true
+		result = append(result, item.Interface)
+	}
+	return result
+}
+
+// listPublicIPv4Aliases returns the addresses bound to iface with CLICD's alias
+// label, in the order the kernel reports them.
+func listPublicIPv4Aliases(iface string) []publicIPv4HostAlias {
+	out, err := exec.Command("ip", "-j", "-4", "addr", "show", "dev", iface).Output()
+	if err != nil {
+		return nil
+	}
+	var entries []struct {
+		AddrInfo []struct {
+			Local     string `json:"local"`
+			PrefixLen int    `json:"prefixlen"`
+			Label     string `json:"label"`
+		} `json:"addr_info"`
+	}
+	if err := json.Unmarshal(out, &entries); err != nil {
+		return nil
+	}
+	result := []publicIPv4HostAlias{}
+	for _, entry := range entries {
+		for _, info := range entry.AddrInfo {
+			if !strings.HasSuffix(info.Label, publicIPv4HostAliasLabel) || info.Local == "" {
+				continue
+			}
+			result = append(result, publicIPv4HostAlias{Address: info.Local, PrefixLen: info.PrefixLen})
+		}
+	}
+	return result
+}
+
+// EnsurePublicIPv4LocalDeliveryGuard stops the host itself from answering on the
+// public IPv4 addresses it routes for containers.
+//
+// Every such address is bound to the host interface so upstream ARP resolves,
+// which also makes the kernel deliver anything not forwarded to a container to
+// local sockets. That leaks the host's own services (sshd, the panel) onto every
+// container address, including addresses of stopped containers and addresses
+// that were never assigned at all — and it makes an unreachable VM look alive
+// because the host answers its pings. DNAT'd traffic is routed to the bridge and
+// never reaches INPUT, so dropping it here only removes the false replies.
+func EnsurePublicIPv4LocalDeliveryGuard() {
+	if config.AppConfig == nil {
+		return
+	}
+	guarded := map[string]bool{}
+	for _, address := range publicIPv4GuardTargets() {
+		guarded[address] = true
+		comment := publicIPv4GuardComment(address)
+		if iptablesRuleExists("filter", "INPUT", "-d", address, "-m", "comment", "--comment", comment, "-j", "DROP") {
+			continue
+		}
+		args := []string{"-I", "INPUT", "1", "-d", address, "-m", "comment", "--comment", comment, "-j", "DROP"}
+		if output, err := exec.Command("iptables", args...).CombinedOutput(); err != nil {
+			fmt.Printf("Warning: failed to guard public IPv4 %s against host-local delivery: %v, output: %s\n",
+				address, err, strings.TrimSpace(string(output)))
+		}
+	}
+	removeStalePublicIPv4Guards(guarded)
+}
+
+// publicIPv4GuardTargets is the union of the configured pool and every assigned
+// address, so an address is guarded even while it sits unassigned in the pool.
+func publicIPv4GuardTargets() []string {
+	seen := map[string]bool{}
+	result := []string{}
+	add := func(raw string) {
+		addr, err := netip.ParseAddr(strings.TrimSpace(raw))
+		if err != nil || !addr.Is4() {
+			return
+		}
+		normalized := addr.String()
+		if seen[normalized] {
+			return
+		}
+		seen[normalized] = true
+		result = append(result, normalized)
+	}
+	for _, item := range config.AppConfig.PublicIPv4Pool {
+		add(item.Address)
+	}
+	for address := range assignedPublicIPv4Map(0) {
+		add(address)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func publicIPv4GuardComment(address string) string {
+	return "clicd-pubguard-" + natRuleIPTag(address)
+}
+
+// iptablesRuleExists reports whether a rule is already present in the chain.
+func iptablesRuleExists(table, chain string, rule ...string) bool {
+	args := append([]string{"-t", table, "-C", chain}, rule...)
+	return exec.Command("iptables", args...).Run() == nil
+}
+
+// removeStalePublicIPv4Guards drops guard rules for addresses that left the pool
+// and are no longer assigned, so the rule set follows the configuration.
+func removeStalePublicIPv4Guards(keep map[string]bool) {
+	output, err := exec.Command("iptables-save", "-t", "filter").Output()
+	if err != nil {
+		return
+	}
+	const prefix = "--comment clicd-pubguard-"
+	for _, line := range strings.Split(string(output), "\n") {
+		idx := strings.Index(line, prefix)
+		if idx < 0 || !strings.HasPrefix(strings.TrimSpace(line), "-A INPUT") {
+			continue
+		}
+		comment := strings.TrimSpace(line[idx+len("--comment "):])
+		if keep[publicIPv4FromGuardComment(comment)] {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 || fields[0] != "-A" {
+			continue
+		}
+		args := append([]string{"-D", fields[1]}, fields[2:]...)
+		_ = exec.Command("iptables", args...).Run()
+	}
+}
+
+// publicIPv4FromGuardComment reverses natRuleIPTag (dots become underscores).
+func publicIPv4FromGuardComment(comment string) string {
+	tag := strings.TrimPrefix(comment, "clicd-pubguard-")
+	return strings.ReplaceAll(tag, "_", ".")
 }
 
 func publicIPv4InfoByAddress(address string) (PublicIPInfo, bool) {
