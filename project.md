@@ -1,12 +1,12 @@
 # CLICD 项目架构、功能设计与全景接力文档 (Project Handover Documentation)
 
-本文档面向后续 AI 接力开发与架构维护，全面汇总了 **CLICD (LXC/KVM 虚拟化管理面板)** 的系统架构、各模块代码职责、核心技术设计、近期的关键改动与演进记录（涵盖 v1.20 ~ v1.20.9，含 Telegram Bot、预设初始化命令、Windows 装机链路、额外挂载光盘、快照备注、快照占用统计与还原权限/镜像护栏等），并附带现存待办需求与运维指令。
+本文档面向后续 AI 接力开发与架构维护，全面汇总了 **CLICD (LXC/KVM 虚拟化管理面板)** 的系统架构、各模块代码职责、核心技术设计、近期的关键改动与演进记录（涵盖 v1.20 ~ v1.20.10，含 Telegram Bot、预设初始化命令、Windows 装机链路、额外挂载光盘、快照备注、快照占用统计与还原权限/镜像护栏等），并附带现存待办需求与运维指令。
 
 ---
 
 ## 📌 项目基本信息
 - **项目名称**：CLICD (Container & KVM Lifecycle Controller Daemon)
-- **当前版本**：`v1.20.9`
+- **当前版本**：`v1.20.10`
 - **代码仓库**：[https://github.com/4kercc/CLICD](https://github.com/4kercc/CLICD)
 - **测试验证服务器**：部署与验证均在自备测试机上进行（主机地址与账号凭据单独保管，不入库、不写入本文档）
 - **面板运行地址**：测试机 `http://<测试机地址>:<面板端口>/`（凭据单独保管）
@@ -88,7 +88,7 @@
 - **实机验证（测试机）**：vm-25 按修复逻辑归一化权限后 `virsh start` 成功；把 vm-3 目录改回 `root:root 0700` 后面板开机触发自愈（权限自动回到 `libvirt-qemu:kvm`）；生产函数输出 `custom-kvm-f58ab36672 -> [jsq-windows]`、`custom-kvm-9a78b2756f -> [kylin-v10]`；对两个镜像分别调用「删除缓存」与「移除镜像源」，均 409 并指名 `jsq-windows`（测试前用 reflink 克隆做安全网，测后删除）；坏 VirtIO 文件触发 `cached virtio-win.iso is unusable (only 4473 bytes)` 并在上游返回 HTML 时明确拒绝。`go vet` 与 `go test ./...` 全绿。
 - **遗留**：`kylin-v10`(vm-3) 的母盘不可恢复，需重新下载（`latest` 上游可能已更新，与旧 overlay 不一致）或直接删除该实例重建。
 
-### 4. 🔎 启动任务误报成功与等待窗口修复 + 一次母盘数据救援 (v1.20.9)
+### 4. 🔎 启动任务误报成功与等待窗口修复 + 一次母盘数据救援 (v1.20.10)
 - **① 启动任务"假成功"**：`StartContainer` 的 Linux 分支用 `if c.IP == ""` 判断是否检测到地址，但 KVM 实例有静态 DHCP 绑定，`c.IP` 通常保留着上一次的地址 → 保护永不触发，任务对不存在的地址 SSH 重试 3 分钟后**仍返回成功**，端口映射也按未经验证的历史地址下发。修复：改用本次启动内新检测到的 `detectedIP` 作判据。
 - **② 等待窗口按轮数而非时长**：原 `for i := 0; i < 90 { 探测; sleep 2s }`，而每次地址探测本身耗时数秒（租约 + ARP），"90 轮"实际被拖成十几分钟，表现为任务长时间 running。修复：改为**墙钟 3 分钟**（`kvmIPv4WaitWindow`，Windows 分支 30 秒 `kvmIPv4WaitWindowWindows`），失败时报告真实等待时长。
 - **③ 数据救援（非代码改动，但结论必须留档）**：vm-3 反复报 `Cannot access backing file '.../custom-kvm-9a78b2756f.qcow2'`。**该「镜像」并非下载而来**——journal 记录 `cp /home/cvc/vm-101-disk-0.qcow2 /var/lib/clicd/images/kvm/custom-kvm-9a78b2756f.qcow2`，即 PVE 迁移时手工拷贝的母盘（注册时填的 cloud.debian.org URL 与内容无关，且上游已于 09-23 重建，重下会拿到不同文件而损坏 overlay）。源文件仍在且虚拟大小 60 GiB 完全匹配，按原路径 reflink 克隆恢复后链路打通、实例正常开机。

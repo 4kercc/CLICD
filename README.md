@@ -206,7 +206,7 @@ curl -fsSL https://raw.githubusercontent.com/4kercc/CLICD/main/install.sh | sudo
   - `go vet` 与 `go test ./...` 全绿（新增 `TestFixKVMInstancePermissionsMakesRestoredInstanceReachable`）。
 - **遗留事项**：`kylin-v10`(vm-3) 的母盘 `custom-kvm-9a78b2756f.qcow2` 已不可恢复，需重新下载该镜像（记录仍指向 `cloud.debian.org` bookworm `latest`，若上游镜像已更新则与旧 overlay 不一致，建议直接重装该实例）或删除该实例。
 
-### 19. 🔎 启动任务误报成功与等待窗口修复，并还原一台被删母盘的实例 (Start Task Honesty - v1.20.9)
+### 19. 🔎 启动任务误报成功与等待窗口修复，并还原一台被删母盘的实例 (Start Task Honesty - v1.20.10)
 - **现象**：`kylin-v10`(vm-3) 母盘恢复后可以开机，但启动任务长时间处于 running（用户体感就是"任务又卡住了"），日志每 15 秒刷 `failed to sync KVM network: no IPv4 address found`，**最终却以「成功」收尾**——用户看到的是"提示启动成功但连不上"。
 - **根因（两处）**：
   1. `StartContainer` 用 `if c.IP == ""` 判断"是否检测到地址"，但 KVM 实例有静态 DHCP 绑定，`c.IP` 通常保留着上一次的地址，于是这条保护**永远不触发**：真失败被吞掉、端口映射按未经验证的历史地址下发、随后 `waitForCloudInitReady` 对着一个不存在的地址 SSH 重试满 3 分钟。
