@@ -1154,8 +1154,12 @@ func publicIPv4GuardTargets() []string {
 }
 
 func publicIPv4GuardComment(address string) string {
-	return "clicd-pubguard-" + natRuleIPTag(address)
+	return publicIPv4GuardCommentPrefix + natRuleIPTag(address)
 }
+
+// publicIPv4GuardCommentPrefix tags the INPUT rules that stop the host from
+// answering on container public addresses.
+const publicIPv4GuardCommentPrefix = "clicd-pubguard-"
 
 // iptablesRuleExists reports whether a rule is already present in the chain.
 func iptablesRuleExists(table, chain string, rule ...string) bool {
@@ -1170,18 +1174,21 @@ func removeStalePublicIPv4Guards(keep map[string]bool) {
 	if err != nil {
 		return
 	}
-	const prefix = "--comment clicd-pubguard-"
+	keepComments := make(map[string]bool, len(keep))
+	for address := range keep {
+		keepComments[publicIPv4GuardComment(address)] = true
+	}
 	for _, line := range strings.Split(string(output), "\n") {
-		idx := strings.Index(line, prefix)
-		if idx < 0 || !strings.HasPrefix(strings.TrimSpace(line), "-A INPUT") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "-A INPUT") {
 			continue
 		}
-		comment := strings.TrimSpace(line[idx+len("--comment "):])
-		if keep[publicIPv4FromGuardComment(comment)] {
+		comment := iptablesCommentOf(trimmed)
+		if !strings.HasPrefix(comment, publicIPv4GuardCommentPrefix) || keepComments[comment] {
 			continue
 		}
-		fields := strings.Fields(line)
-		if len(fields) < 2 || fields[0] != "-A" {
+		fields := strings.Fields(trimmed)
+		if len(fields) < 2 {
 			continue
 		}
 		args := append([]string{"-D", fields[1]}, fields[2:]...)
@@ -1189,10 +1196,19 @@ func removeStalePublicIPv4Guards(keep map[string]bool) {
 	}
 }
 
-// publicIPv4FromGuardComment reverses natRuleIPTag (dots become underscores).
-func publicIPv4FromGuardComment(comment string) string {
-	tag := strings.TrimPrefix(comment, "clicd-pubguard-")
-	return strings.ReplaceAll(tag, "_", ".")
+// iptablesCommentOf extracts the value of a --comment argument from a rule line.
+// The comment is a single token, so everything after it belongs to the rest of
+// the rule and must not be swallowed.
+func iptablesCommentOf(line string) string {
+	idx := strings.Index(line, "--comment ")
+	if idx < 0 {
+		return ""
+	}
+	rest := strings.TrimSpace(line[idx+len("--comment "):])
+	if space := strings.IndexAny(rest, " \t"); space >= 0 {
+		rest = rest[:space]
+	}
+	return strings.Trim(strings.TrimSpace(rest), `"`)
 }
 
 func publicIPv4InfoByAddress(address string) (PublicIPInfo, bool) {
