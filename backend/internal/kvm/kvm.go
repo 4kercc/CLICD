@@ -698,6 +698,15 @@ func (m *Manager) defineContainer(id int, vmName string, cfg lxc.ContainerConfig
 	return container, nil
 }
 
+// Boot windows used by StartContainer to wait for a guest IPv4 address. Linux
+// guests must report an address before port mapping and readiness checks make
+// sense; Windows guests boot into a manual installer, so they get a short probe
+// and the task proceeds either way.
+const (
+	kvmIPv4WaitWindow        = 3 * time.Minute
+	kvmIPv4WaitWindowWindows = 30 * time.Second
+)
+
 func (m *Manager) StartContainer(id int) error {
 	c := config.FindContainer(id)
 	if c == nil {
@@ -745,29 +754,24 @@ func (m *Manager) StartContainer(id int) error {
 	// before the task still reported success.
 	detectedIP := ""
 	ipWaitStart := time.Now()
+	// Bound the wait by wall clock, not by iteration count: address detection
+	// itself can take seconds per probe (lease lookup plus ARP), so "90 rounds"
+	// silently stretched into many minutes of a task that looked stuck.
+	ipDeadline := ipWaitStart.Add(kvmIPv4WaitWindow)
 	if isWindows {
-		for i := 0; i < 15; i++ {
-			if ip, err := m.GetContainerIP(name); err == nil && ip != "" {
-				detectedIP = ip
-				c.IP = ip
-				config.SaveConfig()
-				break
-			}
-			time.Sleep(2 * time.Second)
+		ipDeadline = ipWaitStart.Add(kvmIPv4WaitWindowWindows)
+	}
+	for time.Now().Before(ipDeadline) {
+		if ip, err := m.GetContainerIP(name); err == nil && ip != "" {
+			detectedIP = ip
+			c.IP = ip
+			config.SaveConfig()
+			break
 		}
-	} else {
-		for i := 0; i < 90; i++ {
-			if ip, err := m.GetContainerIP(name); err == nil && ip != "" {
-				detectedIP = ip
-				c.IP = ip
-				config.SaveConfig()
-				break
-			}
-			time.Sleep(2 * time.Second)
-		}
-		if detectedIP == "" {
-			return fmt.Errorf("KVM VM %s started but no IPv4 address was detected within %s; the guest may still be booting, or its NIC does not accept the assigned address %q — fix the guest network inside the VM, then start it again", c.Name, time.Since(ipWaitStart).Round(time.Second), c.IP)
-		}
+		time.Sleep(2 * time.Second)
+	}
+	if detectedIP == "" && !isWindows {
+		return fmt.Errorf("KVM VM %s started but no IPv4 address was detected within %s; the guest may still be booting, or its NIC is not configured for this network (assigned address %q) — fix the network inside the VM, then start it again", c.Name, time.Since(ipWaitStart).Round(time.Second), c.IP)
 	}
 	// Apply port mappings if IP is available (Linux: always; Windows: after installation)
 	if c.IP != "" {
