@@ -177,6 +177,9 @@ export default function ContainerDetail() {
   const vncFullscreenRef = useRef<HTMLDivElement>(null)
   const [vncFullscreen, setVncFullscreen] = useState(false)
   const [showNat, setShowNat] = useState(false)
+  const [showServicePort, setShowServicePort] = useState(false)
+  const [servicePortDraft, setServicePortDraft] = useState(22)
+  const [savingServicePort, setSavingServicePort] = useState(false)
   const [showIPAssign, setShowIPAssign] = useState(false)
   const [savingIPAssign, setSavingIPAssign] = useState(false)
   const [ipv4AssignMode, setIPv4AssignMode] = useState<IPAssignMode>('clear')
@@ -1121,6 +1124,47 @@ export default function ContainerDetail() {
     setShowSnapshotCreate(true)
   }
 
+  const openServicePortAdjust = () => {
+    if (!container || isSubUser) return
+    if (!serviceMapping) {
+      dialog.alert('没有可调整的端口映射', '该实例没有 SSH/RDP 端口映射，无法调整入口指向的端口。')
+      return
+    }
+    setServicePortDraft(serviceMapping.container_port)
+    setShowServicePort(true)
+  }
+
+  const saveServicePort = async () => {
+    if (!container || !serviceMapping) return
+    const port = Math.round(Number(servicePortDraft))
+    if (!Number.isFinite(port) || port < 1 || port > 65535) {
+      dialog.alert('输入错误', '端口必须是 1-65535 之间的数字')
+      return
+    }
+    if (port === serviceMapping.container_port) {
+      setShowServicePort(false)
+      return
+    }
+    setSavingServicePort(true)
+    try {
+      await updatePortMapping(container.id, serviceMappingIndex, {
+        container_port: port,
+        host_port: serviceMapping.host_port,
+        host_ip: serviceMapping.host_ip,
+        protocol: serviceMapping.protocol,
+        description: serviceMapping.description,
+      })
+      setShowServicePort(false)
+      await fetchContainer()
+      dialog.alert('端口映射已更新', `公网入口现在转发到客户机端口 ${port}，请确认客户机上的服务确实监听该端口。`)
+    } catch (err: unknown) {
+      const error = err as { response?: { data?: { message?: string } } }
+      dialog.alert('保存失败', error.response?.data?.message || '请稍后重试')
+    } finally {
+      setSavingServicePort(false)
+    }
+  }
+
   const handleCreateSnapshot = async () => {
     if (!containerIdentifier) return
     if (container?.status === 'running') {
@@ -1647,6 +1691,16 @@ export default function ContainerDetail() {
   const hasIndependentIPv4 = assignedIPv4List.length > 0
   const hasIndependentIPv6 = ipv6List.length > 0
   const defaultConnPort = isWindows ? 3389 : 22
+  // With an independent public IPv4 every port is forwarded 1:1, so the guest's
+  // real service port is reachable on the public address. When the panel has a
+  // mapping that redirects the service entry (e.g. SSH 22002 → 2222), the port
+  // inside that mapping is the one actually listening in the guest.
+  const wantServiceDesc = isWindows ? 'RDP' : 'SSH'
+  const serviceMappingIndex = container.port_mappings?.findIndex(m =>
+    m.description === wantServiceDesc || m.container_port === defaultConnPort
+  ) ?? -1
+  const serviceMapping = serviceMappingIndex >= 0 ? container.port_mappings?.[serviceMappingIndex] : undefined
+  const serviceRealPort = serviceMapping?.container_port || defaultConnPort
   const snapshotStoragePools = (storageInfo?.pools || []).filter((pool) =>
     pool.enabled !== false && pool.available !== false && (pool.content_types || []).includes('snapshots')
   )
@@ -1656,15 +1710,16 @@ export default function ContainerDetail() {
   let sshCommand = ''
 
   if (hasIndependentIPv4) {
-    // Direct connection via independent IPv4 — all ports forwarded
-    publicEndpoint = `${assignedIPv4List[0]}:${defaultConnPort}`
+    // Direct connection via independent IPv4 — all ports forwarded 1:1, so the
+    // guest's real service port answers directly on the public address.
+    publicEndpoint = `${assignedIPv4List[0]}:${serviceRealPort}`
     if (!isWindows) {
-      sshCommand = `ssh root@${assignedIPv4List[0]}`
+      sshCommand = `ssh -p ${serviceRealPort} root@${assignedIPv4List[0]}`
     }
   } else if (hasIndependentIPv6) {
-    publicEndpoint = `[${ipv6List[0]}]:${defaultConnPort}`
+    publicEndpoint = `[${ipv6List[0]}]:${serviceRealPort}`
     if (!isWindows) {
-      sshCommand = `ssh root@[${ipv6List[0]}]`
+      sshCommand = `ssh -p ${serviceRealPort} root@[${ipv6List[0]}]`
     }
   } else if (container.ssh_port > 0) {
     // NAT port mapping mode
@@ -1897,7 +1952,13 @@ export default function ContainerDetail() {
                   </span>
                 )}
                 <InfoTag color="slate">类型 {(container.virtualization || 'lxc').toUpperCase()}</InfoTag>
-                <InfoTag color="emerald">内网 {container.ip || '-'}</InfoTag>
+                <span
+                  onDoubleClick={openServicePortAdjust}
+                  className={!isSubUser ? 'cursor-pointer' : ''}
+                  title={!isSubUser ? '双击调整 SSH/RDP 端口映射（公网入口 → 客户机真实端口）' : undefined}
+                >
+                  <InfoTag color="emerald">内网 {container.ip || '-'}</InfoTag>
+                </span>
                 {hasIndependentIPv4 ? (
                   <InfoTag color="amber">独立 IPv4 {assignedIPv4List[0]}</InfoTag>
                 ) : (
@@ -1954,10 +2015,10 @@ export default function ContainerDetail() {
                 管理链接
               </ActionButton>
             )}
-            {!hasIndependentIPv4 && hasNATQuota && (
+            {(hasIndependentIPv4 || hasNATQuota) && (
               <ActionButton disabled={isSubUserPolicyBlocked} onClick={() => setShowNat(true)}>
                 <Settings className="w-3.5 h-3.5" />
-                NAT 规则
+                {hasIndependentIPv4 ? '端口映射' : 'NAT 规则'}
               </ActionButton>
             )}
             <ActionButton onClick={openFirewall} disabled={isSubUserPolicyBlocked}>
@@ -3032,8 +3093,8 @@ export default function ContainerDetail() {
         </Modal>
       )}
 
-      {showNat && !hasIndependentIPv4 && (
-        <Modal title="NAT 规则" onClose={() => { setShowNat(false); setDraft(emptyDraft); setShowMappingEditor(false); setPortTestResults(null) }} wide extra={
+      {showNat && (
+        <Modal title={hasIndependentIPv4 ? '端口映射（独立公网 IPv4）' : 'NAT 规则'} onClose={() => { setShowNat(false); setDraft(emptyDraft); setShowMappingEditor(false); setPortTestResults(null) }} wide extra={
           <div className="flex items-center gap-2">
             <button
               onClick={runPortTest}
@@ -3052,6 +3113,14 @@ export default function ContainerDetail() {
           </div>
         }>
           <div className="space-y-5">
+            {hasIndependentIPv4 && (
+              <div className="rounded-md border border-blue-100 bg-blue-50 px-3 py-2.5 text-xs leading-relaxed text-blue-800">
+                该实例已分配独立公网 IPv4（{assignedIPv4List[0]}）：<strong>所有端口已 1:1 透传到实例</strong>，
+                无需逐条配置。下方映射用于把特定公网端口重定向到实例内的其它端口（例如 SSH 入口
+                <span className="font-mono"> {assignedIPv4List[0]}:{serviceMapping?.host_port ?? (container.ssh_port || '-')} </span>
+                → 客户机 <span className="font-mono">{serviceMapping?.container_port ?? '-'}</span>），自定义映射优先于全端口透传。
+              </div>
+            )}
             <div className="flex items-center justify-between gap-4">
               <div className="text-xs text-gray-500">
                 {hasNATQuota ? (
@@ -3109,6 +3178,52 @@ export default function ContainerDetail() {
                 </div>
               </div>
             )}
+          </div>
+        </Modal>
+      )}
+
+      {showServicePort && serviceMapping && (
+        <Modal title="调整服务端口映射" onClose={() => { if (!savingServicePort) setShowServicePort(false) }}>
+          <div className="space-y-4">
+            <div className="rounded-md border border-blue-100 bg-blue-50 px-3 py-2 text-xs leading-relaxed text-blue-800">
+              该实例已分配独立公网 IPv4（{assignedIPv4List[0]}），<strong>所有端口已 1:1 透传到实例</strong>。
+              此映射用于把公网服务入口重定向到客户机上真实监听的端口，保存后立即生效。
+            </div>
+            <div className="rounded-md border border-gray-200 bg-gray-50 px-3 py-2.5 font-mono text-xs text-gray-700">
+              公网入口：{assignedIPv4List[0]}:{serviceMapping.host_port}
+              {serviceMapping.host_ip ? `（绑定 ${serviceMapping.host_ip}）` : ''}
+            </div>
+            <div>
+              <label className="mb-1.5 block text-xs font-medium text-gray-600">客户机真实端口</label>
+              <input
+                type="number"
+                min={1}
+                max={65535}
+                value={servicePortDraft}
+                onChange={(e) => setServicePortDraft(Math.max(1, Math.min(65535, Math.round(Number(e.target.value) || 0))))}
+                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-black focus:outline-none focus:ring-1 focus:ring-black"
+              />
+              <p className="mt-1.5 text-[11px] leading-4 text-gray-400">
+                例如客户机 sshd 实际监听 2222 而不是 22，就填 2222 —— 之后用公网地址的这个入口即可连上。
+                请确认客户机上的服务真的监听该端口，否则入口会不可达。
+              </p>
+            </div>
+            <div className="flex justify-end gap-2 pt-1">
+              <button
+                onClick={() => setShowServicePort(false)}
+                disabled={savingServicePort}
+                className="rounded-md border border-gray-300 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+              >
+                取消
+              </button>
+              <button
+                onClick={saveServicePort}
+                disabled={savingServicePort}
+                className="rounded-md bg-black px-4 py-2 text-sm text-white hover:bg-gray-800 disabled:opacity-50"
+              >
+                {savingServicePort ? '保存中...' : '保存'}
+              </button>
+            </div>
           </div>
         </Modal>
       )}
