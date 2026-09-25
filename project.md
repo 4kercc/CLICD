@@ -1,12 +1,12 @@
 # CLICD 项目架构、功能设计与全景接力文档 (Project Handover Documentation)
 
-本文档面向后续 AI 接力开发与架构维护，全面汇总了 **CLICD (LXC/KVM 虚拟化管理面板)** 的系统架构、各模块代码职责、核心技术设计、近期的关键改动与演进记录（涵盖 v1.20 ~ v1.20.10，含 Telegram Bot、预设初始化命令、Windows 装机链路、额外挂载光盘、快照备注、快照占用统计与还原权限/镜像护栏等），并附带现存待办需求与运维指令。
+本文档面向后续 AI 接力开发与架构维护，全面汇总了 **CLICD (LXC/KVM 虚拟化管理面板)** 的系统架构、各模块代码职责、核心技术设计、近期的关键改动与演进记录（涵盖 v1.20 ~ v1.20.11，含 Telegram Bot、预设初始化命令、Windows 装机链路、额外挂载光盘、快照备注、快照占用统计与还原权限/镜像护栏等），并附带现存待办需求与运维指令。
 
 ---
 
 ## 📌 项目基本信息
 - **项目名称**：CLICD (Container & KVM Lifecycle Controller Daemon)
-- **当前版本**：`v1.20.10`
+- **当前版本**：`v1.20.11`
 - **代码仓库**：[https://github.com/4kercc/CLICD](https://github.com/4kercc/CLICD)
 - **测试验证服务器**：部署与验证均在自备测试机上进行（主机地址与账号凭据单独保管，不入库、不写入本文档）
 - **面板运行地址**：测试机 `http://<测试机地址>:<面板端口>/`（凭据单独保管）
@@ -95,7 +95,16 @@
 - **运维铁律**：迁移进来的母盘（`custom-kvm-9a78b2756f`、`custom-kvm-f58ab36672` 等，后者 URL 为 `https://example.com/...` 占位）**绝不能删**，删掉无法重新下载；`/home/cvc/vm-101-disk-0.qcow2`(60 GiB)、`/home/cvc/vm-301-disk-0.qcow2`(100 GiB) 是它们的原始迁移源盘，属最后一道保险，禁止清理。判断依赖一律用 backing chain（见第 3 节②），不要相信 `Template` 标签或注册 URL。
 - **实机验证**：恢复后 vm-3 控制台截屏为麒麟桌面登录界面（用户 `cvc`/`dmdba`/`user`、系统时间同步，原数据完好）；`net-dhcp-leases` 获得 192.168.122.251、ARP REACHABLE、`domifstat` 收发非零、宿主机 ping 0% 丢包；另在 00:09:53 的一次**真实快照还原**后确认 vm-25 目录归属为 `libvirt-qemu:kvm`（第 3 节①的修复在生产路径上得到验证）。`go vet` 与 `go test ./...` 全绿。
 
-### 5. 🤖 原生内置 Telegram Bot 模块 (v1.20.4)
+### 5. 🌐 公网 IP 分配策略审计与修复：宿主代答、别名回收与 ICMP 透传 (v1.20.11)
+- **触发**：给 vm-3 分配独立公网 `23.95.253.12` 后「连不通」。审计后确认两个真实缺陷（外加一个测试视角误导）。
+- **缺陷① 宿主机在公网 IP 上代答（安全 + 误导）**：`EnsureAssignedPublicIPv4s()` 为每个已分配 IPv4 在出口网卡加别名（`eno1:clicd`，上游 ARP 必需），但**没有回收逻辑**——别名一旦加上永久保留。宿主机拥有了该地址，任何未被 DNAT 转发的端口就被交给本机服务，于是未分配的 `.13`、已关机实例的 `.11` 上，宿主机 sshd/面板对公网开放（实测 `.11:22` 从外部直连到宿主机 sshd），用户看到「IP 有响应却连不上自己的服务」。
+  - 修复：新增 `ReconcilePublicIPv4Aliases()`（仅清理带 `:clicd` 标签且不再属于任何实例的别名，启动时与每次分配变更后执行）与 `EnsurePublicIPv4LocalDeliveryGuard()`（对「池内 + 已分配」全部公网地址加 `INPUT -d <ip> -j DROP`，注释统一为 `clicd-pubguard-<ipTag>`，配置变更时自动清理过期规则）。DNAT 后的流量被路由到网桥、不经过 INPUT，故守卫只消除假应答，不影响转发与 SNAT 回程（已实测客户机出网会话保持 ESTABLISHED）。
+- **缺陷② ICMP 不进 DNAT，ping 由宿主机代答**：全端口透传只覆盖 tcp/udp，`ping 公网IP` 一直是宿主机内核回复——客户机没起来、或客户机防火墙挡了 ICMP，ping 依旧「通」。修复：在 `ensureIndependentIPv4Ingress()` 增加 `-p icmp --icmp-type echo-request -j DNAT --to-destination <guest>`（注释同前缀，随 `CleanPortMappings` 一起清理）。
+- **数据修正**：vm-3 的 SSH 映射由 `22002 → 22` 改为 `22002 → 2222`（该麒麟系统 sshd 实际监听 2222，原映射指向空端口）。
+- **测试视角铁律**：**内网机器访问自家公网 IP 属 hairpin，必然失败**——客户机发现目标同网段会直接二层回包、绕过宿主机，发起方等不到来源为公网 IP 的回复。验证公网可达性必须用外部节点；本次诊断中我一度误判，正因为所在的 Windows 主机本身就是 vm-4（其出口公网 IP 恰为 `.10`）。若要让内网也能用公网 IP 访问，需额外加 `-m conntrack --ctstate DNAT` 的 hairpin MASQUERADE。
+- **实机验证**：以跨网段 LXC 容器（源 `10.0.3.x`，回包必经宿主机）为测试客户端——`.12:2222` 可连、`.13:22`/`.13:80`/`.11:22` 全不可连（修复前这些由宿主机应答）、内网直连对照正常；宿主机 `ping` 公网 IP 由「能通」变为 100% 丢包；客户机出网 SNAT 会话 ESTABLISHED；5 个独立外部节点连接 `.12:2222` 全部成功。
+
+### 6. 🤖 原生内置 Telegram Bot 模块 (v1.20.4)
 - **免公网 Webhook**：基于 Go 标准库 `net/http` 原生实现 Telegram 长轮询 (`getUpdates`)，母鸡无需额外域名和 SSL 反代即可直接通信。
 - **安全白名单鉴权**：强制校验请求来源 `Chat ID`，非白名单请求直接忽略丢弃。
 - **快捷指令菜单自动下发**：服务启动及更新 Token 时自动调用 Telegram 官方 API (`setMyCommands`) 同步注册 `/menu`、`/status`、`/list`、`/batch`、`/web`、`/help` 菜单。
@@ -109,7 +118,7 @@
 - **主动告警推送**：安全引擎触发挖矿告警、暴力破解或流量超标自动关机时，自动调用 `telegram.Global().SendSecurityAlert` / `SendEventNotification` 向管理员 TG 推送结构化报警卡片。
 - **前端配置管理与脱敏**：在 `Settings.tsx` 中新增「Telegram Bot」专区，API 接口返回脱敏掩码（`895065...PWaQ`），支持配置 Bot Token、Chat ID 白名单、推送开关及「发送测试消息」连通性测试。
 
-### 6. 🛡️ Web 访问入口安全控制与应急自愈 (v1.20.5+)
+### 7. 🛡️ Web 访问入口安全控制与应急自愈 (v1.20.5+)
 - **双重控制机制**：
   - **Telegram 远程控制**：在 Bot 中输入 `/web` 或点击菜单一键关闭/开启 Web 访问入口；
   - **本地 CLI 命令行控制**：在宿主机终端输入 `sudo clicd web on` / `sudo clicd web off` / `sudo clicd web toggle` / `sudo clicd web status` 随时启闭与查询状态；
@@ -117,25 +126,25 @@
 - **404 隐身伪装防护**：当 Web 入口关闭时，系统所有页面及 `/api/` 路由均统一返回原生 `404 Not Found`，不暴露任何面板特征或服务信息。
 - **登录界面脱敏**：登录页面移除了版本号（`CLICD v1.2.0`）展示，防止外部侦察版本特征。
 
-### 7. 🔀 内网 (NAT) IP 分配视图与手动修改 (v1.20.5)
+### 8. 🔀 内网 (NAT) IP 分配视图与手动修改 (v1.20.5)
 - **背景**：解决以前用户无法直观查看小鸡内网 IP 分配，以及无法根据需求手动固定内网 IP 的问题。
 - **前端支持**：在 `Routing.tsx` 的「内网 (NAT) IP 分配」表格中新增「修改」操作按钮与弹窗，支持合法 IP 校验与重复冲突拦截。
 - **后端支持 (`PUT /api/v1/routing/nat-allocation`)**：
   - **LXC 容器**：自动同步更新 `/etc/lxc/dnsmasq.conf` 的 `dhcp-host=<mac>,<ip>` 静态租期，向 dnsmasq 发送 `SIGHUP` 信号热重载，更新容器内 `10-eth0.network` 与 `/etc/network/interfaces`，并在运行状态下调用 `lxc-attach` 刷新客机网络及更新 iptables DNAT 规则。
   - **KVM 虚拟机**：自动调用 `virsh net-update default add ip-dhcp-host` 绑定 libvirt 静态租期并同步更新 iptables 规则。
 
-### 8. 🛡️ LXC 硬件 MAC 固化与 IP 防漂移 (v1.20.5)
+### 9. 🛡️ LXC 硬件 MAC 固化与 IP 防漂移 (v1.20.5)
 - **根因分析**：LXC 默认配置中未指定 `lxc.net.0.hwaddr`，导致每次容器重启底层都会随机生成新 MAC，促使 `dnsmasq` 重新下发新 IP。
 - **修复方案**：新增 `ensureLXCMACAddress` 与 `randomLXCMAC`，在容器创建和启动前自动注入固化 MAC 地址至 `/var/lib/lxc/<name>/config` 与数据库，彻底消除重启后内网 IP 变动缺陷。
 
-### 9. 🌐 NAT 子网过滤与防 Docker 网桥干扰 (v1.20.5)
+### 10. 🌐 NAT 子网过滤与防 Docker 网桥干扰 (v1.20.5)
 - 强化 `GetContainerIP` 与 `firstIPv4` 探针逻辑，引入 `IsValidLXCNATIP`（`10.0.3.0/24`）与 `IsValidKVMNATIP`（`192.168.122.0/24`），严格过滤排除 Docker 网桥（`172.17.0.1`）等外部网卡的干扰，保证内部 IP 与端口转发的准确性。
 
-### 10. 🛠️ 批量修改配置 & 批量打快照 (v1.20.5)
+### 11. 🛠️ 批量修改配置 & 批量打快照 (v1.20.5)
 - **批量修改配置 (`POST /api/v1/batch-config`)**：支持勾选多台实例批量调整硬件配置、网络限速、磁盘限速、流量模式/重置、到期时间、端口/快照配额与批量密码重置，支持字段级细粒度覆盖且运行中实例热应用生效。
 - **任务队列节流批量快照 (`TaskSnapshot`)**：多选容器后一键打快照并自动排队入队 `TaskQueue`，严格受 `maxConcurrency` 节流，杜绝母鸡 I/O 阻塞。
 
-### 11. 🚀 容器/虚拟机预设初始化命令 (Init Script) (v1.20.7)
+### 12. 🚀 容器/虚拟机预设初始化命令 (Init Script) (v1.20.7)
 - **需求背景**：用户在创建单台实例、批量开设或重装实例时，支持配置自定义的「预设初始化命令/脚本 (Init Script)」。实例在首次启动就绪（连网成功）后在后台自动静默执行预设命令（如自动安装 `wget`、`curl`、`lrzsz`、`iftop`、`htop`、`docker` 等常用工具），无需人工登录逐台装包。
 - **KVM Linux (Cloud-Init `seed.iso`)**：在 `backend/internal/kvm/kvm.go` 的 `createSeedISO` 中将用户的 `InitScript` 追加至 `#cloud-config` 的 `runcmd` 列表，虚拟机首次开机后自动执行并将日志重定向输出至客机 `/var/log/clicd-init-script.log`。
 - **KVM Windows (Unattend ISO)**：在 `backend/internal/kvm/kvm.go` 的 `windowsFirstLogonPowerShell` 中将 `InitScript` 写入 `FirstLogon.ps1` 尾部，并在首次管理员登录时通过 PowerShell 静默执行并记录日志至 `C:\CLICD\init.log`。
@@ -157,7 +166,7 @@
   - **脚本执行器封装增强**：在 `backend/internal/lxc/lxc.go` 的 `ExecuteInitScriptAsync` 中改为生成沙箱临时脚本 `/tmp/.clicd_init_script.sh`（带 `chmod +x` 与 `set -e` 自动保护），并优化前端预设填充逻辑采用换行分割拼接，彻底消除多行 Shell 命令的语法解析隐患。
   - **实机全量验证通过**：在测试服务器上创建实例 `ccc-good`，注入「常用工具包 (`wget/curl/lrzsz/iftop/htop/btop/net-tools`) + 官方 Docker Engine 安装脚本」，验证客机内 `/usr/bin/htop`、`/usr/sbin/iftop`、`/usr/bin/wget`、`/usr/bin/curl` 及 `docker-ce` 全部安装就绪，日志记录完整。
 
-### 12. 🔐 Telegram 登录成功提醒 (v1.20.7)
+### 13. 🔐 Telegram 登录成功提醒 (v1.20.7)
 - **需求背景**：为及时感知控制面板的登录行为，Telegram Bot 新增「登录提醒」能力。**仅在登录成功时推送**，登录失败（密码错误、账号不存在、2FA 校验失败、子用户无可用容器等）一律不推送，避免被爆破尝试刷屏。
 - **推送内容**：登录账号（含身份角色：超级管理员 / 子用户 / 子用户快捷链接）、来源 IP、客户端 User-Agent、节点主机名与登录时间，便于第一时间识别异常来源。
 - **数据结构**：
@@ -176,7 +185,7 @@
     `[Telegram] Login notification pushed: user=user-668ed93b role=子用户 ip=192.168.122.84:62463`，确认消息已成功投递至管理员 TG（无发送失败日志）。
   - 验证结束后已清理临时子用户数据并重启服务，环境恢复原状。
 
-### 13. 💿 KVM Windows ISO 挂载防呆与 `__invalid_image_id__` 启动报错修复 (v1.20.7)
+### 14. 💿 KVM Windows ISO 挂载防呆与 `__invalid_image_id__` 启动报错修复 (v1.20.7)
 - **根因分析**：
   - 在生成 Windows 虚拟机的 Libvirt Domain XML 时，此前直接调用了 `ImagePath(c.Template)`；当用户修改了虚拟机模板标识或直接导入外部磁盘镜像时，`ImagePath` 会返回不存在的默认占位符 `/var/lib/clicd/images/kvm/__invalid_image_id__.iso` 并强行作为光驱写入配置，导致 QEMU 启动时检测到文件不存在报错 `Cannot access storage file ... No such file or directory`。
 - **修复方案**：
@@ -188,7 +197,7 @@
 - **实机验证（测试机）**：
   - 成功为运行中的 Windows 虚拟机 `vm-4`（`jsq-windows`）热挂载 `/var/lib/clicd/images/kvm/custom-kvm-770d5fc03f.iso` 到虚拟光驱 `hdb`，`virsh domblklist vm-4` 确认光驱源已正确更新为自定义 ISO。
 
-### 14. ⚡ Usage 资源指标 5 秒硬超时与列表渲染解耦 (v1.20.7)
+### 15. ⚡ Usage 资源指标 5 秒硬超时与列表渲染解耦 (v1.20.7)
 - **问题背景**：当个别容器或虚拟机处于特殊 I/O 阻塞或 QEMU Agent 挂起时，单次 `usage` 获取可能拖慢或挂起 HTTP 接口，导致前端实例列表长时间处于加载中状态。
 - **后端兜底截断 (`backend/internal/api/runtime.go`)**：
   - 在 `usageByRuntime` 中增加 `context.WithTimeout(context.Background(), 5*time.Second)` 硬超时保护。
@@ -199,7 +208,7 @@
 - **安装脚本自动修复 Libvirt AppArmor 驱动 (`install.sh`)**：
   - `setup_libvirt_security_driver` 在安装初始化时自动检测并写入 `/etc/libvirt/qemu.conf` 中的 `security_driver = "none"` 并重启 libvirtd，防止宿主机 AppArmor 拦截对 COW 母盘增量链的跨目录读写。
 
-### 15. 🪟 创建向导「选 Windows 却装出 Debian 12」根因修复 (v1.20.8)
+### 16. 🪟 创建向导「选 Windows 却装出 Debian 12」根因修复 (v1.20.8)
 - **问题现象**：在创建向导中选择 Windows 镜像，创建出来的实例却仍然是 Debian 12；且自定义 Windows 镜像在网络步骤显示为 SSH 22 而非 RDP 3389。
 - **根因（三处叠加缺陷）**：
   1. **前端 Windows 识别错误**：`isWindowsTemplate()` 仅用 `templateID.includes('windows')` 做字符串匹配，而用户自定义镜像的 ID 形如 `custom-kvm-42e957647c`（不含 windows），导致自定义 Windows 镜像被当作 Linux 处理。
@@ -215,7 +224,7 @@
   - **重要提示**：镜像 `custom-kvm-770d5fc03f`（`windows server 2019` / `2019-virto.iso`，2.2GB）经校验 **缺少 El Torito 引导记录（第 17 扇区为终止描述符，且 Boot System ID 为 LINUX）**，属不可引导的数据盘，任何平台都无法用它安装系统；请改用 `custom-kvm-42e957647c`（`cn_windows_server_2019_x64_dvd_4de40f33_virtio_20190225.iso`，5.3GB，第 17 扇区为 `EL TORITO SPECIFICATION`）等可引导安装镜像。
   - 验证完成后已删除测试实例 `win-verify`、`win2019-check`，服务器环境恢复原状。
 
-### 16. ⏱️ 「一直卡在关机中 / 无法删除」任务假死修复 (v1.20.8)
+### 17. ⏱️ 「一直卡在关机中 / 无法删除」任务假死修复 (v1.20.8)
 - **问题现象**：实例停在「关机中…」按钮状态长时间不结束，期间删除等操作全部排队不动，看起来像卡死无法移除。
 - **根因（两处长等待，被误判为死锁）**：
   1. **KVM 关机固定等待 45 秒**：`StopContainer` 先发 ACPI 关机再轮询 45 秒。对于系统盘还是空的 Windows 实例（正在跑安装程序 / 从未装系统），客户机根本不响应 ACPI，于是必然耗满 45 秒才强制断电。
@@ -231,7 +240,7 @@
   - 全链路复测（新建 → 关机 → 删除）：关机 6 秒、删除 2 秒，实例彻底移除；`virsh domblkinfo` 校验阈值判定正确（已装 Linux 28534 MiB / 已装 Windows 35432 MiB → 走 45 秒优雅窗口；空盘 36 MiB → 走 5 秒快速断电）。
   - 验证实例已删除，服务器仅保留原有 10 个实例。
 
-### 17. 📄 容器列表分页与批量勾选体验优化 (v1.20.8)
+### 18. 📄 容器列表分页与批量勾选体验优化 (v1.20.8)
 - **需求背景**：容器列表每页只支持 10/20/50 且默认 10，批量运维时可见与可勾选的实例太少。
 - **改动内容（`frontend/src/pages/Containers.tsx`）**：
   - **默认每页 20 条**，可选项扩展为 **10 / 20 / 50 / 100**，满足「一页尽量多看、好批量勾选」的诉求。
@@ -240,7 +249,7 @@
 - **国际化**：为新增文案（`取消选择` / 表头提示）补充 `utils/i18n.ts` 词条，英文界面下正常显示。
 - **实机验证（测试机）**：浏览器实测确认默认选中 20、下拉含 10/20/50/100、选择 100 后刷新仍为 100、「取消选择」可清空勾选。
 
-### 18. 🧩 第三方 WinPE / WePE 镜像无法添加修复 (v1.20.8)
+### 19. 🧩 第三方 WinPE / WePE 镜像无法添加修复 (v1.20.8)
 - **问题现象**：在「镜像管理 → 第三方镜像」中选择 **WinPE / WePE** 模板并点击 Add and Download，弹窗底部报错 `unsupported unattended installation template`，镜像无法注册。
 - **根因分析**：后端 `backend/internal/api/images.go` 的 `handleCustomKVMImageCreate` 中，`switch req.Provisioner` 只处理了 `linux-cloud-init` / `windows-10` / `windows-11` 三种无人值守模板，**遗漏了早已在 `config.KVMProvisionerWindowsPE`（`windows-pe`）中定义、前端也已提供入口的 WinPE 类型**，于是落入 `default` 分支直接返回该错误。下载校验（`validateWindowsISO` 的 `isPE` 分支）与 PE 识别（`Image.IsWindowsPE()`）本就已支持，因此仅需补齐注册分支。
 - **修复方案（`backend/internal/api/images.go`）**：新增 `case config.KVMProvisionerWindowsPE`：
@@ -250,7 +259,7 @@
   - WinPE 属纯引导维护镜像，不生成无人值守应答文件（注释已注明）。
 - **实机验证（测试机）**：用弹窗实际提交的完整载荷（`provisioner=windows-pe`、`distro=wepe`、`release=pe`、`arch=amd64`）调用接口，注册由原先的 400 报错变为 **201 成功**（`custom-kvm-*`），并确认已正确落盘到 SQLite `app_meta.custom_kvm_images`；重复 URL 会按既有规则返回 409 去重提示。验证用的临时镜像条目已删除，镜像列表恢复原状。
 
-### 19. 🌐 英文界面残留中文清理与 i18n 覆盖补全 (v1.20.8)
+### 20. 🌐 英文界面残留中文清理与 i18n 覆盖补全 (v1.20.8)
 - **问题现象**：切换到英文后面板仍夹杂中文，且存在「半翻译」混合串，例如 `Disk总线`、`Network InterfacesDriver`、`Page 台Container`、`同步Failed`、`已Config`。
 - **根因分析**：
   1. `utils/i18n.ts` 的 `exact` 词典缺少大量界面文案词条（新增功能时只写了中文文案，未同步补词条）。
@@ -268,7 +277,7 @@
   - `i18n-duplicates.mjs`：重复键 **0**（清理 12 处，保留原有措辞以免影响既有页面）。
 - **重要排查提示**：英文模式的翻译由 `AutoTranslate` 组件在 `requestAnimationFrame` 回调中批量应用，**标签页处于后台/隐藏时浏览器不会触发 rAF**，此时实时抓取页面会看到未翻译文本；判断覆盖率请以可见标签页或上述静态校验脚本为准。
 
-### 20. 💿 额外挂载光盘（独立光驱）+ 服务器镜像选择器 (v1.20.8)
+### 21. 💿 额外挂载光盘（独立光驱）+ 服务器镜像选择器 (v1.20.8)
 - **需求背景**：
   1. 「自定义挂载 ISO 路径」会**整体替换**镜像自带的光盘。对于 `firepe` 这类 PE 镜像，用户期望的是「先由自带 PE 盘启动进入 PE，再从另一块光驱读 Windows 安装盘」，而不是被自定义 ISO 抢占启动盘。
   2. 该输入框要求手填宿主机绝对路径，容易写错。
