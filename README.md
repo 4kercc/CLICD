@@ -206,6 +206,17 @@ curl -fsSL https://raw.githubusercontent.com/4kercc/CLICD/main/install.sh | sudo
   - `go vet` 与 `go test ./...` 全绿（新增 `TestFixKVMInstancePermissionsMakesRestoredInstanceReachable`）。
 - **遗留事项**：`kylin-v10`(vm-3) 的母盘 `custom-kvm-9a78b2756f.qcow2` 已不可恢复，需重新下载该镜像（记录仍指向 `cloud.debian.org` bookworm `latest`，若上游镜像已更新则与旧 overlay 不一致，建议直接重装该实例）或删除该实例。
 
+### 19. 🔎 启动任务误报成功与等待窗口修复，并还原一台被删母盘的实例 (Start Task Honesty - v1.20.9)
+- **现象**：`kylin-v10`(vm-3) 母盘恢复后可以开机，但启动任务长时间处于 running（用户体感就是"任务又卡住了"），日志每 15 秒刷 `failed to sync KVM network: no IPv4 address found`，**最终却以「成功」收尾**——用户看到的是"提示启动成功但连不上"。
+- **根因（两处）**：
+  1. `StartContainer` 用 `if c.IP == ""` 判断"是否检测到地址"，但 KVM 实例有静态 DHCP 绑定，`c.IP` 通常保留着上一次的地址，于是这条保护**永远不触发**：真失败被吞掉、端口映射按未经验证的历史地址下发、随后 `waitForCloudInitReady` 对着一个不存在的地址 SSH 重试满 3 分钟。
+  2. 等待写成 `for i := 0; i < 90` 轮，而每轮地址探测本身就要数秒（租约查询 + ARP），于是"90 轮"被拖成十几分钟，表面上像卡死。
+- **修复**：改用本次启动内新检测到的 `detectedIP` 作为判据（不再拿历史 `c.IP` 当证据），等待窗口改为**墙钟 3 分钟**（Windows 分支 30 秒，保持"不强制要 IP"的既有语义），失败时报告真实等待时长与所记录的历史地址。涉及 `backend/internal/kvm/kvm.go`。
+- **同一轮还完成了一次真实的数据救援**：审计日志显示 `custom-kvm-9a78b2756f.qcow2` 缺失导致 vm-3 反复开机失败。翻查 journal 发现该「镜像」并非从 cloud.debian.org 下载，而是**从 `/home/cvc/vm-101-disk-0.qcow2` 手工拷贝进来的 PVE 母盘**（注册时填的 URL 与内容无关）。源文件仍在，虚拟大小 60 GiB 与 overlay 完全匹配——按原路径 reflink 克隆恢复后，`qemu-img --backing-chain` 立刻打通两层，实例正常开机。
+- **实机验证**：恢复后 vm-3 截屏可见麒麟桌面登录界面（用户 `cvc`/`dmdba`/`user` 与系统时间同步，证明原数据完好）；`virsh net-dhcp-leases` 拿到 192.168.122.251、ARP REACHABLE、网卡收发非零、宿主机 ping 0% 丢包；`go vet` 与 `go test ./...` 全绿。
+- **运维提示（重要）**：迁移进来的母盘（如 `custom-kvm-9a78b2756f`、`custom-kvm-f58ab36672`，后者 URL 还是 `https://example.com/...` 占位）**无法通过"重新下载"恢复**，删掉即永久丢失。本轮新增的 backing chain 删除护栏正是为此；另在 `/home/cvc/` 保留了它们的原始迁移源盘（`vm-101-disk-0.qcow2` 60 GiB、`vm-301-disk-0.qcow2` 100 GiB），是最后一道保险，请勿清理。
+
+
 
 
 
