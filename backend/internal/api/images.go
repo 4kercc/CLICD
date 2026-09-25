@@ -537,6 +537,21 @@ func handleCustomKVMImageCreate(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusCreated, APIResponse{Success: true, Message: "Custom image added", Data: image})
 }
 
+// imageInUseMessage reports why an image's cached file must not be deleted, or
+// an empty string when nothing depends on it.
+//
+// The container Template check alone is not enough: operators rename the label
+// freely, so a VM created from custom-kvm-abc can report template "kylin" while
+// still booting through that image as its qcow2 backing file. Deleting it then
+// breaks the VM permanently.
+func imageInUseMessage(imageID string) string {
+	names := kvm.InstancesUsingImage(imageID)
+	if len(names) == 0 {
+		return ""
+	}
+	return "This image is still the backing file of: " + strings.Join(names, ", ") + ". Those VMs cannot start without it; remove them or switch their disk first."
+}
+
 func handleCustomKVMImageDelete(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ID string `json:"id"`
@@ -561,6 +576,14 @@ func handleCustomKVMImageDelete(w http.ResponseWriter, r *http.Request) {
 	for i := range config.AppConfig.Containers {
 		if config.AppConfig.Containers[i].Template == req.ID {
 			jsonResponse(w, http.StatusConflict, APIResponse{Success: false, Message: "This image is still used by a container"})
+			return
+		}
+	}
+	// A VM whose disk derives from this image is just as dependent on it as one
+	// still labelled with the template id.
+	if isCustomKVM {
+		if msg := imageInUseMessage(req.ID); msg != "" {
+			jsonResponse(w, http.StatusConflict, APIResponse{Success: false, Message: msg})
 			return
 		}
 	}
@@ -999,6 +1022,10 @@ func HandleImageDelete(w http.ResponseWriter, r *http.Request) {
 	tmpl := lxc.FindTemplate(req.TemplateID)
 	if tmpl == nil {
 		if image := kvm.FindImage(req.TemplateID); image != nil {
+			if msg := imageInUseMessage(image.ID); msg != "" {
+				jsonResponse(w, http.StatusConflict, APIResponse{Success: false, Message: msg})
+				return
+			}
 			if err := kvm.DeleteImage(image.ID); err != nil {
 				jsonResponse(w, http.StatusInternalServerError, APIResponse{Success: false, Message: "Failed to delete image cache: " + err.Error()})
 				return

@@ -708,6 +708,11 @@ func (m *Manager) StartContainer(id int) error {
 	}
 	lxc.EnsureAssignedPublicIPv4s(c.PublicIPv4s)
 	name := c.VirshName()
+	// Restoring a snapshot or backup copies the 0700 root-owned snapshot tree back
+	// into the instance directory, which leaves the disk unreadable by the QEMU
+	// user (uid 64055) until someone chowns it by hand. Normalize on every start
+	// so a restored VM (and any VM broken by an older version) self-heals.
+	fixKVMInstancePermissions(m.instanceDir(name))
 	if err := m.ensureDomainDefinition(c); err != nil {
 		fmt.Printf("Warning: failed to refresh KVM domain definition for %s: %v\n", name, err)
 	}
@@ -1505,6 +1510,7 @@ func (m *Manager) RestoreSnapshot(id string) error {
 		return fmt.Errorf("failed to restore snapshot: %v", err)
 	}
 	_ = os.RemoveAll(backupDir)
+	fixKVMInstancePermissions(instanceDir)
 	if err := undefineDomain(name); err != nil {
 		fmt.Printf("Warning: failed to undefine %s before restore redefine: %v\n", name, err)
 	}
@@ -1679,6 +1685,144 @@ func firstString(values []string) string {
 		return ""
 	}
 	return strings.TrimSpace(values[0])
+}
+
+// kvmQEMUIdentity resolves the user/group libvirt runs QEMU under. distro
+// packaging is inconsistent (libvirt-qemu on Debian/Ubuntu, qemu elsewhere), so
+// probe the usual candidates instead of hardcoding one.
+func kvmQEMUIdentity() (string, string) {
+	for _, user := range []string{"libvirt-qemu", "qemu"} {
+		if err := exec.Command("id", "-u", user).Run(); err != nil {
+			continue
+		}
+		group := user
+		if out, err := exec.Command("id", "-gn", user).Output(); err == nil {
+			if name := strings.TrimSpace(string(out)); name != "" {
+				group = name
+			}
+		}
+		return user, group
+	}
+	return "", ""
+}
+
+// fixKVMInstancePermissions normalizes an instance directory so the QEMU process
+// can reach its disk image.
+//
+// Snapshot and backup directories are written 0700 root:root; copyTree copies
+// those modes straight back into instances/vm-X on restore, and QEMU then fails
+// with `Cannot access storage file ... (as uid:64055): Permission denied`. The
+// directory only needs to be traversable by its owner, so instead of loosening
+// it to world-readable (which would expose every tenant disk to local users) we
+// hand both directory and files to the QEMU user.
+func fixKVMInstancePermissions(instanceDir string) {
+	if instanceDir == "" {
+		return
+	}
+	if _, err := os.Stat(instanceDir); err != nil {
+		return
+	}
+	user, group := kvmQEMUIdentity()
+	if user != "" {
+		_ = exec.Command("chown", "-R", user+":"+group, instanceDir).Run()
+		// 0700 keeps the guest disk unreadable to other local accounts; the QEMU
+		// user owns it, so traversal works.
+		_ = os.Chmod(instanceDir, 0700)
+		_ = filepath.Walk(instanceDir, func(path string, info os.FileInfo, err error) error {
+			if err != nil || info == nil || info.IsDir() {
+				return nil
+			}
+			_ = os.Chmod(path, 0644)
+			return nil
+		})
+		return
+	}
+	// No QEMU user found: fall back to modes that work regardless of ownership.
+	_ = os.Chmod(instanceDir, 0755)
+	_ = filepath.Walk(instanceDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info == nil {
+			return nil
+		}
+		if info.IsDir() {
+			_ = os.Chmod(path, 0755)
+		} else {
+			_ = os.Chmod(path, 0644)
+		}
+		return nil
+	})
+}
+
+// instanceDiskChain lists every file referenced by a KVM instance's disk image:
+// the disk itself plus each layer of its backing chain. -U (--force-share) is
+// needed to read the chain of a running domain, which holds the image lock.
+func instanceDiskChain(diskPath string) []string {
+	if strings.TrimSpace(diskPath) == "" {
+		return nil
+	}
+	attempts := [][]string{
+		{"info", "-U", "--backing-chain", "--output=json", diskPath},
+		{"info", "-U", "--output=json", diskPath},
+	}
+	seen := map[string]bool{}
+	var result []string
+	for _, args := range attempts {
+		out, err := exec.Command("qemu-img", args...).Output()
+		if err != nil {
+			continue
+		}
+		var entries []map[string]interface{}
+		if err := json.Unmarshal(out, &entries); err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			for _, key := range []string{"filename", "full-backing-filename", "backing-filename"} {
+				value, _ := entry[key].(string)
+				value = strings.TrimSpace(value)
+				if value == "" || seen[value] {
+					continue
+				}
+				seen[value] = true
+				result = append(result, value)
+			}
+		}
+		if len(result) > 0 {
+			break
+		}
+	}
+	return result
+}
+
+// InstancesUsingImage lists the KVM instances whose disk chain references the
+// image, directly or through an intermediate overlay.
+//
+// The container's Template field is a free-form display label operators rename
+// by hand (a VM from custom-kvm-abc may report template "kylin"), so the qcow2
+// backing chain is the only trustworthy source of truth. Deleting an image that
+// still appears here strands those VMs with `Cannot access backing file ...
+// No such file or directory`, which is unrecoverable once the file is gone.
+func InstancesUsingImage(imageID string) []string {
+	if strings.TrimSpace(imageID) == "" {
+		return nil
+	}
+	target := filepath.Clean(ImagePath(imageID))
+	targetName := filepath.Base(target)
+	var result []string
+	for i := range config.AppConfig.Containers {
+		c := &config.AppConfig.Containers[i]
+		if !c.IsKVM() || strings.TrimSpace(c.DiskImage) == "" {
+			continue
+		}
+		for _, ref := range instanceDiskChain(c.DiskImage) {
+			cleaned := filepath.Clean(ref)
+			// Match the base name too: the path recorded inside a qcow2 header
+			// goes stale if the image directory ever moves.
+			if cleaned == target || filepath.Base(cleaned) == targetName {
+				result = append(result, c.Name)
+				break
+			}
+		}
+	}
+	return result
 }
 
 func copyFile(src, dst string) error {
@@ -1914,6 +2058,7 @@ func (m *Manager) RestoreBackup(id string) error {
 		return fmt.Errorf("failed to restore backup: %v", err)
 	}
 	_ = os.RemoveAll(tmpBackupDir)
+	fixKVMInstancePermissions(instanceDir)
 	_ = undefineDomain(name)
 	xmlPath := filepath.Join(instanceDir, "domain.xml")
 	if out, err := exec.Command("virsh", "define", xmlPath).CombinedOutput(); err != nil {
@@ -2659,10 +2804,54 @@ func (m *Manager) GetGuestAgentStatus(id int) (bool, map[string]interface{}, err
 	return true, fsData, nil
 }
 
+// virtioWinISOUsable rejects anything that is not a real optical image. The
+// mirror sits behind bot protection that answers with an HTML challenge page and
+// HTTP 200, so a failed download used to be renamed into place as a 4 KB .iso and
+// every later mount silently presented an unreadable disc to the guest.
+func virtioWinISOUsable(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	const minSize = int64(100 * 1024 * 1024)
+	if info.Size() < minSize {
+		return fmt.Errorf("file is only %d bytes (expected at least %d)", info.Size(), minSize)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	head := make([]byte, 512)
+	n, err := io.ReadFull(file, head)
+	if err != nil && err != io.ErrUnexpectedEOF {
+		return err
+	}
+	prefix := strings.ToLower(strings.TrimSpace(string(head[:n])))
+	if strings.Contains(prefix, "<html") || strings.Contains(prefix, "<!doctype html") {
+		return fmt.Errorf("file is an HTML page, not an ISO")
+	}
+	// ISO9660 primary volume descriptor magic at offset 0x8001.
+	magic := make([]byte, 5)
+	if _, err := file.ReadAt(magic, 0x8001); err != nil {
+		return fmt.Errorf("file is too short to be an ISO image: %v", err)
+	}
+	if string(magic) != "CD001" {
+		return fmt.Errorf("missing ISO9660 signature (found %q)", string(magic))
+	}
+	return nil
+}
+
 func ensureVirtioWinISO() error {
 	virtioPath := virtioWinISOPath()
-	if _, err := os.Stat(virtioPath); err == nil {
-		return nil
+	if _, statErr := os.Stat(virtioPath); statErr == nil {
+		usableErr := virtioWinISOUsable(virtioPath)
+		if usableErr == nil {
+			return nil
+		}
+		fmt.Printf("Warning: cached virtio-win.iso is unusable (%v); re-downloading\n", usableErr)
+		_ = os.Remove(virtioPath)
 	}
 	if err := os.MkdirAll(CacheDir(), 0755); err != nil {
 		return err
@@ -2670,15 +2859,22 @@ func ensureVirtioWinISO() error {
 	virtioURL := "https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/stable-virtio/virtio-win.iso"
 	tmp := virtioPath + ".tmp"
 	_ = os.Remove(tmp)
-	if err := downloadFile(context.Background(), virtioURL, tmp, nil); err != nil {
+	if err := downloadFileWithValidator(context.Background(), virtioURL, tmp, validateWindowsISOResponse(virtioPath), nil); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("failed to download virtio-win.iso: %v", err)
+	}
+	if err := virtioWinISOUsable(tmp); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("downloaded virtio-win.iso is not a usable optical image (%v); the mirror may be serving a bot-check page. Upload a real virtio-win.iso to %s manually", err, virtioPath)
 	}
 	if err := os.Rename(tmp, virtioPath); err != nil {
 		_ = os.Remove(tmp)
 		return err
 	}
 	_ = os.Chmod(virtioPath, 0644)
+	if user, group := kvmQEMUIdentity(); user != "" {
+		_ = exec.Command("chown", user+":"+group, virtioPath).Run()
+	}
 	return nil
 }
 
