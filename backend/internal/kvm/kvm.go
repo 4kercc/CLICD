@@ -737,9 +737,18 @@ func (m *Manager) StartContainer(id int) error {
 	// VM whose disk is still empty blocks this task for the full Linux IP window
 	// and every queued stop/delete behind it looks stuck in the panel.
 	isWindows := looksLikeWindowsTemplate(c.Template)
+	// Track what this boot actually observed. The record already holds the
+	// address handed out last time (KVM guests get a static DHCP binding), so
+	// testing c.IP would always "see" an address: the no-IP guard would never
+	// fire, the port mappings would be applied to an address the guest may not
+	// have taken, and the wait-for-SSH step would dial a dead host for minutes
+	// before the task still reported success.
+	detectedIP := ""
+	ipWaitStart := time.Now()
 	if isWindows {
 		for i := 0; i < 15; i++ {
 			if ip, err := m.GetContainerIP(name); err == nil && ip != "" {
+				detectedIP = ip
 				c.IP = ip
 				config.SaveConfig()
 				break
@@ -749,14 +758,15 @@ func (m *Manager) StartContainer(id int) error {
 	} else {
 		for i := 0; i < 90; i++ {
 			if ip, err := m.GetContainerIP(name); err == nil && ip != "" {
+				detectedIP = ip
 				c.IP = ip
 				config.SaveConfig()
 				break
 			}
 			time.Sleep(2 * time.Second)
 		}
-		if c.IP == "" {
-			return fmt.Errorf("KVM VM %s started but no IPv4 address was detected", c.Name)
+		if detectedIP == "" {
+			return fmt.Errorf("KVM VM %s started but no IPv4 address was detected within %s; the guest may still be booting, or its NIC does not accept the assigned address %q — fix the guest network inside the VM, then start it again", c.Name, time.Since(ipWaitStart).Round(time.Second), c.IP)
 		}
 	}
 	// Apply port mappings if IP is available (Linux: always; Windows: after installation)
