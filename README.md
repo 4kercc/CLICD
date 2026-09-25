@@ -183,6 +183,30 @@ curl -fsSL https://raw.githubusercontent.com/4kercc/CLICD/main/install.sh | sudo
 - **附带结论（写给后续维护者）**：`du` 会把 reflink 共享块在每个文件里各算一遍，因此面板上所有基于 `du` 的体积（含快照目录合计）都是**上界**而非真实物理占用；同一台机上实测 3 份 `jsq-windows` 快照逻辑合计 61.55 GiB，真正独占仅 18.14 GiB。**该特性依赖宿主文件系统**：ext4 或无 reflink 的 XFS 上同一份代码会退化为真实全量复制（几十 GB、耗时数分钟）。
 - **实机验证**：接口返回 `unique_bytes` 数值与 `filefrag` 独立统计一致（`jsq-windows` 最新快照逻辑 29.26 GiB / 独占 0.18→0.24 GiB，随时间增长；`kylin-v10` 0.21 / 0.00 GiB），全局列表首次 1.02s、缓存后 0.05s，LXC 快照正确返回 `null`；前端 `tsc + vite build` 通过，i18n 重复键 0。
 
+### 18. 🛠️ 三个由审计日志暴露的稳定性缺陷修复 (Restore Permissions / Image Delete Guard / VirtIO ISO - v1.20.9)
+- **① 快照/备份还原后虚拟机无法开机（Permission denied）**
+  - **现象**：审计日志连续报 `virsh start failed: Cannot access storage file '.../vm-25/disk.qcow2' (as uid:64055): Permission denied`。
+  - **根因**：快照与备份目录以 `0700 root:root` 创建，`RestoreSnapshot` / `RestoreBackup` 用 `copyTree` 把它们原样复制回 `instances/vm-X`，非 root 的 QEMU 进程（libvirt-qemu，uid 64055）连目录都进不去。
+  - **修复**：新增 `kvmQEMUIdentity()`（探测 `libvirt-qemu`/`qemu` 的用户与主组）与 `fixKVMInstancePermissions()`，在 **每次开机前** 以及两个还原流程 `copyTree` 之后调用。目录保持 `0700`（避免把租户磁盘暴露给其它本地账号），只把属主交给 QEMU 用户；探测不到 QEMU 用户时退回 `0755/0644` 保证仍能启动。同类修复曾在 `215a65f` 提交过，但在 main 分支历史重置中丢失，本次连同回归测试一起重新落地。
+- **② 删除镜像导致实例永久损坏（Cannot access backing file）**
+  - **现象**：`kylin-v10`(vm-3) 反复报 `Cannot access backing file '.../custom-kvm-9a78b2756f.qcow2' ...: No such file or directory`，全盘已无该文件副本，实例数据不可恢复。
+  - **根因**：删除镜像只校验 `container.Template == imageID`，而 `Template` 是运维可随意改写的展示标签（`kylin-v10` 的标签是 `kylin`，`jsq-win-2019` 是 `windows`）。用户移除 `custom-kvm-9a78b2756f` 后，vm-3 的 overlay 立刻失去 backing file。
+  - **修复**：新增 `kvm.InstancesUsingImage()`，用 `qemu-img info -U --backing-chain --output=json` 读取**真实 qcow2 依赖链**（`-U` 才能读运行中实例），并按文件名主干匹配（`ImagePath` 对 windows 镜像会猜成 `.iso`，按路径比对必然失配）；母盘缺失导致 `qemu-img` 打不开时，回退**直接解析 qcow2 头**读 backing 路径，避免漏判。`handleCustomKVMImageDelete` 与 `HandleImageDelete` 两处删除前拦截并指名占用的实例。
+- **③ VirtIO 驱动光盘实为 4KB 网页（Guest Agent 装不上的真正原因）**
+  - **根因**：镜像源 `fedorapeople.org` 对非浏览器请求返回 Anubis 反机器人 HTML 页面且状态码 **200**，而 `ensureVirtioWinISO` 只判断 `os.Stat` 存在即复用，于是这份 4473 字节的 HTML 被长期当成 `virtio-win.iso` 挂给虚拟机——客户端看到的是一张无效光盘，驱动与 `qemu-ga` 自然装不上。
+  - **修复**：新增 `virtioWinISOUsable()`（体积 ≥100MB、拒绝 HTML 前缀、校验 ISO9660 在 `0x8001` 处的 `CD001` 签名），缓存文件校验失败即删除重下；下载走 `downloadFileWithValidator` 并校验临时文件后才原子改名。
+  - **源可配置**：若上游镜像不可达，可用 `CLICD_VIRTIO_WIN_ISO_URL` 覆盖（逗号/空格分隔多个地址，支持 `http(s)://` 或**本机文件路径**），systemd 单元已通过 `/etc/clicd/network.env` 透传环境变量；也可直接把真 ISO 放到 `/var/lib/clicd/images/kvm/virtio-win.iso`。
+- **涉及文件**：`backend/internal/kvm/{kvm,kvm_test}.go`、`backend/internal/api/images.go`。
+- **实机验证**：
+  - 手动按修复逻辑归一化 vm-25 权限后 `virsh start vm-25` 成功、`domstate` 为 running；
+  - 故意把 vm-3 目录改回 `root:root 0700`，经面板触发开机后权限被自动改回 `libvirt-qemu:kvm`（验证开机自愈接线）；
+  - 用被测镜像的真实依赖链调用生产函数：`custom-kvm-f58ab36672 -> [jsq-windows]`、`custom-kvm-9a78b2756f -> [kylin-v10]`（后者靠 qcow2 头兜底识别）；
+  - 对上述两个镜像分别调用「删除缓存」与「移除第三方镜像源」接口，均返回 409 并指名 `jsq-windows`，母盘与镜像记录完好（测试前用 reflink 克隆做了安全网，测后删除）；
+  - VirtIO：把 4KB 的坏文件交给挂载接口，日志出现 `cached virtio-win.iso is unusable (... only 4473 bytes)`，随后因上游返回 HTML 被拒绝并给出可操作报错——确认"假 ISO 静默挂载"的通道已封死；
+  - `go vet` 与 `go test ./...` 全绿（新增 `TestFixKVMInstancePermissionsMakesRestoredInstanceReachable`）。
+- **遗留事项**：`kylin-v10`(vm-3) 的母盘 `custom-kvm-9a78b2756f.qcow2` 已不可恢复，需重新下载该镜像（记录仍指向 `cloud.debian.org` bookworm `latest`，若上游镜像已更新则与旧 overlay 不一致，建议直接重装该实例）或删除该实例。
+
+
 
 
 
