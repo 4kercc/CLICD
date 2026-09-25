@@ -45,6 +45,17 @@ func (m *Manager) ApplyPortMappings(id int) error {
 	}
 	deleteBridgeMasquerade(subnet)
 
+	// When container has public IPv4, apply full port passthrough DNAT so the
+	// container owns all ports on its public IP (no NAT management needed).
+	//
+	// This goes in first on purpose: every rule is inserted at position 1, so the
+	// last insert wins. The passthrough covers the whole address, and without it
+	// sitting *below* the explicit mappings it shadows them — a mapping such as
+	// 22002 -> 2222 would be rewritten to 22002 -> 22002 and never reach the guest.
+	if len(c.PublicIPv4s) > 0 {
+		ensureIndependentIPv4Ingress(c, tag)
+	}
+
 	for _, pm := range c.PortMappings {
 		for _, hostIP := range expandPortMappingHostIPs(c, pm) {
 			args := []string{
@@ -70,12 +81,6 @@ func (m *Manager) ApplyPortMappings(id int) error {
 			}
 			fmt.Printf("Port mapping: %s:%d -> %s:%d\n", displayHostIP(hostIP), pm.HostPort, c.IP, pm.ContainerPort)
 		}
-	}
-
-	// When container has public IPv4, apply full port passthrough DNAT so the
-	// container owns all ports on its public IP (no NAT management needed).
-	if len(c.PublicIPv4s) > 0 {
-		ensureIndependentIPv4Ingress(c, tag)
 	}
 
 	applyIPv4EgressPolicy(c, bridge, subnet, tag)
