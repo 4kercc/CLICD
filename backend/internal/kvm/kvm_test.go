@@ -267,13 +267,10 @@ func TestFixKVMInstancePermissionsMakesRestoredInstanceReachable(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Mirror what copyTree produces from a snapshot directory.
-	for name, mode := range map[string]os.FileMode{"disk.qcow2": 0644, "domain.xml": 0644, "seed.iso": 0644} {
-		if err := os.WriteFile(filepath.Join(instanceDir, name), []byte("x"), mode); err != nil {
+	for _, name := range []string{"disk.qcow2", "domain.xml", "seed.iso"} {
+		if err := os.WriteFile(filepath.Join(instanceDir, name), []byte("x"), 0644); err != nil {
 			t.Fatal(err)
 		}
-	}
-	if err := os.Chmod(instanceDir, 0700); err != nil {
-		t.Fatal(err)
 	}
 
 	fixKVMInstancePermissions(instanceDir)
@@ -282,37 +279,40 @@ func TestFixKVMInstancePermissionsMakesRestoredInstanceReachable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm()&0111 == 0 {
-		t.Fatalf("instance directory is not traversable by its owner: %v", info.Mode().Perm())
+	// The owner must be able to enter the directory, otherwise QEMU cannot open
+	// the disk inside it.
+	if info.Mode().Perm()&0100 == 0 {
+		t.Fatalf("instance directory is not owner-traversable: %v", info.Mode().Perm())
 	}
-	qemuUser, qemuGroup := kvmQEMUIdentity()
+	qemuUser, _ := kvmQEMUIdentity()
 	if qemuUser == "" {
 		t.Log("no QEMU user on this host; only mode normalization was exercised")
 		return
+	}
+	account, err := user.Lookup(qemuUser)
+	if err != nil {
+		t.Fatalf("lookup %s: %v", qemuUser, err)
+	}
+	wantUID, err := strconv.Atoi(account.Uid)
+	if err != nil {
+		t.Fatalf("parse uid: %v", err)
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
 		t.Fatal("unexpected stat type")
 	}
-	owner, err := user.LookupId(strconv.FormatUint(uint64(stat.Uid), 10))
+	if int(stat.Uid) != wantUID {
+		t.Fatalf("instance directory owned by uid %d, want %s (%d)", stat.Uid, qemuUser, wantUID)
+	}
+	diskInfo, err := os.Stat(filepath.Join(instanceDir, "disk.qcow2"))
 	if err != nil {
-		t.Fatalf("lookup owner: %v", err)
+		t.Fatal(err)
 	}
-	if owner.Username != qemuUser {
-		t.Fatalf("instance directory owner = %s, want %s", owner.Username, user)
+	diskStat, ok := diskInfo.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatal("unexpected stat type")
 	}
-	groupIDs, err := owner.GroupIds()
-	if err != nil {
-		t.Fatalf("group ids: %v", err)
+	if int(diskStat.Uid) != wantUID {
+		t.Fatalf("disk.qcow2 owned by uid %d, want %s (%d)", diskStat.Uid, qemuUser, wantUID)
 	}
-	want, err := user.LookupGroup(qemuGroup)
-	if err != nil {
-		t.Fatalf("lookup group: %v", err)
-	}
-	for _, gid := range groupIDs {
-		if gid == want.Gid {
-			return
-		}
-	}
-	t.Fatalf("instance directory group is not %s", qemuGroup)
 }
