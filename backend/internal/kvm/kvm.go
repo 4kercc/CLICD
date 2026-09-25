@@ -1789,6 +1789,64 @@ func instanceDiskChain(diskPath string) []string {
 			break
 		}
 	}
+	if len(result) == 0 {
+		// qemu-img refuses to open an image once a layer beneath it has gone
+		// missing; fall back to reading the headers so the guard still sees the
+		// dependency instead of silently allowing a second deletion.
+		result = qcow2ChainFromHeaders(diskPath)
+	}
+	return result
+}
+
+// qcow2BackingPath reads the backing file name recorded in a qcow2 header.
+func qcow2BackingPath(path string) string {
+	file, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+
+	header := make([]byte, 32)
+	if _, err := io.ReadFull(file, header); err != nil {
+		return ""
+	}
+	if !bytes.Equal(header[0:4], []byte{'Q', 'F', 'I', 0xfb}) {
+		return ""
+	}
+	offset := binary.BigEndian.Uint64(header[8:16])
+	size := binary.BigEndian.Uint32(header[16:20])
+	if offset == 0 || size == 0 || size > 4096 {
+		return ""
+	}
+	name := make([]byte, size)
+	if _, err := file.ReadAt(name, int64(offset)); err != nil {
+		return ""
+	}
+	return strings.TrimRight(string(name), "\x00")
+}
+
+// qcow2ChainFromHeaders walks a backing chain by parsing qcow2 headers, which
+// works even when intermediate layers are missing.
+func qcow2ChainFromHeaders(diskPath string) []string {
+	var result []string
+	seen := map[string]bool{}
+	current := diskPath
+	for depth := 0; depth < 8; depth++ {
+		backing := qcow2BackingPath(current)
+		if backing == "" {
+			break
+		}
+		if !filepath.IsAbs(backing) {
+			backing = filepath.Join(filepath.Dir(current), backing)
+		}
+		backing = filepath.Clean(backing)
+		if seen[backing] {
+			break
+		}
+		seen[backing] = true
+		result = append(result, backing)
+		current = backing
+	}
 	return result
 }
 
