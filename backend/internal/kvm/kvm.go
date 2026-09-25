@@ -1792,6 +1792,16 @@ func instanceDiskChain(diskPath string) []string {
 	return result
 }
 
+// imageFileStem strips the directory and extension from an image reference so
+// `<id>.qcow2` and `<id>.iso` compare equal. Image files are always named after
+// their id (see ImagePath), but the extension varies with the provisioner, and
+// ImagePath guesses ".iso" for anything Windows-flavoured even when the disk on
+// disk is a .qcow2 — so matching file names verbatim misses real dependencies.
+func imageFileStem(ref string) string {
+	base := filepath.Base(filepath.Clean(ref))
+	return strings.TrimSuffix(base, filepath.Ext(base))
+}
+
 // InstancesUsingImage lists the KVM instances whose disk chain references the
 // image, directly or through an intermediate overlay.
 //
@@ -1801,11 +1811,10 @@ func instanceDiskChain(diskPath string) []string {
 // still appears here strands those VMs with `Cannot access backing file ...
 // No such file or directory`, which is unrecoverable once the file is gone.
 func InstancesUsingImage(imageID string) []string {
-	if strings.TrimSpace(imageID) == "" {
+	stem := imageFileStem(imageID)
+	if stem == "" {
 		return nil
 	}
-	target := filepath.Clean(ImagePath(imageID))
-	targetName := filepath.Base(target)
 	var result []string
 	for i := range config.AppConfig.Containers {
 		c := &config.AppConfig.Containers[i]
@@ -1813,10 +1822,7 @@ func InstancesUsingImage(imageID string) []string {
 			continue
 		}
 		for _, ref := range instanceDiskChain(c.DiskImage) {
-			cleaned := filepath.Clean(ref)
-			// Match the base name too: the path recorded inside a qcow2 header
-			// goes stale if the image directory ever moves.
-			if cleaned == target || filepath.Base(cleaned) == targetName {
+			if imageFileStem(ref) == stem {
 				result = append(result, c.Name)
 				break
 			}
