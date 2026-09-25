@@ -7,10 +7,13 @@ import (
 	"encoding/hex"
 	"encoding/xml"
 	"os"
+	"os/user"
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 
 	"clicd/internal/config"
@@ -248,4 +251,68 @@ func testSSHPublicKey(t *testing.T) ssh.PublicKey {
 		t.Fatal(err)
 	}
 	return signer.PublicKey()
+}
+
+// A snapshot/backup restore copies the 0700 root-owned snapshot tree back into
+// the instance directory. QEMU runs unprivileged, so the restore path must hand
+// the directory to the QEMU user or the next start fails with
+// "Cannot access storage file ...: Permission denied" (uid 64055).
+func TestFixKVMInstancePermissionsMakesRestoredInstanceReachable(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("POSIX ownership semantics only")
+	}
+	root := t.TempDir()
+	instanceDir := filepath.Join(root, "vm-1")
+	if err := os.MkdirAll(instanceDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	// Mirror what copyTree produces from a snapshot directory.
+	for name, mode := range map[string]os.FileMode{"disk.qcow2": 0644, "domain.xml": 0644, "seed.iso": 0644} {
+		if err := os.WriteFile(filepath.Join(instanceDir, name), []byte("x"), mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chmod(instanceDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	fixKVMInstancePermissions(instanceDir)
+
+	info, err := os.Stat(instanceDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm()&0111 == 0 {
+		t.Fatalf("instance directory is not traversable by its owner: %v", info.Mode().Perm())
+	}
+	user, group := kvmQEMUIdentity()
+	if user == "" {
+		t.Log("no QEMU user on this host; only mode normalization was exercised")
+		return
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatal("unexpected stat type")
+	}
+	owner, err := user.LookupId(strconv.FormatUint(uint64(stat.Uid), 10))
+	if err != nil {
+		t.Fatalf("lookup owner: %v", err)
+	}
+	if owner.Username != user {
+		t.Fatalf("instance directory owner = %s, want %s", owner.Username, user)
+	}
+	groupIDs, err := owner.GroupIds()
+	if err != nil {
+		t.Fatalf("group ids: %v", err)
+	}
+	want, err := user.LookupGroup(group)
+	if err != nil {
+		t.Fatalf("lookup group: %v", err)
+	}
+	for _, gid := range groupIDs {
+		if gid == want.Gid {
+			return
+		}
+	}
+	t.Fatalf("instance directory group is not %s", group)
 }

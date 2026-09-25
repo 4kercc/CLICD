@@ -2907,6 +2907,46 @@ func virtioWinISOUsable(path string) error {
 	return nil
 }
 
+// virtioWinISOCandidates lists the sources to try, in order, for the VirtIO
+// driver disc.
+//
+// The canonical mirror now answers non-browser clients with an HTML bot-check
+// page (HTTP 200), so a host that cannot reach it has no way to populate the
+// cache. CLICD_VIRTIO_WIN_ISO_URL overrides the list (comma or space separated,
+// http(s) URLs or a local filesystem path), which the systemd unit already
+// passes through via /etc/clicd/network.env.
+func virtioWinISOCandidates() []string {
+	var candidates []string
+	if custom := strings.TrimSpace(os.Getenv("CLICD_VIRTIO_WIN_ISO_URL")); custom != "" {
+		for _, part := range strings.FieldsFunc(custom, func(r rune) bool {
+			return r == ',' || r == ' ' || r == '\n' || r == '\t'
+		}) {
+			if part = strings.TrimSpace(part); part != "" {
+				candidates = append(candidates, part)
+			}
+		}
+	}
+	return append(candidates,
+		"https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/stable-virtio/virtio-win.iso",
+		"https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/latest-virtio/virtio-win.iso",
+	)
+}
+
+// fetchVirtioWinISO copies one candidate into target, accepting only a real
+// optical image so a bot-check page can never end up mounted as the driver disc.
+func fetchVirtioWinISO(source, target string) error {
+	if !strings.HasPrefix(source, "http://") && !strings.HasPrefix(source, "https://") {
+		if err := copyFile(source, target); err != nil {
+			return err
+		}
+		return virtioWinISOUsable(target)
+	}
+	if err := downloadFileWithValidator(context.Background(), source, target, validateWindowsISOResponse(target), nil); err != nil {
+		return err
+	}
+	return virtioWinISOUsable(target)
+}
+
 func ensureVirtioWinISO() error {
 	virtioPath := virtioWinISOPath()
 	if _, statErr := os.Stat(virtioPath); statErr == nil {
@@ -2920,26 +2960,27 @@ func ensureVirtioWinISO() error {
 	if err := os.MkdirAll(CacheDir(), 0755); err != nil {
 		return err
 	}
-	virtioURL := "https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/stable-virtio/virtio-win.iso"
 	tmp := virtioPath + ".tmp"
+	var lastErr error
+	for _, source := range virtioWinISOCandidates() {
+		_ = os.Remove(tmp)
+		if err := fetchVirtioWinISO(source, tmp); err != nil {
+			lastErr = err
+			fmt.Printf("Warning: virtio-win.iso source %s unavailable: %v\n", source, err)
+			continue
+		}
+		if err := os.Rename(tmp, virtioPath); err != nil {
+			_ = os.Remove(tmp)
+			return err
+		}
+		_ = os.Chmod(virtioPath, 0644)
+		if user, group := kvmQEMUIdentity(); user != "" {
+			_ = exec.Command("chown", user+":"+group, virtioPath).Run()
+		}
+		return nil
+	}
 	_ = os.Remove(tmp)
-	if err := downloadFileWithValidator(context.Background(), virtioURL, tmp, validateWindowsISOResponse(virtioPath), nil); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("failed to download virtio-win.iso: %v", err)
-	}
-	if err := virtioWinISOUsable(tmp); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("downloaded virtio-win.iso is not a usable optical image (%v); the mirror may be serving a bot-check page. Upload a real virtio-win.iso to %s manually", err, virtioPath)
-	}
-	if err := os.Rename(tmp, virtioPath); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	_ = os.Chmod(virtioPath, 0644)
-	if user, group := kvmQEMUIdentity(); user != "" {
-		_ = exec.Command("chown", user+":"+group, virtioPath).Run()
-	}
-	return nil
+	return fmt.Errorf("no usable virtio-win.iso source (%v). The upstream mirror may be serving a bot-check page; download virtio-win.iso elsewhere and either place it at %s or point CLICD_VIRTIO_WIN_ISO_URL at a reachable mirror or local file", lastErr, virtioPath)
 }
 
 func createEmptyDisk(target string, diskGB int) error {
