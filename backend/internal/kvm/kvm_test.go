@@ -285,8 +285,8 @@ func TestFixKVMInstancePermissionsMakesRestoredInstanceReachable(t *testing.T) {
 	if info.Mode().Perm()&0111 == 0 {
 		t.Fatalf("instance directory is not traversable by its owner: %v", info.Mode().Perm())
 	}
-	user, group := kvmQEMUIdentity()
-	if user == "" {
+	qemuUser, qemuGroup := kvmQEMUIdentity()
+	if qemuUser == "" {
 		t.Log("no QEMU user on this host; only mode normalization was exercised")
 		return
 	}
@@ -298,14 +298,14 @@ func TestFixKVMInstancePermissionsMakesRestoredInstanceReachable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("lookup owner: %v", err)
 	}
-	if owner.Username != user {
+	if owner.Username != qemuUser {
 		t.Fatalf("instance directory owner = %s, want %s", owner.Username, user)
 	}
 	groupIDs, err := owner.GroupIds()
 	if err != nil {
 		t.Fatalf("group ids: %v", err)
 	}
-	want, err := user.LookupGroup(group)
+	want, err := user.LookupGroup(qemuGroup)
 	if err != nil {
 		t.Fatalf("lookup group: %v", err)
 	}
@@ -314,5 +314,5 @@ func TestFixKVMInstancePermissionsMakesRestoredInstanceReachable(t *testing.T) {
 			return
 		}
 	}
-	t.Fatalf("instance directory group is not %s", group)
+	t.Fatalf("instance directory group is not %s", qemuGroup)
 }
