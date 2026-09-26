@@ -247,6 +247,15 @@ curl -fsSL https://raw.githubusercontent.com/4kercc/CLICD/main/install.sh | sudo
   - 守卫仍拦新建：`ct-11 → .13:22 / .13:80 / .11:22` 全部连不上；
   - 跨网段（源 10.0.3.x）访问 `:2222` / `:22002` 仍可用；客户机出网会话保持 ESTABLISHED。
 
+### 22. 🛡️ 可选光盘缺失不再阻断开机 (Missing CD-ROM Resilience - v1.20.14)
+- **现象**：`jsq-win-2019` 开机报 `Cannot access storage file '/var/lib/clicd/images/kvm/virtio-win.iso': No such file or directory`。该 ISO 此前被校验出是 4KB 反爬网页而删除，但 **Windows 域生成器挂载 VirtIO 驱动盘的条件是"路径非空"** —— 而 `virtioWinISOPath()` 永远返回非空路径，于是文件没了也会写进域 XML，`virsh start` 直接失败。
+- **修复**：新增 `optionalCDROMSource(kind, path)`，对可选光盘逐个 `os.Stat`，缺失时打印告警并跳过该盘：
+  - Windows 生成器：安装/引导盘、VirtIO 驱动盘、额外光盘；
+  - Linux 生成器：引导/种子盘（用户选择的 bootMedia）、额外光盘。
+  - 虚拟机改从磁盘启动；`unattend.iso` / cloud-init seed 为当次生成、不受影响。
+- **涉及文件**：`backend/internal/kvm/kvm.go`。
+- **实机验证**：部署后 vm-25 成功启动（审计 `start | 成功`），域定义中 `virtio-win.iso` 引用数归零，块设备只剩系统盘与 unattend 盘；vm-4 的下次开机同样会自动跳过缺失盘。
+
 ## Features / 功能介绍
 
 ### English
