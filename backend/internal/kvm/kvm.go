@@ -3607,6 +3607,9 @@ func generateLinuxDomainXML(name string, vcpu int, ramMB int, diskPath, seedPath
 	if strings.TrimSpace(bootMedia) != "" {
 		isoPath = strings.TrimSpace(bootMedia)
 	}
+	// A missing boot disc (user-selected media that was deleted later) must not
+	// block the VM from starting: fall back to disk-only boot.
+	isoPath = optionalCDROMSource("引导/种子", isoPath)
 	if isoPath != "" {
 		seedDisk = fmt.Sprintf(`<disk type='file' device='cdrom'>
       <driver name='qemu' type='raw'/>
@@ -3625,8 +3628,9 @@ func generateLinuxDomainXML(name string, vcpu int, ramMB int, diskPath, seedPath
 	}
 	// Reserved extra-ISO drive, next to the cloud-init seed: the bootable system
 	// image keeps booting from its own disc while the extra ISO is also available.
-	if strings.TrimSpace(extraISOPath) != "" {
-		seedDisk += extraCDROMXML(extraISOPath)
+	extraISO := optionalCDROMSource("额外光盘", extraISOPath)
+	if extraISO != "" {
+		seedDisk += extraCDROMXML(extraISO)
 	}
 	return fmt.Sprintf(`<domain type='kvm'>
   <name>%s</name>
@@ -3727,17 +3731,18 @@ func generateWindowsDomainXML(name string, vcpu int, ramMB int, diskPath, winISO
 	}
 
 	cdromDisks := ""
-	if strings.TrimSpace(winISOPath) != "" {
+	winISO := optionalCDROMSource("安装/引导", winISOPath)
+	if winISO != "" {
 		cdromDisks += fmt.Sprintf(`
     <disk type='file' device='cdrom'>
       <driver name='qemu' type='raw'/>
       <source file='%s'/>
       <target dev='hdb' bus='ide'/>
       <readonly/>
-    </disk>`, xmlEscape(winISOPath))
+    </disk>`, xmlEscape(winISO))
 	}
-	virtioWinISO := virtioWinISOPath()
-	if strings.TrimSpace(virtioWinISO) != "" {
+	virtioWinISO := optionalCDROMSource("VirtIO 驱动", virtioWinISOPath())
+	if virtioWinISO != "" {
 		cdromDisks += fmt.Sprintf(`
     <disk type='file' device='cdrom'>
       <driver name='qemu' type='raw'/>
@@ -3755,10 +3760,9 @@ func generateWindowsDomainXML(name string, vcpu int, ramMB int, diskPath, winISO
       <readonly/>
     </disk>`, xmlEscape(unattendISOPath))
 	}
-	// Reserved extra-ISO drive: an ADDITIONAL CD-ROM, so a bootable image keeps
-	// booting from its own disc while the extra ISO is also available in the guest.
-	if strings.TrimSpace(extraISOPath) != "" {
-		cdromDisks += extraCDROMXML(extraISOPath)
+	extraISO := optionalCDROMSource("额外光盘", extraISOPath)
+	if extraISO != "" {
+		cdromDisks += extraCDROMXML(extraISO)
 	}
 
 	// Hard disk first, CD-ROM as fallback: a freshly created Windows VM has an
@@ -3828,6 +3832,22 @@ func generateWindowsDomainXML(name string, vcpu int, ramMB int, diskPath, winISO
 
 func xmlEscape(value string) string {
 	return html.EscapeString(value)
+}
+
+// optionalCDROMSource validates an optional CD-ROM backing file. A missing file
+// yields "" so the caller can skip the drive entirely: an ISO that was deleted
+// (or a mirror that no longer serves it) must never stop the VM from starting —
+// it only means the install/driver disc is unavailable right now.
+func optionalCDROMSource(kind string, path string) string {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return ""
+	}
+	if _, err := os.Stat(trimmed); err != nil {
+		fmt.Printf("Warning: %s disc %s is missing; skipping it so the VM can start\n", kind, trimmed)
+		return ""
+	}
+	return trimmed
 }
 
 func existingWindowsUnattendISO(instanceDir string) string {
