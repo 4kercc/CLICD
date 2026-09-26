@@ -4827,6 +4827,7 @@ func (m *Manager) UpdatePublicIPv4Assignments(id int, requested []string, count 
 	// and keep the local-delivery guard in step with the pool.
 	lxc.ReconcilePublicIPv4Aliases()
 	lxc.EnsurePublicIPv4LocalDeliveryGuard()
+	lxc.EnsurePublicIPv4HairpinMasquerade()
 	if c.Status == "running" && c.IP != "" {
 		if err := lxcManager.ApplyPortMappings(id); err != nil {
 			return nil, err

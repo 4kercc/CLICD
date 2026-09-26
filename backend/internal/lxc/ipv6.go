@@ -1009,6 +1009,7 @@ func EnsureAllAssignedPublicIPv4s() {
 	}
 	ReconcilePublicIPv4Aliases()
 	EnsurePublicIPv4LocalDeliveryGuard()
+	EnsurePublicIPv4HairpinMasquerade()
 }
 
 // publicIPv4HostAliasLabel marks the interface aliases CLICD adds for assigned
@@ -1106,6 +1107,10 @@ func listPublicIPv4Aliases(iface string) []publicIPv4HostAlias {
 // that were never assigned at all — and it makes an unreachable VM look alive
 // because the host answers its pings. DNAT'd traffic is routed to the bridge and
 // never reaches INPUT, so dropping it here only removes the false replies.
+//
+// Only NEW connections are dropped: the host's own outbound use of these
+// addresses (reflected to the guest by the OUTPUT rules) needs the reply half of
+// an established flow to reach INPUT, while a fresh inbound attempt never should.
 func EnsurePublicIPv4LocalDeliveryGuard() {
 	if config.AppConfig == nil {
 		return
@@ -1114,10 +1119,14 @@ func EnsurePublicIPv4LocalDeliveryGuard() {
 	for _, address := range publicIPv4GuardTargets() {
 		guarded[address] = true
 		comment := publicIPv4GuardComment(address)
-		if iptablesRuleExists("filter", "INPUT", "-d", address, "-m", "comment", "--comment", comment, "-j", "DROP") {
+		guardArgs := []string{"-d", address, "-m", "conntrack", "--ctstate", "NEW", "-m", "comment", "--comment", comment, "-j", "DROP"}
+		if iptablesRuleExists("filter", "INPUT", guardArgs...) {
 			continue
 		}
-		args := []string{"-I", "INPUT", "1", "-d", address, "-m", "comment", "--comment", comment, "-j", "DROP"}
+		// Remove any earlier form of this guard first: a rule without the state
+		// match would keep dropping the reply half of the host's own connections.
+		_ = deleteTaggedIPTablesRules("filter", "INPUT", comment)
+		args := append([]string{"-I", "INPUT", "1"}, guardArgs...)
 		if output, err := exec.Command("iptables", args...).CombinedOutput(); err != nil {
 			fmt.Printf("Warning: failed to guard public IPv4 %s against host-local delivery: %v, output: %s\n",
 				address, err, strings.TrimSpace(string(output)))

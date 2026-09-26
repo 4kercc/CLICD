@@ -80,6 +80,25 @@ func (m *Manager) ApplyPortMappings(id int) error {
 				continue
 			}
 			fmt.Printf("Port mapping: %s:%d -> %s:%d\n", displayHostIP(hostIP), pm.HostPort, c.IP, pm.ContainerPort)
+			// Mirror the mapping on the OUTPUT chain so the host itself can dial it
+			// as well; otherwise only the all-ports passthrough is reflected and a
+			// mapped port looks dead when tested from the host.
+			if hostIP != "" {
+				outArgs := []string{
+					"-t", "nat",
+					"-I", "OUTPUT", "1",
+					"-p", pm.Protocol,
+					"-d", hostIP,
+					"--dport", fmt.Sprintf("%d", pm.HostPort),
+					"-j", "DNAT",
+					"--to-destination", fmt.Sprintf("%s:%d", c.IP, pm.ContainerPort),
+					"-m", "comment", "--comment", fmt.Sprintf("clicd-%s-%s-%d-out", tag, natRuleIPTag(hostIP), pm.HostPort),
+				}
+				if out, err := exec.Command("iptables", outArgs...).CombinedOutput(); err != nil {
+					fmt.Printf("Warning: failed to apply host reflection for %s:%d: %v, output: %s\n",
+						hostIP, pm.HostPort, err, strings.TrimSpace(string(out)))
+				}
+			}
 		}
 	}
 
@@ -139,6 +158,90 @@ func ensureIndependentIPv4Ingress(c *config.Container, tag string) {
 			fmt.Printf("Warning: failed to apply icmp passthrough %s->%s: %v, output: %s\n",
 				hostIP, c.IP, err, strings.TrimSpace(string(output)))
 		}
+		// The host owns the public address locally, so its own connections are
+		// delivered to itself instead of being forwarded: without the OUTPUT
+		// counterpart, `curl/ssh <public ip>` on the host itself fails even though
+		// the mapping works from everywhere else.
+		for _, proto := range []string{"tcp", "udp"} {
+			outArgs := []string{
+				"-t", "nat",
+				"-I", "OUTPUT", "1",
+				"-d", hostIP,
+				"-p", proto,
+				"-j", "DNAT",
+				"--to-destination", c.IP,
+				"-m", "comment", "--comment", fmt.Sprintf("clicd-%s-%s-out-%s", tag, natRuleIPTag(hostIP), proto),
+			}
+			if output, err := exec.Command("iptables", outArgs...).CombinedOutput(); err != nil {
+				fmt.Printf("Warning: failed to apply %s host reflection %s->%s: %v, output: %s\n",
+					proto, hostIP, c.IP, err, strings.TrimSpace(string(output)))
+			}
+		}
+		outICMP := []string{
+			"-t", "nat",
+			"-I", "OUTPUT", "1",
+			"-d", hostIP,
+			"-p", "icmp",
+			"--icmp-type", "echo-request",
+			"-j", "DNAT",
+			"--to-destination", c.IP,
+			"-m", "comment", "--comment", fmt.Sprintf("clicd-%s-%s-out-icmp", tag, natRuleIPTag(hostIP)),
+		}
+		if output, err := exec.Command("iptables", outICMP...).CombinedOutput(); err != nil {
+			fmt.Printf("Warning: failed to apply icmp host reflection %s->%s: %v, output: %s\n",
+				hostIP, c.IP, err, strings.TrimSpace(string(output)))
+		}
+	}
+}
+
+// publicIPv4HairpinSubnets returns the container bridge subnets whose members can
+// reach a public address that lives on the host.
+//
+// A guest dialling another guest's public IP has its packet DNAT'd back into the
+// same bridge; the target then answers directly over layer 2, bypassing the host,
+// so the caller receives a reply from the private address it never dialled and
+// drops it. Masquerading these flows (only flows that were DNAT'd, so plain
+// guest-to-guest traffic is untouched) forces the reply back through the host and
+// makes the public address usable from inside the network — which is how the same
+// setup behaves when the public IP is configured inside the guest, as on PVE.
+func publicIPv4HairpinSubnets() []string {
+	subnets := []string{}
+	seen := map[string]bool{}
+	for _, subnet := range []string{config.KVMNATNetwork().Subnet, config.LXCNATNetwork().Subnet} {
+		subnet = strings.TrimSpace(subnet)
+		if subnet == "" || seen[subnet] {
+			continue
+		}
+		seen[subnet] = true
+		subnets = append(subnets, subnet)
+	}
+	return subnets
+}
+
+// EnsurePublicIPv4HairpinMasquerade keeps the hairpin rules in place. They are
+// global (one per bridge subnet) rather than per container, so they live outside
+// the per-container rule set and are re-asserted on every start.
+func EnsurePublicIPv4HairpinMasquerade() {
+	for _, subnet := range publicIPv4HairpinSubnets() {
+		comment := "clicd-hairpin-" + strings.ReplaceAll(subnet, "/", "_")
+		if iptablesRuleExists("nat", "POSTROUTING",
+			"-s", subnet, "-d", subnet, "-m", "conntrack", "--ctstate", "DNAT",
+			"-m", "comment", "--comment", comment, "-j", "MASQUERADE") {
+			continue
+		}
+		args := []string{
+			"-t", "nat", "-A", "POSTROUTING",
+			"-s", subnet, "-d", subnet,
+			"-m", "conntrack", "--ctstate", "DNAT",
+			"-m", "comment", "--comment", comment,
+			"-j", "MASQUERADE",
+		}
+		if output, err := exec.Command("iptables", args...).CombinedOutput(); err != nil {
+			fmt.Printf("Warning: failed to apply hairpin masquerade for %s: %v, output: %s\n",
+				subnet, err, strings.TrimSpace(string(output)))
+			continue
+		}
+		fmt.Printf("IPv4 hairpin enabled for %s (guests can use public addresses of other guests)\n", subnet)
 	}
 }
 
@@ -372,6 +475,7 @@ func (m *Manager) CleanPortMappings(id int) error {
 		chain string
 	}{
 		{table: "nat", chain: "PREROUTING"},
+		{table: "nat", chain: "OUTPUT"},
 		{table: "nat", chain: "POSTROUTING"},
 		{chain: "FORWARD"},
 	} {
@@ -606,6 +710,7 @@ func (m *Manager) UpdatePublicIPv4Assignments(id int, requested []string, count 
 	// answered by the host; newly assigned ones must be guarded.
 	ReconcilePublicIPv4Aliases()
 	EnsurePublicIPv4LocalDeliveryGuard()
+	EnsurePublicIPv4HairpinMasquerade()
 	if c.Status == "running" && c.IP != "" {
 		if err := m.ApplyPortMappings(id); err != nil {
 			return nil, err
