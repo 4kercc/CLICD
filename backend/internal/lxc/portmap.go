@@ -111,6 +111,134 @@ func (m *Manager) ApplyPortMappings(id int) error {
 	return nil
 }
 
+// portMappingRuleSet is the set of nat rule comments a container should own,
+// grouped by the chain they live in.
+type portMappingRuleSet struct {
+	prerouting  []string
+	output      []string
+	postrouting []string
+}
+
+// containerRuleSet derives the comments ApplyPortMappings is expected to leave
+// behind. The periodic network sync compares this list against the live table,
+// which is how it can tell a healthy container from one whose rules drifted
+// without deleting and rebuilding the whole set to find out.
+func containerRuleSet(c *config.Container) portMappingRuleSet {
+	set := portMappingRuleSet{}
+	if c == nil {
+		return set
+	}
+	tag := clicdTag(c.ID)
+	for _, assignment := range c.PublicIPv4s {
+		address := strings.TrimSpace(assignment.Address)
+		if address == "" {
+			continue
+		}
+		ipTag := natRuleIPTag(address)
+		for _, proto := range []string{"tcp", "udp", "icmp"} {
+			set.prerouting = append(set.prerouting, fmt.Sprintf("clicd-%s-%s-all-%s", tag, ipTag, proto))
+			set.output = append(set.output, fmt.Sprintf("clicd-%s-%s-out-%s", tag, ipTag, proto))
+		}
+	}
+	for _, pm := range c.PortMappings {
+		for _, hostIP := range expandPortMappingHostIPs(c, pm) {
+			ipTag := natRuleIPTag(hostIP)
+			set.prerouting = append(set.prerouting, fmt.Sprintf("clicd-%s-%s-%d", tag, ipTag, pm.HostPort))
+			// The apply path only mirrors a mapping on OUTPUT when it names a
+			// host address; a mapping without one is not reflected.
+			if hostIP != "" {
+				set.output = append(set.output, fmt.Sprintf("clicd-%s-%s-%d-out", tag, ipTag, pm.HostPort))
+			}
+		}
+	}
+	if containerAllowsPublicIPv4Egress(c) {
+		if primary, ok := primaryPublicIPv4Assignment(c); ok {
+			set.postrouting = append(set.postrouting, fmt.Sprintf("clicd-%s-snat-%s", tag, natRuleIPTag(primary.Address)))
+		} else {
+			set.postrouting = append(set.postrouting, fmt.Sprintf("clicd-%s-masq", tag))
+		}
+	}
+	return set
+}
+
+// PortMappingsIntact reports whether a container's nat rules are exactly the
+// ones it should have right now.
+//
+// The periodic network sync used to call ApplyPortMappings unconditionally
+// (throttled to once a minute), so every running guest lost its DNAT rules for a
+// moment on every tick and the log filled with thousands of re-applications a
+// day. Verifying first keeps the repair behaviour — a rule that really goes
+// missing is still rebuilt — without the churn. A set that differs in any way,
+// including a rule left behind by a previous public address, counts as not
+// intact so the rebuild also cleans it up.
+func PortMappingsIntact(id int) bool {
+	c := config.FindContainer(id)
+	if c == nil {
+		return false
+	}
+	if strings.TrimSpace(c.IP) == "" {
+		// Nothing is expected yet, and applying would fail for lack of an
+		// address: report intact so callers do not retry in a loop.
+		return true
+	}
+	want := containerRuleSet(c)
+	prefix := "clicd-" + clicdTag(id) + "-"
+	for _, target := range []struct {
+		table string
+		chain string
+		want  []string
+	}{
+		{table: "nat", chain: "PREROUTING", want: want.prerouting},
+		{table: "nat", chain: "OUTPUT", want: want.output},
+		{table: "nat", chain: "POSTROUTING", want: want.postrouting},
+	} {
+		got, err := taggedChainComments(target.table, target.chain, prefix)
+		if err != nil {
+			return false
+		}
+		if !sameCommentSet(got, target.want) {
+			return false
+		}
+	}
+	return true
+}
+
+// taggedChainComments returns the comments of the rules in a chain that belong
+// to a container's tag.
+func taggedChainComments(table, chain, prefix string) ([]string, error) {
+	rules, err := listIPTablesRules(table, chain)
+	if err != nil {
+		return nil, err
+	}
+	comments := make([]string, 0, len(rules))
+	for _, rule := range rules {
+		comment := iptablesCommentOf(rule)
+		if strings.HasPrefix(comment, prefix) {
+			comments = append(comments, comment)
+		}
+	}
+	return comments, nil
+}
+
+// sameCommentSet compares two comment lists as multisets: the same rule listed
+// twice must be seen twice, so a duplicated rule still triggers a rebuild.
+func sameCommentSet(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	counts := make(map[string]int, len(want))
+	for _, comment := range want {
+		counts[comment]++
+	}
+	for _, comment := range got {
+		counts[comment]--
+		if counts[comment] < 0 {
+			return false
+		}
+	}
+	return true
+}
+
 func ensureIndependentIPv4Ingress(c *config.Container, tag string) {
 	if c == nil || c.IP == "" || len(c.PublicIPv4s) == 0 {
 		return

@@ -267,6 +267,18 @@ curl -fsSL https://raw.githubusercontent.com/4kercc/CLICD/main/install.sh | sudo
 - **涉及文件**：`backend/internal/lxc/portmap.go`、`backend/internal/lxc/portmap_cleanup_test.go`（新增）、`backend/internal/lxc/lxc_test.go`、`backend/main.go`。
 - **实机验证**：netns 模拟客户机 ping `.12` 0% 丢包且回包源地址正确；TCP `23.95.253.12:22002` 收到客户机 sshd 横幅 `SSH-2.0-OpenSSH_10.1`；手动删除 hairpin 规则后 **75 秒内自动恢复**（日志 `IPv4 hairpin enabled for 192.168.122.0/24`）；服务重启后无任何删除报错；`go vet` 与 `go test ./...` 全绿。
 
+### 24. ♻️ 换绑公网 IP 后的三个隐患：规则每分钟重建、变更无审计、自行停机不清理 (Public IP Rebind - v1.20.16)
+- **触发**：把某实例的公网从 `23.95.253.11` 换成 `23.95.253.10` 后「连不上、密码错误」。逐层取证后确认 **CLICD 没有送错流量**：`.10` 的宿主别名、全端口透传、守卫全程齐备，21 分钟里指向目标客户机重下发 44 次，而旧地址 `.11` 在同窗口下发 0 次（换绑语义正确）。"密码错误"来自客户端：`.10` 这个地址**原先属于另一台 Windows 实例**，客户端针对该地址保存的凭据指向旧机器。但这轮排查顺带暴露了三个真实缺陷。
+- **缺陷①：每台运行中的 KVM 实例，nat 规则每分钟被整表拆掉重建**。`StartNetworkSyncMonitor` 每 15 秒轮询，`RefreshNetwork` 无条件调用 `ApplyPortMappings`（内部先 `CleanPortMappings` 全删再重建，用 1 分钟节流限制频率）。实测重建窗口 <300ms，所以**不是本次故障的原因**，但一天要刷 7000+ 行日志、纯做无效功，而且正是这个高频拆建在 v1.20.15 之前把发夹 NAT 规则冲掉过。
+  - **修复**：新增 `PortMappingsIntact(id)`——由配置推导出该实例**期望拥有的规则注释集合**（`containerRuleSet`，覆盖 PREROUTING / OUTPUT / POSTROUTING 三条链），与线上 `iptables -S` 的实际注释逐条做多重集比对；完全一致就跳过重建，只有**客户机地址变了**或**规则真的漂移**才重建。任何差异（包括上一个地址留下的残留规则）都会判为不一致，因此重建同时完成清理。
+  - **实机验证**：部署后近两分钟**零次**重下发（此前每台每分钟一次）；手动删掉一条规则后 **6 秒内自动补回**，漂移修复能力没有削弱。
+- **缺陷②：公网 IP 变更不写审计**。那次换绑、以及 `jsq-windows` 的关机在审计表里都查不到（当天全天仅 6 条记录），导致只能靠 journal 日志做取证。
+  - **修复**：新增 `container.public_ipv4` / `container.public_ipv6` 审计项，记录 `旧地址 -> 新地址`（多地址逗号分隔、空集合记作 `(none)`），并带操作者 / 来源 IP / User-Agent / 成功与否。
+- **缺陷③：探测失败时按陈旧状态下发 + 自行停机不清理**。`syncRunningNetworks` 原本在 `virsh domstate` 失败时回退到配置里存的状态，于是**一台已关机的实例可能仍在被下发规则**；同时客户机**在系统内部自行关机**时不会走 `StopContainer`，规则不会被清理，其公网地址会一直指向一台已经不在的客户机，形成黑洞。
+  - **修复**：探测失败就不碰运行时状态（规则保持原样，不做猜测）；实例从 running 变为非 running 时主动 `CleanPortMappings`。
+- **涉及文件**：`backend/internal/lxc/portmap.go`、`backend/internal/lxc/portmap_cleanup_test.go`、`backend/internal/kvm/kvm.go`、`backend/internal/api/ipv6.go`（新增 `backend/internal/api/ipv6_test.go`）。
+- **运维提示**：换绑公网 IP 前，先在客户端清掉该地址保存的凭据与 SSH 主机密钥——旧地址会立刻失效（别名回收、规则清空），而新地址上客户端残留的"按地址缓存"会让正确密码也被拒。
+
 ## Features / 功能介绍
 
 ### English

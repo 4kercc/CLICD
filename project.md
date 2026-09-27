@@ -335,6 +335,26 @@
 
 ---
 
+### 25. ♻️ 换绑公网 IP 后的三个隐患：规则每分钟重建、变更无审计、自行停机不清理 (v1.20.16)
+- **触发**：把实例 c25（`jsq-win-2019`）的公网从 `23.95.253.11` 换成 `23.95.253.10` 后「服务器无法连接、输入正确密码仍提示密码错误」。
+- **取证结论：CLICD 没有送错流量**。逐层核对后：
+  - `.10` 的宿主别名（21:42:55 加入 → 22:04:54 回收）、全端口透传、`INPUT` 守卫在整个窗口内齐备；
+  - 21:43:15–22:04:50 之间 `.10` 重下发 44 次、`.11` 下发 **0** 次——说明换绑语义正确（旧地址立即失效，新地址生效），且流量一直指向 `192.168.122.156`；
+  - 宿主机在 `.10` 上有守卫，因此"宿主机 sshd 冒充目标机"这条路径被堵死；**"密码错误"来自客户端**：`.10` 这个地址原先属于另一台 Windows 实例（`jsq-windows`），客户端按地址缓存的凭据/主机密钥指向旧机器。
+  - 取证手段：`journalctl -u clicd` 全量时间线 + 配置库只读查询（`python3` 打开 `file:/root/.clicd/config.db?mode=ro`，机器上没有 sqlite3）。**审计表当天仅 6 条记录**，换绑与 `jsq-windows` 关机均未入账，这正是缺陷②。
+- **缺陷①：每台运行中的 KVM 实例，nat 规则每分钟被整表拆掉重建**。`StartNetworkSyncMonitor` 每 15 秒轮询 → `RefreshNetwork` 无条件 `ApplyPortMappings`（内部先 `CleanPortMappings` 全删再重建，靠 `shouldApplyPortMappings` 做 1 分钟节流）。实测重建窗口 <300ms（0.3s 采样 75 秒，规则条数最低 3、从未归零），**不是本次故障原因**，但一天刷 7000+ 行日志、纯做无效功，且正是这个高频拆建在 v1.20.15 之前冲掉了发夹 NAT 规则。
+  - **修复**：新增 `PortMappingsIntact(id)` + `containerRuleSet(c)`（`portmap.go`）。由配置推导期望的规则**注释集合**（PREROUTING 的透传/端口映射、OUTPUT 的镜像、POSTROUTING 的 SNAT/MASQUERADE），用 `iptables -S` 读回实际注释做多重集比对（`sameCommentSet`，重复规则也判为不一致）；`RefreshNetwork` 改为 `changed || !PortMappingsIntact(id)` 才重建。任何差异（含上一个地址的残留规则）都会触发重建并顺带清理。删除了 `shouldApplyPortMappings` / `lastPortMapApply` / `portMapApplyMu`。
+  - **实机验证**：部署后近两分钟**零次**重下发；手动删除一条 `clicd-c25-*` 规则后 **6 秒内自动补回**；c3 规则 8/8/1、c25 规则 3/3/1、发夹 NAT 2 条，均与期望集合逐条吻合。
+- **缺陷②：公网 IP 变更不写审计**。
+  - **修复**：`api/ipv6.go` 的 `updatePublicIPv4` / `updateIPv6Addresses` 写入 `container.public_ipv4` / `container.public_ipv6`，detail 为 `旧地址 -> 新地址`（`describeAddressChange`，空集合记 `(none)`，多地址逗号分隔），失败路径也记录错误。补 `api/ipv6_test.go` 覆盖该格式化函数。
+- **缺陷③：探测失败时按陈旧状态下发 + 自行停机不清理**。`syncRunningNetworks` 原本在 `virsh domstate` 失败/返回空时回退到配置里的陈旧状态（`status != "running" && c.Status != "running"` 才跳过），于是已关机的实例可能仍在被下发规则；同时客户机**在系统内部自行关机**不走 `StopContainer`，规则不会被清理，其公网地址会一直指向一台不在的客户机。
+  - **修复**：探测失败即 `continue`（不碰运行时状态、不做猜测）；捕获 `wasRunning`，实例从 running 变为非 running 时主动 `CleanPortMappings`。
+- **涉及文件**：`backend/internal/lxc/portmap.go`、`backend/internal/lxc/portmap_cleanup_test.go`、`backend/internal/kvm/kvm.go`、`backend/internal/api/ipv6.go`、`backend/internal/api/ipv6_test.go`（新增）。
+- **实机验证**：`go vet` 与 `go test ./...` 全绿；netns 模拟同网段客户机回归（ICMP `64 bytes from 23.95.253.12` ttl=63、TCP `:22002` 收到 sshd 横幅；首次 ping 因 netns 冷启动 ARP 未解析会报 `Destination Host Unreachable`，属测试环境现象）；重启后无任何告警。
+- **运维提示**：换绑公网 IP 前先清掉客户端上该地址的保存凭据与 SSH 主机密钥。旧地址会立刻失效（别名回收、规则清空），而新地址上客户端"按地址缓存"的凭据会让正确密码也被拒绝——这类现象看着像服务端故障，实际在客户端。
+
+---
+
 ## 📝 AI 接力开发与修改记录规范 (Development Guidelines for AI Assistants)
 后续所有 AI 助手在接力开发本项目时，必须严格遵守以下规范：
 1. **持续同步 `project.md`**：完成任何代码修改、架构调整或需求上线后，必须在 `project.md` 中以清晰的小节记录修改背景、改动文件、技术细节以及实机验证状态。

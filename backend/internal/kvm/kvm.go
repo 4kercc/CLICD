@@ -87,8 +87,6 @@ var (
 	kvmSnapshotMu       sync.Mutex
 	kvmSSHEnsureLocks   sync.Map
 	knownSSHHostKeys    sync.Map // TOFU host key store: host:port → ssh.PublicKey
-	portMapApplyMu      sync.Mutex
-	lastPortMapApply    = map[int]time.Time{}
 	windowsMetricsMu    sync.Mutex
 	windowsMetricsCache = map[string]windowsGuestMetricsSnapshot{}
 	ipv6WarnMu          sync.Mutex
@@ -2543,25 +2541,16 @@ func (m *Manager) RefreshNetwork(id int) (string, error) {
 	if changed {
 		config.SaveConfig()
 	}
-	if c.Status == "running" && shouldApplyPortMappings(id, changed) {
+	// Rebuild only when the guest address moved or the rules really are gone.
+	// Re-applying on every tick tore the rule set down once a minute for every
+	// running VM, which briefly dropped its DNAT rules and filled the log with
+	// thousands of re-applications a day.
+	if c.Status == "running" && (changed || !lxc.PortMappingsIntact(id)) {
 		if err := lxc.NewManager().ApplyPortMappings(id); err != nil {
 			return ip, err
 		}
 	}
 	return ip, nil
-}
-
-func shouldApplyPortMappings(id int, force bool) bool {
-	portMapApplyMu.Lock()
-	defer portMapApplyMu.Unlock()
-	now := time.Now()
-	if !force {
-		if last, ok := lastPortMapApply[id]; ok && now.Sub(last) < time.Minute {
-			return false
-		}
-	}
-	lastPortMapApply[id] = now
-	return true
 }
 
 func (m *Manager) GetContainerStatus(name string) (string, error) {
@@ -4428,11 +4417,25 @@ func (m *Manager) syncRunningNetworks() {
 			continue
 		}
 		status, err := m.GetContainerStatus(c.VirshName())
-		if err == nil && status != "" && c.Status != status {
+		if err != nil || status == "" {
+			// The runtime state could not be established. Leaving the rules
+			// alone is the safe choice: falling back to the stored status made
+			// a stopped VM whose probe failed keep its port mappings, so its
+			// public address stayed pointed at a guest that was not there.
+			continue
+		}
+		wasRunning := c.Status == "running"
+		if c.Status != status {
 			c.Status = status
 			config.SaveConfig()
 		}
-		if status != "running" && c.Status != "running" {
+		if status != "running" {
+			// A guest can stop on its own (shutdown from inside the OS), which
+			// never goes through StopContainer and so would otherwise leave its
+			// DNAT rules behind, black-holing its public address.
+			if wasRunning {
+				_ = lxc.NewManager().CleanPortMappings(c.ID)
+			}
 			continue
 		}
 		if _, err := m.RefreshVNCPort(c.ID); err != nil {

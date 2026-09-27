@@ -3,6 +3,8 @@ package lxc
 import (
 	"reflect"
 	"testing"
+
+	"clicd/internal/config"
 )
 
 func TestCommentMatchesMarker(t *testing.T) {
@@ -84,6 +86,97 @@ func TestSplitIPTablesRuleDropsChainName(t *testing.T) {
 
 	if got := splitIPTablesRule("-P POSTROUTING ACCEPT"); got != nil {
 		t.Fatalf("policy lines must not be treated as rules, got %#v", got)
+	}
+}
+
+func TestContainerRuleSetMatchesTheRulesApplyWrites(t *testing.T) {
+	c := &config.Container{
+		ID:          25,
+		IP:          "192.168.122.156",
+		PublicIPv4s: []config.PublicIPv4Assignment{{Address: "23.95.253.10"}},
+		PortMappings: []config.PortMapping{
+			// No HostIP: expanded to the assigned address, mirrored on OUTPUT.
+			{ContainerPort: 22, HostPort: 22003, Protocol: "tcp"},
+			// Explicit HostIP: also mirrored on OUTPUT.
+			{ContainerPort: 80, HostPort: 20004, Protocol: "tcp", HostIP: "23.95.253.10"},
+		},
+	}
+	got := containerRuleSet(c)
+
+	wantPre := []string{
+		"clicd-c25-23_95_253_10-all-tcp",
+		"clicd-c25-23_95_253_10-all-udp",
+		"clicd-c25-23_95_253_10-all-icmp",
+		"clicd-c25-23_95_253_10-22003",
+		"clicd-c25-23_95_253_10-20004",
+	}
+	wantOut := []string{
+		"clicd-c25-23_95_253_10-out-tcp",
+		"clicd-c25-23_95_253_10-out-udp",
+		"clicd-c25-23_95_253_10-out-icmp",
+		"clicd-c25-23_95_253_10-22003-out",
+		"clicd-c25-23_95_253_10-20004-out",
+	}
+	wantPost := []string{"clicd-c25-snat-23_95_253_10"}
+
+	if !sameCommentSet(got.prerouting, wantPre) {
+		t.Fatalf("prerouting = %#v, want %#v", got.prerouting, wantPre)
+	}
+	if !sameCommentSet(got.output, wantOut) {
+		t.Fatalf("output = %#v, want %#v", got.output, wantOut)
+	}
+	if !sameCommentSet(got.postrouting, wantPost) {
+		t.Fatalf("postrouting = %#v, want %#v", got.postrouting, wantPost)
+	}
+}
+
+// A container with no public address falls back to masquerading, and one that
+// may not egress at all expects no postrouting rule of its own.
+func TestContainerRuleSetEgressFallback(t *testing.T) {
+	mapped := &config.Container{
+		ID:           7,
+		IP:           "10.0.3.102",
+		PortMappings: []config.PortMapping{{ContainerPort: 22, HostPort: 22005, Protocol: "tcp"}},
+	}
+	if got := containerRuleSet(mapped).postrouting; !sameCommentSet(got, []string{"clicd-c7-masq"}) {
+		t.Fatalf("mapped container postrouting = %#v, want [clicd-c7-masq]", got)
+	}
+
+	sealed := &config.Container{ID: 9, IP: "10.0.3.103"}
+	if got := containerRuleSet(sealed).postrouting; len(got) != 0 {
+		t.Fatalf("sealed container postrouting = %#v, want none", got)
+	}
+}
+
+// A mapping without a host address is not reflected on OUTPUT, so the expected
+// set must not claim it is.
+func TestContainerRuleSetSkipsUnreflectedMapping(t *testing.T) {
+	c := &config.Container{
+		ID:           8,
+		IP:           "10.0.3.101",
+		PortMappings: []config.PortMapping{{ContainerPort: 22, HostPort: 22004, Protocol: "tcp"}},
+	}
+	got := containerRuleSet(c)
+	if !sameCommentSet(got.prerouting, []string{"clicd-c8-any-22004"}) {
+		t.Fatalf("prerouting = %#v, want [clicd-c8-any-22004]", got.prerouting)
+	}
+	if len(got.output) != 0 {
+		t.Fatalf("output = %#v, want none (a mapping without a host address is not reflected)", got.output)
+	}
+}
+
+func TestSameCommentSetCountsDuplicates(t *testing.T) {
+	if !sameCommentSet([]string{"a", "b"}, []string{"b", "a"}) {
+		t.Fatal("order must not matter")
+	}
+	if sameCommentSet([]string{"a", "a"}, []string{"a"}) {
+		t.Fatal("a duplicated rule must not compare equal to a single one")
+	}
+	if sameCommentSet([]string{"a"}, []string{"a", "b"}) {
+		t.Fatal("a missing rule must not compare equal")
+	}
+	if sameCommentSet(nil, nil) != true {
+		t.Fatal("two empty sets are equal")
 	}
 }
 
