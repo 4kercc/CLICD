@@ -82,6 +82,7 @@ func main() {
 		lxc.EnsureForwardRules("lxcbr0")
 		lxc.EnsureForwardRules("virbr0")
 		lxc.EnsureAllAssignedPublicIPv4s()
+		lxc.StartPublicIPv4HairpinRepair()
 
 			// Start expiry scanners (stops expired/over-traffic workloads every 30s)
 			manager := lxc.NewManager()

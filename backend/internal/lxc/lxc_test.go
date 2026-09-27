@@ -122,17 +122,16 @@ func TestNormalizeCreateNATMappingsRejectsManagementPortConflict(t *testing.T) {
 	}
 }
 
-func TestTaggedRuleLineNumbersReturnsMatchingRulesDescending(t *testing.T) {
-	output := []byte(`Chain PREROUTING (policy ACCEPT)
-num  target prot opt source destination
-2 DNAT tcp -- 0.0.0.0/0 0.0.0.0/0 tcp dpt:30080 /* clicd-c12-any-30080 */
-7 DNAT tcp -- 0.0.0.0/0 0.0.0.0/0 tcp dpt:30081 /* clicd-c13-any-30081 */
-11 DNAT tcp -- 0.0.0.0/0 0.0.0.0/0 tcp dpt:30082 /* clicd-c12-any-30082 */
-`)
-	got := taggedRuleLineNumbers(output, "clicd-c12-")
-	want := []int{11, 2}
+func TestTaggedRuleSpecsSelectsOnlyTheMarkedContainer(t *testing.T) {
+	rules := []string{
+		`-A PREROUTING -p tcp -m tcp --dport 30080 -m comment --comment clicd-c12-any-30080 -j DNAT --to-destination 10.0.3.5:80`,
+		`-A PREROUTING -p tcp -m tcp --dport 30081 -m comment --comment clicd-c13-any-30081 -j DNAT --to-destination 10.0.3.6:80`,
+		`-A PREROUTING -p tcp -m tcp --dport 30082 -m comment --comment clicd-c12-any-30082 -j DNAT --to-destination 10.0.3.5:8080`,
+	}
+	got := taggedRuleSpecs(rules, "clicd-c12-")
+	want := []string{rules[0], rules[2]}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("taggedRuleLineNumbers() = %v, want %v", got, want)
+		t.Fatalf("taggedRuleSpecs() = %v, want %v", got, want)
 	}
 }
 

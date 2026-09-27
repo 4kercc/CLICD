@@ -320,6 +320,21 @@
 
 ---
 
+### 24. 🧵 发夹 NAT 规则被误删：iptables 按规格删除 + 规则自愈 (v1.20.15)
+- **现象**：v1.20.13 修好并实测通过的「同网段用公网 IP 互访」再次失效——用户工作机（即 vm-4，出口公网 `23.95.253.10`）`ping 23.95.253.12` 全丢包，TCP 也连不上。
+- **复现手段（可复用）**：`ip netns add hairtest` + 一对 veth 挂到 `virbr0`，给 netns 内网卡配 `192.168.122.240/24`、默认网关 `192.168.122.1`，即可得到一台**与 vm-3 同网段**的模拟客户机；测完 `ip netns del hairtest && ip link del vh0` 回收，**全程不需要动任何真实虚拟机**。基线输出即决定性证据：`64 bytes from 192.168.122.251 … (DIFFERENT ADDRESS!)`——回包源地址是 vm-3 的**内网 IP**（客户机发现同网段直接二层回包、绕过宿主机），Linux 标注 "DIFFERENT ADDRESS"，Windows 直接丢弃，所以表现为「不通」。规则表中 `clicd-hairpin-10.0.3.0_24` 存在、**`clicd-hairpin-192.168.122.0_24` 缺失**。
+- **根因：清理规则时按行号删除**。`deleteTaggedIPTablesRules` 先用 `iptables -L --line-numbers` 取行号，再 `iptables -D <chain> <N>` 删除。**行号只在取列表那一刻有效**：同一轮恢复里多个容器并发清理、libvirt/lxc-net 也在改 POSTROUTING，链一变短，过期行号就会指向下面原本更靠后的规则；hairpin 规则正好在链尾，最容易被误伤。
+  - **旁证**：日志中大量 `Index of deletion too big` 与 `RULE_DELETE failed (No such file or directory)`（行号错位的指纹）；更关键的是 **libvirt 自己的 `-A POSTROUTING -j LIBVIRT_PRT` 跳转也一并消失**——同一 bug 的连带伤害，说明被删的从来不止「目标规则」。
+  - 排查中曾怀疑 libvirt / lxc-net 会按子网删除 MASQUERADE 规则：读 `/usr/libexec/lxc/lxc-net` 后排除——它带 `! -d ${LXC_NETWORK}` 且用完整规格 `-D`，只删自己的规则。
+- **修复①（按规格删除）**：`listIPTablesRules()` 改用 `iptables -S <chain>` 取回规则原文，`splitIPTablesRule()` 把 `-A <chain> …` 之后的参数原样交给 `iptables -D`，**彻底不依赖位置**。注释匹配改为按注释 token 比对（`commentMatchesMarker`）：`clicd-c3-` 作为命名空间前缀匹配；`clicd-pubguard-<ip>` 要求整串匹配，否则 `…253_1` 会抢占 `…253_12`。新增引号/反斜杠感知分词器 `tokenizeIPTablesArgs`，正确处理 iptables 给含空格注释加引号的写法。
+- **修复②（清理幂等）**：`iptablesRuleMissing()` 把「规则已经不在了」（`Bad rule` / `No such file or directory` / `Index of deletion too big`）判为成功。此前同容器的两条同步路径（端口映射恢复 + 网络同步）并发清理时后到者报错，而 `ApplyPortMappings` 会因该错误**提前 return、跳过重新下发映射**——报错只是噪音，跳过下发才是真故障。
+- **修复③（规则自愈）**：新增 `StartPublicIPv4HairpinRepair()`（`main.go` 启动），每 60 秒重新确认一次 hairpin 规则。这两条是**全局规则**（每个网桥子网一条，不挂在单个容器上），而 libvirt 与 lxc-net 都会重写 POSTROUTING，因此不能只在开机时下发一次。
+- **改动文件**：`backend/internal/lxc/portmap.go`、`backend/internal/lxc/portmap_cleanup_test.go`（新增）、`backend/internal/lxc/lxc_test.go`（`TestTaggedRuleLineNumbersReturnsMatchingRulesDescending` → `TestTaggedRuleSpecsSelectsOnlyTheMarkedContainer`）、`backend/main.go`。
+- **实机验证（测试机）**：netns 模拟客户机 ping `.12` 0% 丢包且回包源地址正确；TCP `23.95.253.12:22002` 收到客户机 sshd 横幅 `SSH-2.0-OpenSSH_10.1`；**手动删除 hairpin 规则后 75 秒内自动恢复**（日志 `IPv4 hairpin enabled for 192.168.122.0/24`）；服务重启后无任何删除报错；隔离测试链验证 `-S` 输出可直接回喂 `-D`；`go vet` 与 `go test ./...` 全绿。
+- **运维注意**：不要在 clicd 服务运行期间手工执行 `/usr/local/bin/clicd`（例如误用 `--version`，该参数不存在会直接进入 server 模式）。两个实例同时跑会互相清理对方的 iptables 规则，日志出现成片 `Bad rule`。本次排查中误触发过一次，已确认生产实例（PID 未变、运行时长连续）与全部虚拟机/容器均未受影响。
+
+---
+
 ## 📝 AI 接力开发与修改记录规范 (Development Guidelines for AI Assistants)
 后续所有 AI 助手在接力开发本项目时，必须严格遵守以下规范：
 1. **持续同步 `project.md`**：完成任何代码修改、架构调整或需求上线后，必须在 `project.md` 中以清晰的小节记录修改背景、改动文件、技术细节以及实机验证状态。

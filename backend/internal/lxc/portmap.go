@@ -6,10 +6,10 @@ import (
 	"net/netip"
 	"os/exec"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"clicd/internal/config"
 )
@@ -243,6 +243,25 @@ func EnsurePublicIPv4HairpinMasquerade() {
 		}
 		fmt.Printf("IPv4 hairpin enabled for %s (guests can use public addresses of other guests)\n", subnet)
 	}
+}
+
+// publicIPv4HairpinRepairInterval is how often the hairpin rules are re-checked.
+// They are global rules on the nat POSTROUTING chain, which libvirt and lxc-net
+// also rewrite whenever they reconcile their own masquerade rules, so they are
+// re-asserted on a timer instead of only when a container starts.
+const publicIPv4HairpinRepairInterval = 60 * time.Second
+
+// StartPublicIPv4HairpinRepair keeps the hairpin rules alive in the background.
+// A rule that disappears for any reason is back within a minute, so guests never
+// lose reachability to another guest's public address for longer than that.
+func StartPublicIPv4HairpinRepair() {
+	go func() {
+		ticker := time.NewTicker(publicIPv4HairpinRepairInterval)
+		defer ticker.Stop()
+		for range ticker.C {
+			EnsurePublicIPv4HairpinMasquerade()
+		}
+	}()
 }
 
 func applyIPv4EgressPolicy(c *config.Container, bridge, subnet, tag string) {
@@ -491,51 +510,164 @@ func (m *Manager) CleanPortMappings(id int) error {
 	return errors.Join(cleanupErrors...)
 }
 
+// deleteTaggedIPTablesRules removes every rule of a chain whose comment carries
+// the marker.
+//
+// Rules are deleted by their full specification, never by position. A rule
+// number is only valid for the listing it was read from: any rule added or
+// removed in between — another cleanup running for a different container, or
+// libvirt/lxc-net reconciling their own masquerade rules — shifts every later
+// position, and a stale number then deletes whatever happens to sit there now.
+// That is how the global hairpin rules and libvirt's POSTROUTING jump were
+// silently destroyed while the log only complained about the intended ones.
 func deleteTaggedIPTablesRules(table, chain, marker string) error {
-	listArgs := []string{"-w", "5"}
-	if table != "" {
-		listArgs = append(listArgs, "-t", table)
-	}
-	listArgs = append(listArgs, "-L", chain, "-n", "--line-numbers")
-	output, err := exec.Command("iptables", listArgs...).CombinedOutput()
+	rules, err := listIPTablesRules(table, chain)
 	if err != nil {
-		return fmt.Errorf("list iptables %s/%s: %w: %s", tableName(table), chain, err, strings.TrimSpace(string(output)))
+		return err
 	}
 
 	var deleteErrors []error
-	for _, lineNumber := range taggedRuleLineNumbers(output, marker) {
-		deleteArgs := []string{"-w", "5"}
-		if table != "" {
-			deleteArgs = append(deleteArgs, "-t", table)
+	for _, rule := range taggedRuleSpecs(rules, marker) {
+		spec := splitIPTablesRule(rule)
+		if len(spec) == 0 {
+			continue
 		}
-		deleteArgs = append(deleteArgs, "-D", chain, strconv.Itoa(lineNumber))
-		if output, err := exec.Command("iptables", deleteArgs...).CombinedOutput(); err != nil {
+		args := []string{"-w", "5"}
+		if table != "" {
+			args = append(args, "-t", table)
+		}
+		args = append(args, "-D", chain)
+		args = append(args, spec...)
+		if output, err := exec.Command("iptables", args...).CombinedOutput(); err != nil {
+			if iptablesRuleMissing(string(output)) {
+				continue
+			}
 			deleteErrors = append(deleteErrors, fmt.Errorf(
-				"delete iptables %s/%s rule %d: %w: %s",
-				tableName(table), chain, lineNumber, err, strings.TrimSpace(string(output)),
+				"delete iptables %s/%s rule %q: %w: %s",
+				tableName(table), chain, rule, err, strings.TrimSpace(string(output)),
 			))
 		}
 	}
 	return errors.Join(deleteErrors...)
 }
 
-func taggedRuleLineNumbers(output []byte, marker string) []int {
-	lineNumbers := make([]int, 0)
+// listIPTablesRules returns a chain's rules in the syntax used to add them, so
+// each one can be handed straight back to iptables -D.
+func listIPTablesRules(table, chain string) ([]string, error) {
+	args := []string{"-w", "5"}
+	if table != "" {
+		args = append(args, "-t", table)
+	}
+	args = append(args, "-S", chain)
+	output, err := exec.Command("iptables", args...).CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("list iptables %s/%s: %w: %s", tableName(table), chain, err, strings.TrimSpace(string(output)))
+	}
+	rules := make([]string, 0)
 	for _, line := range strings.Split(string(output), "\n") {
-		if !strings.Contains(line, marker) {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) == 0 {
-			continue
-		}
-		lineNumber, err := strconv.Atoi(fields[0])
-		if err == nil && lineNumber > 0 {
-			lineNumbers = append(lineNumbers, lineNumber)
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "-A ") {
+			rules = append(rules, line)
 		}
 	}
-	sort.Sort(sort.Reverse(sort.IntSlice(lineNumbers)))
-	return lineNumbers
+	return rules, nil
+}
+
+// iptablesRuleMissing reports whether a delete failed only because the rule was
+// already gone. Cleanup is idempotent by nature: two syncs for the same
+// container can overlap (a port-mapping restore and a network sync), and the
+// loser deleting nothing is a success, not a failure to report — otherwise the
+// caller aborts before re-applying the rules it just tried to clear.
+func iptablesRuleMissing(output string) bool {
+	for _, marker := range []string{
+		"Bad rule (does a matching rule exist in that chain?)",
+		"No such file or directory",
+		"Index of deletion too big",
+	} {
+		if strings.Contains(output, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// taggedRuleSpecs returns the rules of a listing whose comment carries the
+// marker. Selecting by comment keeps an unrelated rule that merely shares a
+// prefix — or that a shifted position would have pointed at — out of the set.
+func taggedRuleSpecs(rules []string, marker string) []string {
+	selected := make([]string, 0)
+	for _, rule := range rules {
+		if commentMatchesMarker(iptablesCommentOf(rule), marker) {
+			selected = append(selected, rule)
+		}
+	}
+	return selected
+}
+
+// commentMatchesMarker reports whether a rule comment belongs to a marker.
+// A marker already ending in a separator names a namespace, so every comment
+// starting with it belongs to the set ("clicd-c3-" owns "clicd-c3-snat-...").
+// Any other marker must match the whole comment or be followed by a separator,
+// so "clicd-pubguard-23_95_253_1" never claims "clicd-pubguard-23_95_253_12".
+func commentMatchesMarker(comment, marker string) bool {
+	if comment == "" || marker == "" {
+		return false
+	}
+	if comment == marker {
+		return true
+	}
+	if strings.HasSuffix(marker, "-") {
+		return strings.HasPrefix(comment, marker)
+	}
+	return strings.HasPrefix(comment, marker+"-")
+}
+
+// splitIPTablesRule returns the arguments of an "-A <chain> ..." line, ready to
+// be passed back to iptables -D.
+func splitIPTablesRule(line string) []string {
+	tokens := tokenizeIPTablesArgs(line)
+	if len(tokens) < 2 || tokens[0] != "-A" {
+		return nil
+	}
+	return tokens[2:]
+}
+
+// tokenizeIPTablesArgs splits a rule the way iptables-restore parses one:
+// whitespace separates arguments, double quotes group them and a backslash
+// escapes the next character. iptables quotes any argument that would otherwise
+// be split, such as a comment containing a space.
+func tokenizeIPTablesArgs(line string) []string {
+	tokens := make([]string, 0, 16)
+	var current strings.Builder
+	inQuotes := false
+	escaped := false
+	started := false
+	for _, r := range line {
+		switch {
+		case escaped:
+			current.WriteRune(r)
+			escaped = false
+		case r == '\\':
+			escaped = true
+			started = true
+		case r == '"':
+			inQuotes = !inQuotes
+			started = true
+		case (r == ' ' || r == '\t') && !inQuotes:
+			if started {
+				tokens = append(tokens, current.String())
+				current.Reset()
+				started = false
+			}
+		default:
+			current.WriteRune(r)
+			started = true
+		}
+	}
+	if started {
+		tokens = append(tokens, current.String())
+	}
+	return tokens
 }
 
 func tableName(table string) string {

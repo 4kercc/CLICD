@@ -256,6 +256,17 @@ curl -fsSL https://raw.githubusercontent.com/4kercc/CLICD/main/install.sh | sudo
 - **涉及文件**：`backend/internal/kvm/kvm.go`。
 - **实机验证**：部署后 vm-25 成功启动（审计 `start | 成功`），域定义中 `virtio-win.iso` 引用数归零，块设备只剩系统盘与 unattend 盘；vm-4 的下次开机同样会自动跳过缺失盘。
 
+### 23. 🧵 发夹 NAT 规则被误删：iptables 按规格删除 + 规则自愈 (Hairpin Rule Loss - v1.20.15)
+- **现象**：v1.20.13 修好并实测通过的"同网段用公网 IP 互访"再次失效 —— 用户的工作机（即 vm-4，出口公网 `23.95.253.10`）`ping 23.95.253.12` 完全不通，TCP 也连不上。
+- **复现方式**：用 `ip netns` + veth 挂到 `virbr0` 造一台 `192.168.122.240` 的模拟客户机（与 vm-3 同网段，测完即可回收，不需要动任何真实虚拟机）。基线 ping 输出是决定性证据：`64 bytes from 192.168.122.251 … (DIFFERENT ADDRESS!)` —— 回包源地址是 vm-3 的**内网 IP**（二层直回、绕过宿主机），Linux 会标注 "DIFFERENT ADDRESS"，Windows 则直接丢弃，所以表现为"不通"。规则表里 `clicd-hairpin-10.0.3.0_24` 在、**`clicd-hairpin-192.168.122.0_24` 不在**。
+- **根因：清理规则时按行号删除**。`deleteTaggedIPTablesRules` 先用 `iptables -L --line-numbers` 取行号，再 `iptables -D <chain> <N>` 删除。**行号只在取列表那一刻有效**：同一轮恢复里多个容器并发清理、libvirt/lxc-net 也在改 POSTROUTING，链一变短，过期行号就会指向下面原本更靠后的规则 —— hairpin 规则正好在链尾，成了最容易被误伤的目标。
+  - **旁证**：日志里大量 `Index of deletion too big` 与 `RULE_DELETE failed (No such file or directory)`（行号已经错位的指纹）；更有力的是 **libvirt 自己的 `-A POSTROUTING -j LIBVIRT_PRT` 跳转也一起消失了** —— 那是同一个 bug 的连带伤害，说明被删的从来不止"目标规则"。
+- **修复①（按规格删除）**：改用 `iptables -S <chain>` 取回规则原文，把 `-A <chain> …` 之后的参数原样交给 `iptables -D`，**不再依赖任何位置**。注释匹配也改为按注释 token 比对：`clicd-c3-` 作为命名空间前缀匹配，`clicd-pubguard-<ip>` 要求整串匹配（否则 `…253_1` 会抢占 `…253_12`）。附引号/反斜杠感知的分词器，正确处理 iptables 给含空格注释加引号的写法。
+- **修复②（清理幂等）**：规则"已经不在了"（`Bad rule` / `No such file or directory`）视为成功。此前同容器的两条同步路径（端口映射恢复 + 网络同步）并发清理时，后到的删除会报错，而 `ApplyPortMappings` 会因该错误**提前返回、跳过重新下发映射** —— 报错本身是噪音，跳过下发才是真故障。
+- **修复③（规则自愈）**：新增 `StartPublicIPv4HairpinRepair()`，每 60 秒重新确认一次 hairpin 规则。这两条是**全局规则**（每个网桥子网一条，不挂在单个容器上），而 libvirt 与 lxc-net 都会重写 POSTROUTING，因此不能只在开机时下发一次。
+- **涉及文件**：`backend/internal/lxc/portmap.go`、`backend/internal/lxc/portmap_cleanup_test.go`（新增）、`backend/internal/lxc/lxc_test.go`、`backend/main.go`。
+- **实机验证**：netns 模拟客户机 ping `.12` 0% 丢包且回包源地址正确；TCP `23.95.253.12:22002` 收到客户机 sshd 横幅 `SSH-2.0-OpenSSH_10.1`；手动删除 hairpin 规则后 **75 秒内自动恢复**（日志 `IPv4 hairpin enabled for 192.168.122.0/24`）；服务重启后无任何删除报错；`go vet` 与 `go test ./...` 全绿。
+
 ## Features / 功能介绍
 
 ### English
