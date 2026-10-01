@@ -75,3 +75,7 @@ deploy-arm.ps1
 deploy-dhcp.ps1
 deploy-pve-windows.ps1
 .tmp-*
+
+# Local ops notes (server internal IPs, not for the public repo)
+docs/vip-keepalived-test.md
+.zcodeignore
