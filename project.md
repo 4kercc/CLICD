@@ -415,6 +415,21 @@
 
 ---
 
+### 30. 🔁 远端传输加固：保活 + 断点续传 + 幂等重跑 (v1.20.21)
+- **背景**：见上节遗留②。上传实现为 `session.Start("cat > 文件")` + `io.Copy(stdin, src)`——**无保活、无续传、无重试**，连接中断即整文件作废。
+- **实现**（新增 `remote/remote_transfer.go`，替换 `remote.go` 中的旧 `UploadFile`/`DownloadFile`；`TestConnection`/`DeleteFile`/`removeSFTPPath` 统一改用 `c.dial()`）：
+  - `dial()`：`net.Dialer{KeepAlive: 30s}` + `ssh.NewClientConn`，并起 goroutine 每 20s 发 `keepalive@openssh.com`（客户端关闭时该 goroutine 自然退出）；
+  - `UploadFile`：4 次尝试、退避 5/15/45s；每次尝试先 `remoteFileSize`（`stat -c %s || stat -f %z`）决定偏移，`cat >>` 续传；完成后校验远端大小；
+  - **`remotePrefixMatches`（关键修正）**：仅比大小会把「同尺寸的不同文件」误判为已完成（E2E 实测到：上轮测试残留的旧文件被跳过 → 远端 MD5 不符）。现于续传/跳过前比对双方**前 64KB 的 MD5**（远端 `head -c N file | md5sum`），不匹配则从头重传；
+  - **≤1MB 的文件一律重写**（`sftpFreshUploadMax`）：`snapshot-meta.json` 会重新生成且尺寸可能不变；
+  - `DownloadFile` 对称实现：偏移续传（`tail -c +N`）、`O_APPEND`、大小校验；本地大于远端时从头下；
+  - 幂等：已完整且前缀校验通过的文件直接跳过 —— **重跑同步只补未传完的部分**。
+- **实机验证（真 SFTP，1.5GB /dev/urandom）**：首传 16.35s（≈92MB/s）MD5 一致；远端 `truncate -s 500M` 后重传 → 续传 1036MB、MD5 完全一致；已完整文件重跑 547ms 秒回；下载续传（本地 `head -c 400M` 预置）MD5 一致；测试数据与临时 harness 已清理。
+- **涉及文件**：`backend/internal/storage/remote/{remote_transfer.go,remote.go,remote_delete.go}`。
+- **下一步（用户已确认的改造计划）**：① 创建快照时勾选「同时备份基础盘」+ 基础盘还原；② 手动版 seal（**停机版**：2 分钟优雅关机 → 超时强制关机）；③ 定时任务（**每周日 02:00**，per-instance 开关，含 Telegram 报告）；**第一台验证机：vm-4（当前关机状态）**。顺序：先修传输（本节已完成）→ 再手动 seal → 最后定时。
+
+---
+
 ## 📝 AI 接力开发与修改记录规范 (Development Guidelines for AI Assistants)
 后续所有 AI 助手在接力开发本项目时，必须严格遵守以下规范：
 1. **持续同步 `project.md`**：完成任何代码修改、架构调整或需求上线后，必须在 `project.md` 中以清晰的小节记录修改背景、改动文件、技术细节以及实机验证状态。

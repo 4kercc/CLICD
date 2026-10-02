@@ -323,6 +323,16 @@ curl -fsSL https://raw.githubusercontent.com/4kercc/CLICD/main/install.sh | sudo
 - **涉及文件**：`backend/internal/storage/remote/{remote.go,remote_delete.go,sync.go,sync_delete_test.go}`、`backend/internal/lxc/snapshot.go`、`backend/internal/kvm/kvm.go`。
 - **实机验证（真 SFTP）**：上传测试快照 → 删除 → 远端目录被删且**空父目录逐级清理**（`snapshots/192.3.170.78/` 整体消失）；重复删除不再报"已删除"（正确识别为不存在）；伪造的传统路径孤儿 `snapshots/998/...` 同样被清除。单测覆盖候选路径（含去重）与存储池选择。
 
+### 29. 🔁 远端传输加固：保活 + 断点续传 + 幂等重跑 (Resumable Transfers - v1.20.21)
+- **问题**：远端同步自 9/27 起 100% 失败（`Failed to sync … EOF`），失败的全是 30–52GB 的大快照——上传实现是 `cat > 文件`：**连接一断就从零重来**，且没有任何保活，长传输被中途掐断后整个快照同步失败、下次重跑再传 50GB（大概率再失败）。
+- **修复**（`remote_transfer.go` 新增，SFTP 客户端）：
+  - **保活**：TCP keepalive（30s）+ SSH 层 `keepalive@openssh.com`（20s），避免会话被判定空闲而断开；
+  - **断点续传**：重试时先取远端文件大小，从该偏移继续（`cat >>` 追加），下载同理（`tail -c +N`）；**重试 4 次、退避 5/15/45 秒**；
+  - **前缀校验（关键）**：只比大小不足以信任——**同尺寸的不同文件会被误判为"已传完"**（实测抓到：残留旧文件被跳过，远端 MD5 不符）。现在续传/跳过前会比对双方**前 64KB 的 MD5**，确认远端确实是本文件的前缀；不是则整体重传；
+  - **小文件一律重写**（≤1MB）：`snapshot-meta.json` 这类重新生成的文件可能尺寸不变而内容变化；
+  - **幂等**：已完整上传的文件再次同步直接跳过，"重跑一次同步"从"再传 50GB"变成"只补没传完的"。
+- **实机验证（真 SFTP，1.5GB 随机文件）**：首传 16.35s（≈92MB/s）MD5 一致；**远端截断到 500MB 后重传 → 续传 1036MB 且 MD5 完全一致**（断点偏移正确）；对已完整文件重跑 → 547ms 秒回不传数据；下载续传（本地预截断 400MB）→ MD5 一致。
+
 ## Features / 功能介绍
 
 ### English

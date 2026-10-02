@@ -35,11 +35,7 @@ func (c *SFTPClient) PruneEmptyDir(ctx context.Context, remotePath string) error
 // separately. Exit status 7 means "was not there", which the caller reports as
 // absent rather than removed.
 func (c *SFTPClient) removeSFTPPath(ctx context.Context, remotePath string, recursive bool) (bool, error) {
-	cfg, err := c.sshConfig()
-	if err != nil {
-		return false, err
-	}
-	client, err := ssh.Dial("tcp", fmt.Sprintf("%s:%d", c.Host, c.Port), cfg)
+	client, err := c.dial()
 	if err != nil {
 		return false, err
 	}

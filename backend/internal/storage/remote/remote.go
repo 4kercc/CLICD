@@ -116,12 +116,8 @@ func (c *SFTPClient) sshConfig() (*ssh.ClientConfig, error) {
 }
 
 func (c *SFTPClient) TestConnection(ctx context.Context) error {
-	cfg, err := c.sshConfig()
-	if err != nil {
-		return err
-	}
 	addr := fmt.Sprintf("%s:%d", c.Host, c.Port)
-	client, err := ssh.Dial("tcp", addr, cfg)
+	client, err := c.dial()
 	if err != nil {
 		return fmt.Errorf("SFTP connection failed to %s: %w", addr, err)
 	}
@@ -141,102 +137,8 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
 }
 
-func (c *SFTPClient) UploadFile(ctx context.Context, localPath, remotePath string) error {
-	cfg, err := c.sshConfig()
-	if err != nil {
-		return err
-	}
-	client, err := ssh.Dial("tcp", fmt.Sprintf("%s:%d", c.Host, c.Port), cfg)
-	if err != nil {
-		return err
-	}
-	defer client.Close()
-
-	session, err := client.NewSession()
-	if err != nil {
-		return err
-	}
-	defer session.Close()
-
-	fullRemote := path.Join(c.BasePath, remotePath)
-	dir := path.Dir(fullRemote)
-
-	// Ensure remote directory exists
-	mkdirSession, _ := client.NewSession()
-	if mkdirSession != nil {
-		_ = mkdirSession.Run("mkdir -p " + shellQuote(dir))
-		mkdirSession.Close()
-	}
-
-	srcFile, err := os.Open(localPath)
-	if err != nil {
-		return err
-	}
-	defer srcFile.Close()
-
-	stat, err := srcFile.Stat()
-	if err != nil {
-		return err
-	}
-
-	// Stream file via cat > remotePath
-	stdin, err := session.StdinPipe()
-	if err != nil {
-		return err
-	}
-
-	cmd := "cat > " + shellQuote(fullRemote)
-	if err := session.Start(cmd); err != nil {
-		return err
-	}
-
-	_ = stat
-	if _, err := io.Copy(stdin, srcFile); err != nil {
-		stdin.Close()
-		return err
-	}
-	stdin.Close()
-
-	return session.Wait()
-}
-
-func (c *SFTPClient) DownloadFile(ctx context.Context, remotePath, localPath string) error {
-	cfg, err := c.sshConfig()
-	if err != nil {
-		return err
-	}
-	client, err := ssh.Dial("tcp", fmt.Sprintf("%s:%d", c.Host, c.Port), cfg)
-	if err != nil {
-		return err
-	}
-	defer client.Close()
-
-	session, err := client.NewSession()
-	if err != nil {
-		return err
-	}
-	defer session.Close()
-
-	fullRemote := path.Join(c.BasePath, remotePath)
-	_ = os.MkdirAll(filepath.Dir(localPath), 0755)
-
-	dstFile, err := os.Create(localPath)
-	if err != nil {
-		return err
-	}
-	defer dstFile.Close()
-
-	session.Stdout = dstFile
-	cmd := "cat " + shellQuote(fullRemote)
-	return session.Run(cmd)
-}
-
 func (c *SFTPClient) DeleteFile(ctx context.Context, remotePath string) error {
-	cfg, err := c.sshConfig()
-	if err != nil {
-		return err
-	}
-	client, err := ssh.Dial("tcp", fmt.Sprintf("%s:%d", c.Host, c.Port), cfg)
+	client, err := c.dial()
 	if err != nil {
 		return err
 	}
