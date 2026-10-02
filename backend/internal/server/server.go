@@ -76,18 +76,31 @@ func hasEntryKnock(r *http.Request) bool {
 // authenticated traffic is completely unaffected and /<prefix> just lands on
 // the panel. The prefix is read per request, so changing it in settings takes
 // effect without a restart.
-func entryPathGate(next http.Handler) http.Handler {
+//
+// Rejected guesses are rate limited per IP: past 30/minute or 100/10 minutes
+// the IP is banned from the unauthenticated surface for an hour and gets a 403
+// instead of a 404, which makes brute-forcing the prefix impractical.
+func entryPathGate(next http.Handler, limiter *entryLimiter) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		prefix := entryPathPrefix()
 		if prefix == "" {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if isEntryKnockPath(r.URL.Path, prefix) {
-			if api.RequestIsAuthenticated(r) {
+		ip := entryClientIP(r)
+		if api.RequestIsAuthenticated(r) {
+			if isEntryKnockPath(r.URL.Path, prefix) {
 				http.Redirect(w, r, "/", http.StatusFound)
-				return
+			} else {
+				next.ServeHTTP(w, r)
 			}
+			return
+		}
+		if limiter.isBanned(ip) {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+		if isEntryKnockPath(r.URL.Path, prefix) {
 			if r.Method != http.MethodGet && r.Method != http.MethodHead {
 				http.NotFound(w, r)
 				return
@@ -103,8 +116,20 @@ func entryPathGate(next http.Handler) http.Handler {
 			http.Redirect(w, r, "/login", http.StatusFound)
 			return
 		}
-		if api.RequestIsAuthenticated(r) || hasEntryKnock(r) {
+		if hasEntryKnock(r) {
 			next.ServeHTTP(w, r)
+			return
+		}
+		banned, justBanned := limiter.hit(ip)
+		if banned {
+			if justBanned {
+				log.Printf("Panel entry gate: IP %s banned for %s (entry rate limit exceeded)", ip, entryBanDuration)
+				config.AddAuditLogFull("security.entry_ban", ip,
+					fmt.Sprintf("banned for %s: exceeded %d/%s or %d/%s rejected requests",
+						entryBanDuration, entryRateLimit1, entryRateWindow1, entryRateLimit2, entryRateWindow2),
+					"system", ip, "", true, "")
+			}
+			http.Error(w, "Forbidden", http.StatusForbidden)
 			return
 		}
 		http.NotFound(w, r)
@@ -291,6 +316,9 @@ func Run() error {
 	mux := http.NewServeMux()
 	setupRoutes(mux)
 
+	entryLimiter := newEntryLimiter()
+	entryLimiter.startJanitor()
+
 	addr := fmt.Sprintf("0.0.0.0:%d", config.AppConfig.Port)
 	log.Printf("CLICD Web Server starting on http://0.0.0.0:%d", config.AppConfig.Port)
 	log.Printf("Admin user: %s", config.AppConfig.AdminUser)
@@ -300,7 +328,7 @@ func Run() error {
 
 	server := &http.Server{
 		Addr:    addr,
-		Handler: panelAccessMiddleware(entryPathGate(mux)),
+		Handler: panelAccessMiddleware(entryPathGate(mux, entryLimiter)),
 	}
 
 	if sslEnabled() {

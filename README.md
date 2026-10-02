@@ -290,6 +290,18 @@ curl -fsSL https://raw.githubusercontent.com/4kercc/CLICD/main/install.sh | sudo
 - **涉及文件**：`backend/internal/server/server.go`（门禁中间件）、`backend/internal/api/entrypath.go`、`backend/internal/config/entrypath.go`、`backend/internal/config/{config,store_sqlite}.go`、`backend/internal/api/auth.go`（导出 `RequestIsAuthenticated`）、`frontend/src/pages/Settings.tsx`、`frontend/src/services/api.ts`。
 - **实机验证（外网视角）**：`/`、`/login`、`/containers`、`POST /api/login`、静态资源 → 全部 404；`GET /zxcvb` → 302 `/login` 并种 cookie；带敲门 cookie 后 `/login` 200、`POST /api/login` 对错误密码正常返回 401（登录接口可用）；带 API key 的程序化调用不受门禁影响（key 本身即凭证）。
 
+### 26. 🛡️ 入口门禁加速率限制：穷举前缀从 0.6 小时变成 45 年 (Entry Rate Limit - v1.20.18)
+- **需求**：门禁的 302-vs-404 差异本身是命中判定器，且无速率限制——实测本机 5175 req/s，5 位小写前缀 **0.6 小时**即可穷举。为门禁加 IP 速率限制：**同 IP 每分钟最多 30 次、10 分钟最多 100 次被拒请求，超限封禁 1 小时并直接返回 403**。
+- **实现**（`backend/internal/server/entrylimiter.go` 新增 `entryLimiter`，`entryPathGate` 接入）：
+  - **只统计被门禁拒绝的请求**（未登录、无敲门 cookie、非敲门路径）——已登录流量、敲门动作、带敲门 cookie 的请求都不计数，正常用户永远不可能触发；
+  - 双滑动窗口（1 分钟 / 10 分钟）按 IP 记录，超限即封禁：封禁期间该 IP 的**所有未认证请求（含敲门路径）一律 403**，已登录用户完全不受影响；
+  - 封禁时写审计（`security.entry_ban`）+ 服务日志；封禁计数清零，过期后从零重新开始；
+  - 内存有界（IP 数上限 + 每 10 分钟清理 2 小时无活动的 IP）；**封禁状态在内存中，服务重启即清空**；
+  - 刻意不信任 `X-Forwarded-For`，按 `RemoteAddr` 计数——该头是攻击者可控的，按它封禁等于没封。
+- **实测数据**：连发 35 次错误前缀，第 1–29 次 404、**第 30 次起 403**；封禁期间敲门路径也 403；服务器本机（另一 IP）敲门依然 302（严格按 IP 隔离）；重启后封禁清除。**穷举成本对比：加限流前 5 位前缀 0.6 小时，加限流后有效猜测速率被压到 30 次/小时 ≈ 45 年。**
+- **单元测试**：`entrylimiter_test.go`（假时钟注入）覆盖：每分钟限制触发、10 分钟窗口触发、封禁过期后重新计数、IP 隔离、旧请求滑出窗口。
+- **涉及文件**：`backend/internal/server/{entrylimiter.go,entrylimiter_test.go,server.go}`。
+
 ## Features / 功能介绍
 
 ### English
