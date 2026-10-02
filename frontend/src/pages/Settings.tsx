@@ -1,10 +1,11 @@
 import { Dispatch, SetStateAction, useCallback, useEffect, useState } from 'react'
-import { Bot, Check, Clock, Copy, Globe, KeyRound, ListTodo, Lock, LogIn, MessageSquare, Minus, Monitor, Plus, QrCode, RefreshCw, Save, Send, Shield, ShieldCheck, Terminal, Upload, UserCog } from 'lucide-react'
+import { Bot, Check, Clock, Copy, Globe, KeyRound, Link2, ListTodo, Lock, LogIn, MessageSquare, Minus, Monitor, Plus, QrCode, RefreshCw, Save, Send, Shield, ShieldCheck, Terminal, Upload, UserCog } from 'lucide-react'
 import {
   changePassword,
   changeUsername,
   disableTOTP,
   enableTOTP,
+  getEntryPathSettings,
   getLoginLogs,
   getPanelAccessPolicy,
   getSSLSettings,
@@ -12,6 +13,7 @@ import {
   getTelegramSettings,
   getTOTPStatus,
   getWebSSHOriginSettings,
+  EntryPathSettings,
   LoginLog,
   PanelAccessPolicy,
   setupTOTP,
@@ -20,6 +22,7 @@ import {
   TelegramSettings,
   testTelegramMessage,
   TOTPSetupResponse,
+  updateEntryPathSettings,
   updateTaskQueueSettings,
   updateSSLSettings,
   updatePanelAccessPolicy,
@@ -31,7 +34,7 @@ import { useDialog } from '../components/Dialog'
 import { useAuth } from '../contexts/AuthContext'
 import { useLanguage } from '../contexts/LanguageContext'
 
-type SettingsSection = 'tasks' | 'account' | '2fa' | 'telegram' | 'access' | 'webssh' | 'ssl' | 'logs'
+type SettingsSection = 'tasks' | 'account' | '2fa' | 'telegram' | 'access' | 'entry' | 'webssh' | 'ssl' | 'logs'
 
 const settingsSections = [
   { id: 'tasks', label: '任务队列', icon: ListTodo },
@@ -39,6 +42,7 @@ const settingsSections = [
   { id: '2fa', label: '两步验证 (2FA)', icon: KeyRound },
   { id: 'telegram', label: 'Telegram Bot', icon: MessageSquare },
   { id: 'access', label: '访问来源', icon: Shield },
+  { id: 'entry', label: '访问入口', icon: Link2 },
   { id: 'webssh', label: 'WebSSH 访问', icon: Terminal },
   { id: 'ssl', label: 'SSL 证书', icon: ShieldCheck },
   { id: 'logs', label: '登录日志', icon: LogIn },
@@ -69,6 +73,9 @@ export default function Settings() {
   const [webSSHOrigins, setWebSSHOrigins] = useState<WebSSHOriginSettings | null>(null)
   const [webSSHOriginsText, setWebSSHOriginsText] = useState('')
   const [savingWebSSHOrigins, setSavingWebSSHOrigins] = useState(false)
+  const [entrySettings, setEntrySettings] = useState<EntryPathSettings | null>(null)
+  const [entryPathInput, setEntryPathInput] = useState('')
+  const [savingEntryPath, setSavingEntryPath] = useState(false)
   const [taskQueue, setTaskQueue] = useState<TaskQueueSettings | null>(null)
   const [taskConcurrency, setTaskConcurrency] = useState(2)
   const [savingTaskQueue, setSavingTaskQueue] = useState(false)
@@ -134,6 +141,18 @@ export default function Settings() {
     }
   }, [])
 
+  const fetchEntryPath = useCallback(async () => {
+    try {
+      const res = await getEntryPathSettings()
+      const data = res.data.data
+      if (!data) return
+      setEntrySettings(data)
+      setEntryPathInput(data.entry_path || '')
+    } catch (err) {
+      console.error(err)
+    }
+  }, [])
+
   const fetchTaskQueue = useCallback(async () => {
     try {
       const res = await getTaskQueueSettings()
@@ -193,6 +212,7 @@ export default function Settings() {
     fetchLogs()
     fetchSSL()
     fetchWebSSHOrigins()
+    fetchEntryPath()
     fetchTaskQueue()
     fetchAccessPolicy()
     fetchTOTPStatus()
@@ -203,7 +223,7 @@ export default function Settings() {
       clearInterval(logTimer)
       clearInterval(taskTimer)
     }
-  }, [fetchAccessPolicy, fetchLogs, fetchSSL, fetchTaskQueue, fetchTelegram, fetchTOTPStatus, fetchWebSSHOrigins])
+  }, [fetchAccessPolicy, fetchEntryPath, fetchLogs, fetchSSL, fetchTaskQueue, fetchTelegram, fetchTOTPStatus, fetchWebSSHOrigins])
 
   const handleSaveTaskQueue = async () => {
     const concurrency = Math.max(1, Math.min(16, Math.round(taskConcurrency || 1)))
@@ -274,6 +294,31 @@ export default function Settings() {
       dialog.alert('失败', e.response?.data?.message || 'Origin 白名单保存失败')
     } finally {
       setSavingWebSSHOrigins(false)
+    }
+  }
+
+  const handleSaveEntryPath = async () => {
+    setSavingEntryPath(true)
+    try {
+      const res = await updateEntryPathSettings(entryPathInput.trim())
+      const data = res.data.data
+      if (data) {
+        setEntrySettings(data)
+        setEntryPathInput(data.entry_path || '')
+      }
+      const prefix = data?.entry_path || ''
+      if (prefix) {
+        const target = `${window.location.origin}/${prefix}`
+        dialog.alert('已保存', `新的访问入口：${target}\n\n未登录状态下，其他任何路径（包括 /login）都会返回 404。页面即将跳转到新入口。`)
+        window.location.assign(target)
+        return
+      }
+      dialog.alert('完成', '入口前缀已清空，面板恢复为根路径直接访问。')
+    } catch (err: unknown) {
+      const e = err as { response?: { data?: { message?: string } } }
+      dialog.alert('失败', e.response?.data?.message || '访问入口保存失败')
+    } finally {
+      setSavingEntryPath(false)
     }
   }
 
@@ -777,6 +822,17 @@ export default function Settings() {
             />
           )}
 
+          {activeSection === 'entry' && (
+            <EntryPathCard
+              settings={entrySettings}
+              entryPathInput={entryPathInput}
+              saving={savingEntryPath}
+              onEntryPathInputChange={setEntryPathInput}
+              onRefresh={fetchEntryPath}
+              onSave={handleSaveEntryPath}
+            />
+          )}
+
           {activeSection === 'ssl' && (
             <SSLCard
               ssl={ssl}
@@ -1189,6 +1245,56 @@ interface WebSSHOriginCardProps {
   onOriginsTextChange: (value: string) => void
   onRefresh: () => void
   onSave: () => void
+}
+
+interface EntryPathCardProps {
+  settings: EntryPathSettings | null
+  entryPathInput: string
+  saving: boolean
+  onEntryPathInputChange: (value: string) => void
+  onRefresh: () => void
+  onSave: () => void
+}
+
+function EntryPathCard(props: EntryPathCardProps) {
+  const normalized = props.entryPathInput.trim().replace(/^\/+|\/+$/g, '')
+  const previewURL = normalized ? `${window.location.origin}/${normalized}` : `${window.location.origin}/`
+  return (
+    <div className="rounded-lg border border-gray-200 bg-white p-4">
+      <div className="mb-4 flex items-center justify-between gap-3">
+        <h2 className="flex items-center gap-2 text-sm font-semibold text-black">
+          <Link2 className="h-4 w-4" />访问入口（隐藏面板）
+        </h2>
+        <button onClick={props.onRefresh} className="rounded-md border border-gray-200 p-1.5 text-gray-500 hover:bg-gray-50" title="刷新">
+          <RefreshCw className="h-4 w-4" />
+        </button>
+      </div>
+      <div className="space-y-3">
+        <div>
+          <label className="mb-1 block text-xs text-gray-500">敲门路径（留空恢复根路径直接访问）</label>
+          <div className="flex items-center gap-2">
+            <span className="shrink-0 font-mono text-xs text-gray-400">{window.location.origin}/</span>
+            <input
+              value={props.entryPathInput}
+              onChange={(e) => props.onEntryPathInputChange(e.target.value)}
+              placeholder="例如 zxcvb"
+              className="w-48 rounded-md border border-gray-300 bg-white px-3 py-2 font-mono text-xs text-black"
+            />
+          </div>
+        </div>
+        <div className="rounded-md border border-gray-100 bg-gray-50 p-3 text-xs text-gray-600">
+          <div>启用后：未登录状态下访问 <span className="font-mono">{previewURL}</span> 会先解锁登录页，其他任何路径（包括 <span className="font-mono">/login</span>）一律返回 404。</div>
+          <div className="mt-1">已登录用户不受影响，所有页面照常使用；保存后立即生效，请牢记新入口。</div>
+        </div>
+        <div className="flex justify-end">
+          <button onClick={props.onSave} disabled={props.saving} className="inline-flex items-center justify-center gap-2 rounded-md bg-black px-4 py-2 text-sm text-white hover:bg-gray-800 disabled:opacity-50">
+            <Save className="h-4 w-4" />
+            {props.saving ? '保存中...' : '保存访问入口'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
 }
 
 function WebSSHOriginCard(props: WebSSHOriginCardProps) {

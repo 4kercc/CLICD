@@ -871,6 +871,7 @@ type ClicdConfig struct {
 	WebSSHAllowedOrigins []string               `json:"webssh_allowed_origins"`
 	PanelAccessPolicy    PanelAccessPolicy      `json:"panel_access_policy"`
 	WebAccessDisabled    bool                   `json:"web_access_disabled"`
+	EntryPath            string                 `json:"entry_path"`
 	SecurityAutoShutdown bool                   `json:"security_auto_shutdown"`
 	TaskConcurrency      int                    `json:"task_concurrency"`
 	Language             string                 `json:"language"`

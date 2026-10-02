@@ -190,6 +190,19 @@ func isValidToken(tokenString string) bool {
 	return ok
 }
 
+// RequestIsAuthenticated reports whether the request carries a valid admin or
+// sub-user session token or a valid API key. The panel entry gate uses it to
+// wave through traffic that is already inside before applying the secret path.
+func RequestIsAuthenticated(r *http.Request) bool {
+	if _, ok := claimsFromToken(tokenFromRequest(r)); ok {
+		return true
+	}
+	if _, ok := validateApiKeyRequest(r); ok {
+		return true
+	}
+	return false
+}
+
 func claimsFromToken(tokenString string) (jwt.MapClaims, bool) {
 	if tokenString == "" {
 		return nil, false

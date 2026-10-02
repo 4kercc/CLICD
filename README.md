@@ -279,6 +279,17 @@ curl -fsSL https://raw.githubusercontent.com/4kercc/CLICD/main/install.sh | sudo
 - **涉及文件**：`backend/internal/lxc/portmap.go`、`backend/internal/lxc/portmap_cleanup_test.go`、`backend/internal/kvm/kvm.go`、`backend/internal/api/ipv6.go`（新增 `backend/internal/api/ipv6_test.go`）。
 - **运维提示**：换绑公网 IP 前，先在客户端清掉该地址保存的凭据与 SSH 主机密钥——旧地址会立刻失效（别名回收、规则清空），而新地址上客户端残留的"按地址缓存"会让正确密码也被拒。
 
+### 25. 🚪 面板入口隐藏：敲门路径，未登录访问一律 404 (Panel Entry Gate - v1.20.17)
+- **需求**：`/login`、`/` 等常规入口对未登录访客返回 404，只有知道秘密路径（如 `/zxcvb`）的人才能解锁登录页——扫描器和爆破工具探测不到面板存在。
+- **实现思路（刻意轻量）**：**完全不动前端路由、打包与 API 调用**，只在后端加一个"敲门门禁"中间件（`entryPathGate`）：
+  - **已登录**（session token 或 API key 有效）→ 一切照旧，所有页面正常使用；访问 `/<前缀>` 则 302 回首页；
+  - **未登录访问 `/<前缀>`** → 种下敲门 cookie（HttpOnly + SameSite=Lax，12 小时），302 到 `/login`；
+  - **未登录且无敲门 cookie** → 一律 404：`/`、`/login`、`/api/login`（爆破目标）、静态资源全部不可见；
+  - 敲门 cookie 的值由 `HMAC-SHA256(JWTSecret)` 派生，不可伪造、跨重启有效；前缀按请求读取，设置里改完立即生效，无需重启。
+- **设置**：设置 → **访问入口** 卡片，可设置/清空前缀，实时预览新地址，保存后自动跳转；写入审计 `settings.entry_path`。空值 = 关闭门禁，恢复根路径直接访问。
+- **涉及文件**：`backend/internal/server/server.go`（门禁中间件）、`backend/internal/api/entrypath.go`、`backend/internal/config/entrypath.go`、`backend/internal/config/{config,store_sqlite}.go`、`backend/internal/api/auth.go`（导出 `RequestIsAuthenticated`）、`frontend/src/pages/Settings.tsx`、`frontend/src/services/api.ts`。
+- **实机验证（外网视角）**：`/`、`/login`、`/containers`、`POST /api/login`、静态资源 → 全部 404；`GET /zxcvb` → 302 `/login` 并种 cookie；带敲门 cookie 后 `/login` 200、`POST /api/login` 对错误密码正常返回 401（登录接口可用）；带 API key 的程序化调用不受门禁影响（key 本身即凭证）。
+
 ## Features / 功能介绍
 
 ### English

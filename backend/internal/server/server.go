@@ -1,7 +1,10 @@
 package server
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"net/http"
@@ -39,6 +42,75 @@ func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// entryKnockCookieName marks the cookie that unlocks the login page after a
+// visitor found the secret entry path.
+const entryKnockCookieName = "clicd_entry"
+
+func entryPathPrefix() string {
+	return strings.Trim(config.AppConfig.EntryPath, "/")
+}
+
+func isEntryKnockPath(path, prefix string) bool {
+	return prefix != "" && (path == "/"+prefix || path == "/"+prefix+"/")
+}
+
+// entryKnockValue derives the knock cookie value from the JWT secret, so it is
+// unforgeable without server-side state and survives restarts.
+func entryKnockValue() string {
+	mac := hmac.New(sha256.New, []byte(config.AppConfig.JWTSecret))
+	mac.Write([]byte("clicd-entry-knock"))
+	return hex.EncodeToString(mac.Sum(nil))[:32]
+}
+
+func hasEntryKnock(r *http.Request) bool {
+	cookie, err := r.Cookie(entryKnockCookieName)
+	if err != nil || cookie.Value == "" {
+		return false
+	}
+	return cookie.Value == entryKnockValue()
+}
+
+// entryPathGate keeps the panel hidden behind a secret knock path while one is
+// configured. Unauthenticated visitors get a 404 everywhere except /<prefix>,
+// which hands them a knock cookie and redirects to the login page; already
+// authenticated traffic is completely unaffected and /<prefix> just lands on
+// the panel. The prefix is read per request, so changing it in settings takes
+// effect without a restart.
+func entryPathGate(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		prefix := entryPathPrefix()
+		if prefix == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if isEntryKnockPath(r.URL.Path, prefix) {
+			if api.RequestIsAuthenticated(r) {
+				http.Redirect(w, r, "/", http.StatusFound)
+				return
+			}
+			if r.Method != http.MethodGet && r.Method != http.MethodHead {
+				http.NotFound(w, r)
+				return
+			}
+			http.SetCookie(w, &http.Cookie{
+				Name:     entryKnockCookieName,
+				Value:    entryKnockValue(),
+				Path:     "/",
+				HttpOnly: true,
+				SameSite: http.SameSiteLaxMode,
+				MaxAge:   43200,
+			})
+			http.Redirect(w, r, "/login", http.StatusFound)
+			return
+		}
+		if api.RequestIsAuthenticated(r) || hasEntryKnock(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		http.NotFound(w, r)
+	})
+}
+
 // setupRoutes configures API and static routes
 func setupRoutes(mux *http.ServeMux) {
 	// API routes
@@ -54,6 +126,7 @@ func setupRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/login-logs", corsMiddleware(api.AdminMiddleware(api.HandleLoginLogs)))
 	mux.HandleFunc("/api/ssl", corsMiddleware(api.AdminMiddleware(api.HandleSSLSettings)))
 	mux.HandleFunc("/api/webssh-origins", corsMiddleware(api.AdminMiddleware(api.HandleWebSSHOriginSettings)))
+	mux.HandleFunc("/api/entry-path", corsMiddleware(api.AdminMiddleware(api.HandleEntryPathSettings)))
 	mux.HandleFunc("/api/access-policy", corsMiddleware(api.AdminMiddleware(api.HandlePanelAccessPolicy)))
 	mux.HandleFunc("/api/containers", corsMiddleware(api.AuthMiddleware(api.SubUserMiddleware(api.HandleContainers))))
 	mux.HandleFunc("/api/containers/list", corsMiddleware(api.AuthMiddleware(api.SubUserMiddleware(api.HandleContainerListAlias))))
@@ -221,10 +294,13 @@ func Run() error {
 	addr := fmt.Sprintf("0.0.0.0:%d", config.AppConfig.Port)
 	log.Printf("CLICD Web Server starting on http://0.0.0.0:%d", config.AppConfig.Port)
 	log.Printf("Admin user: %s", config.AppConfig.AdminUser)
+	if entry := entryPathPrefix(); entry != "" {
+		log.Printf("Panel entry gate enabled: unauthenticated visitors must use /%s, every other path returns 404", entry)
+	}
 
 	server := &http.Server{
 		Addr:    addr,
-		Handler: panelAccessMiddleware(mux),
+		Handler: panelAccessMiddleware(entryPathGate(mux)),
 	}
 
 	if sslEnabled() {

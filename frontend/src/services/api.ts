@@ -567,6 +567,17 @@ export const getWebSSHOriginSettings = () =>
 export const updateWebSSHOriginSettings = (origins: string[]) =>
   api.put<APIResponse<WebSSHOriginSettings>>('/webssh-origins', { origins })
 
+export interface EntryPathSettings {
+  entry_path: string
+  enabled: boolean
+}
+
+export const getEntryPathSettings = () =>
+  api.get<APIResponse<EntryPathSettings>>('/entry-path')
+
+export const updateEntryPathSettings = (entry_path: string) =>
+  api.put<APIResponse<EntryPathSettings>>('/entry-path', { entry_path })
+
 export interface PanelAccessPolicy {
   enabled: boolean
   allowed_sources: string[]

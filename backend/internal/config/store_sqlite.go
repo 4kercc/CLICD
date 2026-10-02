@@ -663,6 +663,11 @@ func loadConfigFromDB() (*ClicdConfig, bool, error) {
 	if raw := strings.TrimSpace(meta["webssh_allowed_origins"]); raw != "" {
 		_ = json.Unmarshal([]byte(raw), &cfg.WebSSHAllowedOrigins)
 	}
+	if raw, ok := meta["entry_path"]; ok {
+		if normalized, err := NormalizeEntryPath(raw); err == nil {
+			cfg.EntryPath = normalized
+		}
+	}
 	if raw := strings.TrimSpace(meta["panel_access_policy"]); raw != "" {
 		_ = json.Unmarshal([]byte(raw), &cfg.PanelAccessPolicy)
 	}
@@ -817,6 +822,7 @@ func saveMeta(tx *sql.Tx) error {
 		"public_ipv4_pool":       string(publicIPv4PoolJSON),
 		"public_ipv6_prefixes":   string(publicIPv6PrefixesJSON),
 		"webssh_allowed_origins": string(webSSHAllowedOriginsJSON),
+		"entry_path":             AppConfig.EntryPath,
 		"panel_access_policy":    string(panelAccessPolicyJSON),
 		"web_access_disabled":    btoa(AppConfig.WebAccessDisabled),
 		"storage_pools":          string(storagePoolsJSON),

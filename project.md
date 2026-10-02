@@ -355,6 +355,25 @@
 
 ---
 
+### 26. 🚪 面板入口隐藏：敲门路径，未登录访问一律 404 (v1.20.17)
+- **需求**：给访问入口加一个"二级地址"——`/login`、`/` 等常规路径对未登录访客返回 404，只有访问秘密路径（如 `/zxcvb`）才解锁登录页；已登录用户一切照旧。
+- **方案取舍（用户建议的轻量路线）**：最初计划把整个面板搬到前缀下（vite base、axios、react-router basename、WebSocket URL 全部要改）。用户提出更优方案：**不动路由，把前缀做成"敲门路径"**——门禁只区分"已登录/未登录"，未登录者必须先敲门才能看到登录页，登录后走原有 URL。前端因此零路由改动，只加了设置卡片。
+- **实现**：
+  - **门禁中间件 `entryPathGate`**（`server/server.go`，挂在 `panelAccessMiddleware` 之内）：
+    - 前缀从 `config.AppConfig.EntryPath` **按请求读取**，设置里改完立即生效，无需重启；空值 = 门禁关闭（原有行为）；
+    - 已登录（`api.RequestIsAuthenticated`：session token / sub-user token / API key 任一有效）→ 直接放行；访问 `/<前缀>` 则 302 回首页；
+    - 未登录 `GET /<前缀>` → 种敲门 cookie（`clicd_entry`，HttpOnly、SameSite=Lax、12h）并 302 到 `/login`；
+    - 未登录且无敲门 cookie → **一律 404**（`/`、`/login`、`/api/login` 爆破目标、静态资源、`/api/version` 全部不可见）。
+  - **敲门 cookie 值**：`HMAC-SHA256(JWTSecret, "clicd-entry-knock")` 截断 32 位十六进制——不可伪造、无服务端状态、跨重启有效。
+  - **鉴权判断导出**：`api/auth.go` 新增 `RequestIsAuthenticated(r)`（复用 `claimsFromToken` / `validateApiKeyRequest`），供 server 包门禁使用。
+  - **配置**：`config.EntryPath`（json `entry_path`），`config/entrypath.go` 的 `NormalizeEntryPath` 限定单段安全字符（字母/数字/`_`/`-`，1-64），保留 `api`、`__entry__`；`app_meta` 表新增 `entry_path` 键读写。
+  - **设置接口**：`GET/PUT /api/entry-path`（AdminMiddleware），审计 `settings.entry_path`；前端设置页新增「访问入口」卡片（实时预览新地址，保存后自动跳转，清空即恢复根路径访问）。
+- **涉及文件**：`backend/internal/server/server.go`、`backend/internal/api/{entrypath.go,auth.go}`、`backend/internal/config/{entrypath.go,config.go,store_sqlite.go}`、`frontend/src/pages/Settings.tsx`、`frontend/src/services/api.ts`。
+- **实机验证（外网视角）**：`/` `/login` `/containers` `POST /api/login` `GET /api/version` 静态资源 → 全部 **404**；`GET /zxcvb` → 302 `/login` + Set-Cookie；带敲门 cookie：`/login` 200（SPA 正常加载，主 JS 200）、`POST /api/login` 错误密码返回 401（登录接口正常工作）；带 API key 的调用不受门禁影响。门禁关闭（空前缀）回归：`/` `/login` `/api/version` 全部 200。
+- **已知取舍**：敲门 cookie 12 小时过期后需重新敲门；`/api/version` 在未敲门时也 404（属于隐藏的一部分）；带 X-API-Key 的程序化调用不受门禁影响（key 本身即凭证）。
+
+---
+
 ## 📝 AI 接力开发与修改记录规范 (Development Guidelines for AI Assistants)
 后续所有 AI 助手在接力开发本项目时，必须严格遵守以下规范：
 1. **持续同步 `project.md`**：完成任何代码修改、架构调整或需求上线后，必须在 `project.md` 中以清晰的小节记录修改背景、改动文件、技术细节以及实机验证状态。
