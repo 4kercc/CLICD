@@ -35,6 +35,16 @@ var (
 	syncOpLocks sync.Map
 )
 
+// Transfer deadlines. A snapshot is tens of gigabytes, and a fixed half-hour
+// budget kills the transfer mid-flight on any link slower than ~28 MB/s — which
+// is what turned large nightly snapshots into "EOF" failures while the small
+// ones kept succeeding. Resumable transfers make a generous deadline safe: a
+// run that still fails continues where it stopped.
+const (
+	snapshotTransferTimeout = 6 * time.Hour
+	backupTransferTimeout   = 12 * time.Hour
+)
+
 func acquireSyncLock(id string) func() {
 	raw, _ := syncOpLocks.LoadOrStore(id, &sync.Mutex{})
 	mu := raw.(*sync.Mutex)
@@ -124,6 +134,12 @@ func writeSnapshotMeta(dir string, snap *config.Snapshot) {
 		"clicd_version": version.Current(),
 		"generated_at":  time.Now().Format("2006-01-02 15:04:05"),
 	}
+	// The overlay is useless without the base it sits on, so name it here: an
+	// offsite restore reads this file, not the panel database.
+	if snap.BaseImage != "" {
+		meta["base_image"] = snap.BaseImage
+		meta["base_image_remote"] = BaseImageRemotePath(snap.ContainerName, snap.BaseImage)
+	}
 	if snap.UniqueBytes != nil {
 		meta["unique_bytes"] = *snap.UniqueBytes
 	}
@@ -162,6 +178,45 @@ func writeBackupMeta(dir string, bkp *config.Backup) {
 	if err := os.WriteFile(filepath.Join(dir, "backup-meta.json"), data, 0o644); err != nil {
 		fmt.Printf("Warning: failed to write backup meta for %s: %v\n", bkp.ID, err)
 	}
+}
+
+// BaseImageRemotePath is where an instance's base image lives on the pool. It
+// sits under the same source host and instance name as that instance's
+// snapshots, because a snapshot overlay is useless without the base it was
+// taken on.
+func BaseImageRemotePath(containerName, baseFilePath string) string {
+	return fmt.Sprintf("bases/%s/%s/%s", SourceHostID(), SanitizePathSegment(containerName), SanitizePathSegment(path.Base(baseFilePath)))
+}
+
+// SyncBaseImageToPool uploads an instance's base image to the pool that syncs
+// snapshots, returning the remote path. It is idempotent and resumable, so
+// calling it again after an interruption continues rather than restarts — a
+// base image is tens of gigabytes.
+func SyncBaseImageToPool(containerName, localPath string) (string, error) {
+	localPath = strings.TrimSpace(localPath)
+	if localPath == "" {
+		return "", fmt.Errorf("base image path is empty")
+	}
+	if _, err := os.Stat(localPath); err != nil {
+		return "", fmt.Errorf("base image not readable: %w", err)
+	}
+	pool, ok := pickRemotePool("", func(pool config.StoragePool) bool { return pool.SyncSnapshots })
+	if !ok {
+		return "", fmt.Errorf("no enabled remote pool syncs snapshots")
+	}
+	client, err := NewClient(pool.Type, pool.Config)
+	if err != nil {
+		return "", fmt.Errorf("remote storage sync client init error for %s: %w", pool.Name, err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), snapshotTransferTimeout)
+	defer cancel()
+
+	remotePath := BaseImageRemotePath(containerName, localPath)
+	if err := client.UploadFile(ctx, localPath, remotePath); err != nil {
+		return "", err
+	}
+	fmt.Printf("Successfully synced base image %s to remote storage %s (%s)\n", path.Base(localPath), pool.Name, remotePath)
+	return remotePath, nil
 }
 
 // SnapshotRemoteCandidates lists the remote directories a snapshot may occupy:
@@ -356,7 +411,7 @@ func SyncSingleSnapshotToPool(snap *config.Snapshot, pool *config.StoragePool) e
 	if err != nil {
 		return fmt.Errorf("remote storage sync client init error for %s: %w", pool.Name, err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), snapshotTransferTimeout)
 	defer cancel()
 
 	writeSnapshotMeta(snap.Path, snap)
@@ -472,7 +527,7 @@ func SyncSingleBackupToPool(bkp *config.Backup, pool *config.StoragePool) error 
 	if err != nil {
 		return fmt.Errorf("remote storage sync client init error for %s: %w", pool.Name, err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), backupTransferTimeout)
 	defer cancel()
 
 	writeBackupMeta(bkp.Path, bkp)
@@ -589,7 +644,7 @@ func EnsureLocalSnapshotFromRemote(snapshot *config.Snapshot) error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), snapshotTransferTimeout)
 	defer cancel()
 
 	_ = os.MkdirAll(snapshot.Path, 0700)
@@ -671,7 +726,7 @@ func EnsureLocalSnapshotFromRemote(snapshot *config.Snapshot) error {
 		if err != nil {
 			return err
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
+		ctx, cancel := context.WithTimeout(context.Background(), backupTransferTimeout)
 		defer cancel()
 
 		_ = os.MkdirAll(backup.Path, 0700)

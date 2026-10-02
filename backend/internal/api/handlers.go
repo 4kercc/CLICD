@@ -199,6 +199,11 @@ func HandleSingleContainer(w http.ResponseWriter, r *http.Request) {
 		updateIPv6Addresses(w, r, id)
 		case action == "snapshots" || strings.HasPrefix(action, "snapshots/"):
 			handleContainerSnapshots(w, r, id, action)
+		case action == "base-image-sync" && r.Method == http.MethodPost:
+			if !requireScope(w, r, "snapshot:create") {
+				return
+			}
+			syncBaseImageToRemote(w, r, id)
 		case action == "backups" || strings.HasPrefix(action, "backups/"):
 			handleContainerBackups(w, r, id, action)
 		case action == "resize-disk" && r.Method == http.MethodPost:

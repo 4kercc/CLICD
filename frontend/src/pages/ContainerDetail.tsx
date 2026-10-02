@@ -44,6 +44,7 @@ import {
   ContainerUsage,
   createSubUser,
   createContainerSnapshot,
+  syncBaseImageToRemote,
   deleteContainer,
   deleteContainerSnapshot,
   deletePortMapping,
@@ -229,6 +230,7 @@ export default function ContainerDetail() {
   const [snapshotStoragePoolID, setSnapshotStoragePoolID] = useState('')
   const [showSnapshotCreate, setShowSnapshotCreate] = useState(false)
   const [snapshotNoteDraft, setSnapshotNoteDraft] = useState('')
+  const [snapshotBackupBase, setSnapshotBackupBase] = useState(false)
   const [showSnapshotSchedule, setShowSnapshotSchedule] = useState(false)
   const [snapshotScheduleDraft, setSnapshotScheduleDraft] = useState({ intervalHours: 24, time: '03:00', maxCopies: 0 })
   const [showFirewall, setShowFirewall] = useState(false)
@@ -1179,13 +1181,29 @@ export default function ContainerDetail() {
       await createContainerSnapshot(containerIdentifier, {
         description: snapshotNoteDraft.trim() || undefined,
         storage_pool_id: snapshotStoragePoolID || undefined,
+        backup_base_image: snapshotBackupBase || undefined,
       })
       setShowSnapshotCreate(false)
       setSnapshotNoteDraft('')
+      setSnapshotBackupBase(false)
       await Promise.all([fetchSnapshots(), fetchContainer()])
     } catch (err: unknown) {
       const error = err as { response?: { data?: { message?: string } } }
       await dialog.alert('创建快照失败', error.response?.data?.message || '请稍后重试。')
+    } finally {
+      setSnapshotBusy('')
+    }
+  }
+
+  const handleSyncBaseImage = async () => {
+    if (!containerIdentifier) return
+    setSnapshotBusy('base')
+    try {
+      const res = await syncBaseImageToRemote(containerIdentifier)
+      await dialog.alert('已提交', res.data.message || '基础盘同步已提交，结果记录在审计日志。')
+    } catch (err: unknown) {
+      const error = err as { response?: { data?: { message?: string } } }
+      await dialog.alert('同步失败', error.response?.data?.message || '请稍后重试。')
     } finally {
       setSnapshotBusy('')
     }
@@ -2684,6 +2702,34 @@ export default function ContainerDetail() {
             {container?.status === 'running' && (
               <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
                 当前实例运行中，拍摄快照需要先关机，完成后会自动重启。
+              </div>
+            )}
+            {container?.virtualization === 'kvm' && (
+              <div className="rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-700">
+                <label className="flex items-start gap-2">
+                  <input
+                    type="checkbox"
+                    checked={snapshotBackupBase}
+                    onChange={(e) => setSnapshotBackupBase(e.target.checked)}
+                    className="mt-0.5 h-4 w-4 rounded border-gray-300"
+                  />
+                  <span>
+                    同时备份基础盘到远端（首次可能上传数十 GB，中断可续传；远端已有则跳过）
+                    <span className="mt-0.5 block text-[11px] text-gray-500">
+                      快照是叠在基础盘上的增量，远端只有快照而没有基础盘是恢复不出来的。
+                    </span>
+                  </span>
+                </label>
+                <div className="mt-2 flex justify-end">
+                  <button
+                    type="button"
+                    onClick={handleSyncBaseImage}
+                    disabled={snapshotBusy === 'base'}
+                    className="rounded-md border border-gray-300 bg-white px-2.5 py-1 text-[11px] text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                  >
+                    {snapshotBusy === 'base' ? '提交中...' : '只同步基础盘（不新建快照）'}
+                  </button>
+                </div>
               </div>
             )}
             <div className="flex justify-end gap-2 pt-1">

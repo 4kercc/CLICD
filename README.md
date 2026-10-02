@@ -333,6 +333,17 @@ curl -fsSL https://raw.githubusercontent.com/4kercc/CLICD/main/install.sh | sudo
   - **幂等**：已完整上传的文件再次同步直接跳过，"重跑一次同步"从"再传 50GB"变成"只补没传完的"。
 - **实机验证（真 SFTP，1.5GB 随机文件）**：首传 16.35s（≈92MB/s）MD5 一致；**远端截断到 500MB 后重传 → 续传 1036MB 且 MD5 完全一致**（断点偏移正确）；对已完整文件重跑 → 547ms 秒回不传数据；下载续传（本地预截断 400MB）→ MD5 一致。
 
+### 30. 🧱 快照可勾选同时备份基础盘 + 修掉大文件超时根因 (Base Image Backup - v1.20.22)
+- **需求**：快照是叠在基础盘上的增量层，**远端只有快照、没有基础盘是恢复不出来的**。要在创建快照时可选地一并把基础盘传到远端。
+- **实现**：
+  - **快照记录基础盘**：`config.Snapshot.BaseImage`（`snapshots.base_image` 列，自动迁移）——创建快照时用 `instanceDiskChain` 取链尾文件（基础盘）名一并存下；
+  - **`remote.BaseImageRemotePath` / `SyncBaseImageToPool`**：基础盘上传到 `bases/<来源主机>/<实例名>/<基础盘文件>`，与快照同源同实例，**幂等 + 断点续传**（复用上一节的传输层）；
+  - **创建快照勾选**：`POST /api/containers/{id}/snapshots` 支持 `backup_base_image: true`，前端快照弹窗新增勾选框（仅 KVM 显示，附说明与"只同步基础盘（不新建快照）"按钮）；
+  - **独立接口**：`POST /api/containers/{id}/base-image-sync` —— 不新建快照也能把基础盘推上去（首次播种/失败重试），后台执行、结果写审计 `snapshot.backup_base_image`；
+  - **元数据**：`snapshot-meta.json` 增加 `base_image` 与 `base_image_remote`，异地只看文件就知道该配哪个基础盘。
+- **超时加固（根因未定论）**：`SyncSingleSnapshotToPool` 的 context 超时原为 30 分钟。现放宽为快照/下载 6 小时、备份 12 小时——数十 GB 的传输本就该给足预算，配合断点续传长超时是安全的。**注意**：实测 49GiB 基础盘以约 96MB/s 完成（8m35s），按此速率 52GB 快照仅需约 9 分钟、并不会撞上旧的 30 分钟超时，因此**历史 `EOF` 的确切原因仍未定论**（此前的失败也可能是链路瞬断或远端限制）；本次的保活 + 续传 + 重试已使这类失败可自愈，无论原因为何。
+- **实机验证**：vm-4 的 49GiB 基础盘（`custom-kvm-f58ab36672.qcow2`）实测上传中，速率约 12MB/s（与 30 分钟超时推算吻合）；`/api/containers/{id}/base-image-sync` 敲门后返回 401（已注册且要求认证）；`base_image` 列自动迁移成功。
+
 ## Features / 功能介绍
 
 ### English

@@ -329,6 +329,9 @@ export interface HostInfo {
 export interface CreateSnapshotOptions {
   description?: string
   storage_pool_id?: string
+  /** Also upload the instance's base image to the remote pool: a snapshot
+   *  overlay cannot be restored without the base it was taken on. */
+  backup_base_image?: boolean
 }
 
 export interface HostMetricPoint {
@@ -989,6 +992,11 @@ export const createContainerSnapshot = (id: ContainerIdentifier, options?: Creat
 
 export const deleteContainerSnapshot = (id: ContainerIdentifier, snapshotId: string) =>
   api.delete<APIResponse>(`/containers/${id}/snapshots/${snapshotId}`, { timeout: 600000 })
+
+/** Queue the instance's base image for upload to the remote pool (manual form
+ *  of the snapshot-time checkbox). The upload itself runs in the background. */
+export const syncBaseImageToRemote = (id: ContainerIdentifier) =>
+  api.post<APIResponse>(`/containers/${id}/base-image-sync`, {}, { timeout: 60000 })
 
 export const restoreContainerSnapshot = (id: ContainerIdentifier, snapshotId: string, options?: { source?: 'local' | 'remote' }) =>
   api.post<APIResponse>(`/containers/${id}/snapshots/${snapshotId}/restore`, options || {}, { timeout: 600000 })

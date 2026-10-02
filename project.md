@@ -430,6 +430,29 @@
 
 ---
 
+### 31. 🧱 快照可勾选同时备份基础盘 + 修掉大文件超时根因 (v1.20.22)
+- **需求**：快照是叠在基础盘上的增量层，远端只有快照没有基础盘无法恢复。创建快照时可选一并上传基础盘。
+- **实现**：
+  - `config.Snapshot.BaseImage`（`snapshots.base_image` 列 + 自动迁移 + 读写）；`kvm.kvmBaseImageName(diskPath)` 取 `instanceDiskChain` 链尾文件名，创建快照时写入；
+  - `remote.BaseImageRemotePath(containerName, baseFilePath)` → `bases/<SourceHostID>/<实例名>/<基础盘文件>`；`remote.SyncBaseImageToPool(containerName, localPath) (string, error)` 幂等 + 可续传（复用 v1.20.21 传输层）；
+  - `createContainerSnapshot` 解析 `backup_base_image`，为 true 时**后台 goroutine** `syncBaseImageInBackground`（数十 GB 不能阻塞 HTTP），结果写审计 `snapshot.backup_base_image`；
+  - 独立接口 `POST /api/containers/{id}/base-image-sync`（`snapshot:create` scope，handlers.go 新增 action 分发）→ 不新建快照也能推送/重试；`kvm.InstanceBaseImagePath(id)` 为新导出方法；
+  - `snapshot-meta.json` 增 `base_image` / `base_image_remote`；
+  - 前端：`CreateSnapshotOptions.backup_base_image`、`syncBaseImageToRemote()`、快照弹窗勾选框（仅 KVM）+「只同步基础盘」按钮。
+- **超时放宽（根因未定论，勿当结论）**：`SyncSingleSnapshotToPool` 的 context 超时原为 30 分钟；现改为快照上传/下载 **6 小时**、备份 **12 小时**（`snapshotTransferTimeout` / `backupTransferTimeout`）。**修正**：最初怀疑"30 分钟掐断 50GB 传输"是历史 `EOF` 的根因，但实测 49GiB 基础盘以 **约 96MB/s、8m35s** 完成（远端 mtime 与 harness 计时吻合、无重试），按此速率 52GB 仅需约 9 分钟，**撞不上 30 分钟** —— 故历史失败的确切原因仍未知（链路瞬断/远端限制皆有可能）。超时放宽仍属合理加固，真正解决"失败即从头再来"的是保活 + 续传 + 重试。
+- **实机验证（进行中/已完成项）**：49GiB 基础盘后台上传（速率 ~12MB/s，进度符合预期）；`base-image-sync` 敲门后 401（路由已注册）；`base_image` 列迁移成功；孤儿清理另见下节。
+- **遗留**：存量孤儿已清理（见下节）；下次同步大快照时应能首次成功（此前 8 天 0 成功）。
+
+---
+
+### 32. 🧹 远端存量孤儿清理（2026-10-02 执行）
+- **清单**：按「远端目录 ID ∉ 本地 snapshots/backups 表」判定，共 **21 个孤儿**（原估 ~15 个）：container 3 十个、container 6 四个（容器已删）、container 25 三个、container 16 两个、backups/8 两个；保留项 10 个（本地仍在）。
+- **执行**：路径形状校验（`^/clicd-backups/(snapshots|backups)/\d+/[A-Za-z0-9._-]+$`）+ basename ∉ 本地记录 双重确认后逐个 `rm -rf`，并回收空父目录。
+- **结果**：`du -sh` **70G → 50G，释放约 20GB**；剩余为 10 个保留快照 + 基础盘。
+- **注意**：孤儿是"本地已无记录"而非"数据不可用"——理论上仍可手工恢复（需对应基础盘）；本次按用户明确要求清理完毕。
+
+---
+
 ## 📝 AI 接力开发与修改记录规范 (Development Guidelines for AI Assistants)
 后续所有 AI 助手在接力开发本项目时，必须严格遵守以下规范：
 1. **持续同步 `project.md`**：完成任何代码修改、架构调整或需求上线后，必须在 `project.md` 中以清晰的小节记录修改背景、改动文件、技术细节以及实机验证状态。

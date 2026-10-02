@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -106,8 +107,9 @@ func listContainerSnapshots(w http.ResponseWriter, r *http.Request, containerID 
 func createContainerSnapshot(w http.ResponseWriter, r *http.Request, containerID int) {
 	user := requestUser(r)
 	var req struct {
-		Description   string `json:"description"`
-		StoragePoolID string `json:"storage_pool_id"`
+		Description     string `json:"description"`
+		StoragePoolID   string `json:"storage_pool_id"`
+		BackupBaseImage bool   `json:"backup_base_image"`
 	}
 	if r.Body != nil {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
@@ -136,9 +138,64 @@ func createContainerSnapshot(w http.ResponseWriter, r *http.Request, containerID
 	}
 	// Auto sync snapshot to remote storage if enabled
 	remote.SyncSnapshotToRemoteStorage(&snapshot)
+	if req.BackupBaseImage {
+		// A base image is tens of gigabytes, so it uploads in the background:
+		// the snapshot itself is already created and safe.
+		go syncBaseImageInBackground(containerID, user)
+	}
 	config.AddAuditLog("snapshot.create", snapshot.ContainerName, snapshot.ID, user)
 	snapshot.UniqueBytes = snapshotUniqueBytes(&snapshot)
 	jsonResponse(w, http.StatusCreated, APIResponse{Success: true, Data: snapshot})
+}
+
+// syncBaseImageInBackground uploads an instance's base image to the remote pool
+// and records the outcome. It runs detached because the transfer is tens of
+// gigabytes; callers only asked for it to happen.
+func syncBaseImageInBackground(containerID int, user string) {
+	c := config.FindContainer(containerID)
+	if c == nil {
+		return
+	}
+	if !c.IsKVM() {
+		config.AddAuditLogFull("snapshot.backup_base_image", c.Name, "skipped: only KVM instances have a base image", user, "", "", false, "")
+		return
+	}
+	basePath, err := kvmManager.InstanceBaseImagePath(containerID)
+	if err != nil {
+		config.AddAuditLogFull("snapshot.backup_base_image", c.Name, err.Error(), user, "", "", false, err.Error())
+		return
+	}
+	name := filepath.Base(basePath)
+	remotePath, err := remote.SyncBaseImageToPool(c.Name, basePath)
+	if err != nil {
+		fmt.Printf("Warning: failed to sync base image %s of %s: %v\n", name, c.Name, err)
+		config.AddAuditLogFull("snapshot.backup_base_image", c.Name, name+" -> failed", user, "", "", false, err.Error())
+		return
+	}
+	config.AddAuditLogFull("snapshot.backup_base_image", c.Name, name+" -> "+remotePath, user, "", "", true, "")
+}
+
+// syncBaseImageToRemote handles POST /api/containers/{id}/base-image-sync: the
+// manual form of the snapshot-time checkbox, for seeding a pool before the
+// first snapshot or retrying after a failure.
+func syncBaseImageToRemote(w http.ResponseWriter, r *http.Request, containerID int) {
+	c := config.FindContainer(containerID)
+	if c == nil {
+		jsonResponse(w, http.StatusNotFound, APIResponse{Success: false, Message: "Container not found"})
+		return
+	}
+	if !c.IsKVM() {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: "Only KVM instances have a base image"})
+		return
+	}
+	basePath, err := kvmManager.InstanceBaseImagePath(containerID)
+	if err != nil {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{Success: false, Message: err.Error()})
+		return
+	}
+	name := filepath.Base(basePath)
+	go syncBaseImageInBackground(containerID, requestUser(r))
+	jsonResponse(w, http.StatusAccepted, APIResponse{Success: true, Message: fmt.Sprintf("Base image %s queued for upload; watch the audit log for the result", name)})
 }
 
 func updateSnapshotQuota(w http.ResponseWriter, r *http.Request, containerID int) {

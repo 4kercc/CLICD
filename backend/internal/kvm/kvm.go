@@ -1416,6 +1416,7 @@ func (m *Manager) CreateSnapshot(id int, createdBy string, scheduled bool, rotat
 		ContainerName: c.Name,
 		LXCName:       name,
 		Description:   description,
+		BaseImage:     kvmBaseImageName(diskPath),
 		CreatedAt:     now.Format("2006-01-02 15:04:05"),
 		CreatedBy:     createdBy,
 		Scheduled:     scheduled,
@@ -1766,6 +1767,34 @@ func fixKVMInstancePermissions(instanceDir string) {
 		}
 		return nil
 	})
+}
+
+// kvmBaseImageName returns the file name of the base image an instance disk
+// sits on: the deepest file in its backing chain, and the one an offsite
+// restore cannot do without. Empty when the disk is standalone.
+func kvmBaseImageName(diskPath string) string {
+	chain := instanceDiskChain(diskPath)
+	if len(chain) < 2 {
+		return ""
+	}
+	return filepath.Base(chain[len(chain)-1])
+}
+
+// InstanceBaseImagePath returns the full path of the base image behind an
+// instance's disk.
+func (m *Manager) InstanceBaseImagePath(id int) (string, error) {
+	c := config.FindContainer(id)
+	if c == nil {
+		return "", fmt.Errorf("container not found: %d", id)
+	}
+	if !c.IsKVM() {
+		return "", fmt.Errorf("instance %s is not a KVM machine", c.Name)
+	}
+	chain := instanceDiskChain(c.DiskImage)
+	if len(chain) < 2 {
+		return "", fmt.Errorf("instance %s has no base image: its disk is standalone", c.Name)
+	}
+	return chain[len(chain)-1], nil
 }
 
 // instanceDiskChain lists every file referenced by a KVM instance's disk image:

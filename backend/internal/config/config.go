@@ -765,6 +765,9 @@ type Snapshot struct {
 	ContainerName       string `json:"container_name"`
 	LXCName             string `json:"lxc_name"`
 	Description         string `json:"description,omitempty"`
+	// BaseImage is the file name of the base image this snapshot's disk layer
+	// sits on. An offsite restore needs it, so it travels with the snapshot.
+	BaseImage           string `json:"base_image,omitempty"`
 	CreatedAt           string `json:"created_at"`
 	CreatedBy           string `json:"created_by"`
 	Scheduled           bool   `json:"scheduled"`

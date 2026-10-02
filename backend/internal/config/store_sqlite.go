@@ -517,6 +517,7 @@ func ensureSchemaMigrations() error {
 							{"containers", "extra_iso", "TEXT NOT NULL DEFAULT ''"},
 							{"tasks", "cfg_init_script", "TEXT NOT NULL DEFAULT ''"},
 							{"snapshots", "description", "TEXT NOT NULL DEFAULT ''"},
+						{"snapshots", "base_image", "TEXT NOT NULL DEFAULT ''"},
 					} {
 		wasAdded, err := ensureColumn(column.table, column.name, column.def)
 		if err != nil {
@@ -1068,8 +1069,8 @@ func saveEnabledImages(tx *sql.Tx) error {
 
 func saveSnapshots(tx *sql.Tx) error {
 	for _, snapshot := range AppConfig.Snapshots {
-		if _, err := tx.Exec(`INSERT INTO snapshots(id, container_id, container_name, lxc_name, description, created_at, created_by, scheduled, path, size_bytes)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, snapshot.ID, snapshot.ContainerID, snapshot.ContainerName, snapshot.LXCName, snapshot.Description, snapshot.CreatedAt, snapshot.CreatedBy, boolInt(snapshot.Scheduled), snapshot.Path, snapshot.SizeBytes); err != nil {
+		if _, err := tx.Exec(`INSERT INTO snapshots(id, container_id, container_name, lxc_name, description, base_image, created_at, created_by, scheduled, path, size_bytes)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, snapshot.ID, snapshot.ContainerID, snapshot.ContainerName, snapshot.LXCName, snapshot.Description, snapshot.BaseImage, snapshot.CreatedAt, snapshot.CreatedBy, boolInt(snapshot.Scheduled), snapshot.Path, snapshot.SizeBytes); err != nil {
 			return err
 		}
 	}
@@ -1520,7 +1521,7 @@ func loadEnabledImages() ([]string, error) {
 }
 
 func loadSnapshots() ([]Snapshot, error) {
-	rows, err := db.Query(`SELECT id, container_id, container_name, lxc_name, description, created_at, created_by, scheduled, path, size_bytes FROM snapshots ORDER BY created_at, id`)
+	rows, err := db.Query(`SELECT id, container_id, container_name, lxc_name, description, base_image, created_at, created_by, scheduled, path, size_bytes FROM snapshots ORDER BY created_at, id`)
 	if err != nil {
 		return nil, err
 	}
@@ -1530,10 +1531,12 @@ func loadSnapshots() ([]Snapshot, error) {
 		var snapshot Snapshot
 		var scheduled int
 		var description sql.NullString
-		if err := rows.Scan(&snapshot.ID, &snapshot.ContainerID, &snapshot.ContainerName, &snapshot.LXCName, &description, &snapshot.CreatedAt, &snapshot.CreatedBy, &scheduled, &snapshot.Path, &snapshot.SizeBytes); err != nil {
+		var baseImage sql.NullString
+		if err := rows.Scan(&snapshot.ID, &snapshot.ContainerID, &snapshot.ContainerName, &snapshot.LXCName, &description, &baseImage, &snapshot.CreatedAt, &snapshot.CreatedBy, &scheduled, &snapshot.Path, &snapshot.SizeBytes); err != nil {
 			return nil, err
 		}
 		snapshot.Description = description.String
+		snapshot.BaseImage = baseImage.String
 		snapshot.Scheduled = scheduled != 0
 		result = append(result, snapshot)
 	}
