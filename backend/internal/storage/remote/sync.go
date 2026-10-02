@@ -2,6 +2,7 @@ package remote
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"clicd/internal/config"
+	"clicd/internal/version"
 )
 
 // SyncProgress represents live file transfer progress.
@@ -84,6 +86,82 @@ func calculateDirSize(dir string) int64 {
 	return total
 }
 
+// remoteSnapshotBasePath builds the remote directory for a snapshot:
+// snapshots/<source-host>/<container-name>/<snapshot-id>. The source host and
+// the container name make the remote tree self-describing across multiple
+// CLICD hosts — bare numeric container IDs collide between hosts and say
+// nothing about what a snapshot belongs to.
+func remoteSnapshotBasePath(snap *config.Snapshot) string {
+	return fmt.Sprintf("snapshots/%s/%s/%s", SourceHostID(), SanitizePathSegment(snap.ContainerName), snap.ID)
+}
+
+// remoteBackupBasePath is the backup counterpart of remoteSnapshotBasePath.
+func remoteBackupBasePath(bkp *config.Backup) string {
+	return fmt.Sprintf("backups/%s/%s/%s", SourceHostID(), SanitizePathSegment(bkp.ContainerName), bkp.ID)
+}
+
+// writeSnapshotMeta drops a self-describing snapshot-meta.json next to the
+// snapshot files, so the remote copy (and the local one) still says which
+// host, instance, snapshot and description it belongs to even when the panel
+// database is gone. The file is written before the directory walk, so it
+// uploads with the rest.
+func writeSnapshotMeta(dir string, snap *config.Snapshot) {
+	if dir == "" {
+		return
+	}
+	meta := map[string]interface{}{
+		"snapshot_id":   snap.ID,
+		"type":          "snapshot",
+		"source_host":   SourceHostID(),
+		"container_id":  snap.ContainerID,
+		"container_name": snap.ContainerName,
+		"description":   snap.Description,
+		"created_at":    snap.CreatedAt,
+		"created_by":    snap.CreatedBy,
+		"size_bytes":    snap.SizeBytes,
+		"clicd_version": version.Current(),
+		"generated_at":  time.Now().Format("2006-01-02 15:04:05"),
+	}
+	if snap.UniqueBytes != nil {
+		meta["unique_bytes"] = *snap.UniqueBytes
+	}
+	data, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		return
+	}
+	if err := os.WriteFile(filepath.Join(dir, "snapshot-meta.json"), data, 0o644); err != nil {
+		fmt.Printf("Warning: failed to write snapshot meta for %s: %v\n", snap.ID, err)
+	}
+}
+
+// writeBackupMeta is the backup counterpart of writeSnapshotMeta.
+func writeBackupMeta(dir string, bkp *config.Backup) {
+	if dir == "" {
+		return
+	}
+	meta := map[string]interface{}{
+		"backup_id":     bkp.ID,
+		"type":          "backup",
+		"source_host":   SourceHostID(),
+		"container_id":  bkp.ContainerID,
+		"container_name": bkp.ContainerName,
+		"created_at":    bkp.CreatedAt,
+		"created_by":    bkp.CreatedBy,
+		"format":        bkp.Format,
+		"compressed":    bkp.Compressed,
+		"size_bytes":    bkp.SizeBytes,
+		"clicd_version": version.Current(),
+		"generated_at":  time.Now().Format("2006-01-02 15:04:05"),
+	}
+	data, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		return
+	}
+	if err := os.WriteFile(filepath.Join(dir, "backup-meta.json"), data, 0o644); err != nil {
+		fmt.Printf("Warning: failed to write backup meta for %s: %v\n", bkp.ID, err)
+	}
+}
+
 // SyncSnapshotToRemoteStorage uploads a newly created snapshot to configured remote storage pools.
 func SyncSnapshotToRemoteStorage(snapshot *config.Snapshot) {
 	if snapshot == nil || snapshot.Path == "" {
@@ -115,6 +193,7 @@ func SyncSingleSnapshotToPool(snap *config.Snapshot, pool *config.StoragePool) e
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
 
+	writeSnapshotMeta(snap.Path, snap)
 	totalSize := calculateDirSize(snap.Path)
 	var transferred int64
 	startTime := time.Now()
@@ -127,7 +206,7 @@ func SyncSingleSnapshotToPool(snap *config.Snapshot, pool *config.StoragePool) e
 		Percent: 0,
 	})
 
-	remoteBasePath := fmt.Sprintf("snapshots/%d/%s", snap.ContainerID, snap.ID)
+	remoteBasePath := remoteSnapshotBasePath(snap)
 	err = filepath.Walk(snap.Path, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil || info.IsDir() {
 			return walkErr
@@ -230,6 +309,7 @@ func SyncSingleBackupToPool(bkp *config.Backup, pool *config.StoragePool) error 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
 	defer cancel()
 
+	writeBackupMeta(bkp.Path, bkp)
 	totalSize := calculateDirSize(bkp.Path)
 	if totalSize <= 0 && bkp.SizeBytes > 0 {
 		totalSize = bkp.SizeBytes
@@ -245,7 +325,7 @@ func SyncSingleBackupToPool(bkp *config.Backup, pool *config.StoragePool) error 
 		Percent: 0,
 	})
 
-	remoteBasePath := fmt.Sprintf("backups/%d/%s", bkp.ContainerID, bkp.ID)
+	remoteBasePath := remoteBackupBasePath(bkp)
 	err = filepath.Walk(bkp.Path, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil || info.IsDir() {
 			return walkErr

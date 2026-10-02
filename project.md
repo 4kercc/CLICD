@@ -389,6 +389,19 @@
 
 ---
 
+### 28. 🗂️ 远端备份自描述：来源服务器 + 实例名 + meta.json (v1.20.19)
+- **问题**：远端 SFTP 存储池里的目录是 `snapshots/<容器数字ID>/<快照ID>/`。实测 85.8.149.30:/clicd-backups 共 62GB/127 文件：容器 3/4/6/7/10/16/25 全是数字（3=kylin-v10 要靠面板数据库才知道）、无来源服务器标识（多台 CLICD 共用远端时 `snapshots/3/` 会互相混写）、ID 6 的容器已删除成为无法辨认的孤儿。
+- **新命名**：`snapshots/<来源服务器>/<实例名>/<快照ID>/`、`backups/<来源服务器>/<实例名>/<备份ID>/`：
+  - **来源服务器**：`remote/source.go` 的 `SourceHostID()`——环境变量 `CLICD_SOURCE_HOST_ID` > 出口公网 IPv4（UDP dial 默认路由探测，不发包）> 主机名 > `unknown-host`；
+  - **实例名**：快照/备份记录的 `container_name`，经 `SanitizePathSegment` 清洗（非 `[A-Za-z0-9._-]` 折叠为 `-`、去首尾 `-.`；纯非 ASCII 名清洗后为空时回退 `unnamed-<md5前8位>` 保证互不混淆）；
+  - **旧数据兼容**：恢复/下载读取的是面板持久化的 `remote_path`（`config.go:758/779`），不重算路径——存量 62GB 快照全部照常可用，只是路径保留旧格式。
+- **snapshot-meta.json 自描述**：`writeSnapshotMeta`/`writeBackupMeta` 在同步前把元数据写入本地快照目录（随目录一并上传）：snapshot_id、type、source_host、container_id/name、**description（快照备注）**、created_at/by、size_bytes、clicd_version、generated_at。备份版含 format/compressed。**面板数据库丢失时远端每个目录仍可自证身份。**
+- **涉及文件**：`backend/internal/storage/remote/{source.go,sync.go,sync_meta_test.go}`。
+- **实机验证（真 SFTP 端到端）**：服务器上 `go run` 临时 harness（初始化最小 `config.AppConfig` 防空指针，读库中真实 sftp 池凭据），调用 `remote.SyncSingleSnapshotToPool` 上传测试快照——远端生成 `snapshots/192.3.170.78/entry-path-test/snap-999-e2eentrypath-000000000/`，`snapshot-meta.json` 的 source_host=192.3.170.78、中文备注、版本号全部正确；验证后远端测试目录已删除。踩坑：RemotePath 只在快照于面板注册表内时回写（`config.FindSnapshot`），测试快照为 nil 属预期。
+- **运维注意**：存量旧路径快照可正常恢复；如需统一为新命名，可逐个重新同步（会重传全部数据）；`snapshots/6/` 为已删除容器的孤儿数据，确认不要后可在远端手工删除。
+
+---
+
 ## 📝 AI 接力开发与修改记录规范 (Development Guidelines for AI Assistants)
 后续所有 AI 助手在接力开发本项目时，必须严格遵守以下规范：
 1. **持续同步 `project.md`**：完成任何代码修改、架构调整或需求上线后，必须在 `project.md` 中以清晰的小节记录修改背景、改动文件、技术细节以及实机验证状态。

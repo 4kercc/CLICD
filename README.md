@@ -302,6 +302,16 @@ curl -fsSL https://raw.githubusercontent.com/4kercc/CLICD/main/install.sh | sudo
 - **单元测试**：`entrylimiter_test.go`（假时钟注入）覆盖：每分钟限制触发、10 分钟窗口触发、封禁过期后重新计数、IP 隔离、旧请求滑出窗口。
 - **涉及文件**：`backend/internal/server/{entrylimiter.go,entrylimiter_test.go,server.go}`。
 
+### 27. 🗂️ 远端备份自描述：来源服务器 + 实例名 + meta.json (Self-describing Remote Backups - v1.20.19)
+- **问题**：远端存储（SFTP 池）里的目录是 `snapshots/<容器数字ID>/<快照ID>/`——只有数字：分不清 3 是哪台实例、分不清来自哪台母鸡；多台 CLICD 共用一个远端池时 `snapshots/3/` 还会互相混在一起；容器删除后（如已不存在的 ID 6）远端就成了无人能认领的孤儿。
+- **新命名**：远端路径改为 `snapshots/<来源服务器>/<实例名>/<快照ID>/`（备份同理 `backups/...`）：
+  - **来源服务器**自动取出口公网 IPv4（如 `192.3.170.78`），可用环境变量 `CLICD_SOURCE_HOST_ID` 覆盖，回退主机名；
+  - **实例名**来自快照/备份记录的容器名，非安全字符（含中文）清洗为安全段，清洗后为空则回退 `unnamed-<md5前8位>`；
+  - 旧快照**完全兼容**：恢复/下载读取的是面板里持久化的 `remote_path`，不重算路径。
+- **snapshot-meta.json 自描述**：同步前把元数据写进快照目录一并上传——`来源服务器、实例 ID/名、快照 ID、备注、创建时间/人、大小、CLICD 版本`。**就算面板数据库丢了，远端每个目录也能自证身份**，多台服务器多个实例的备份一目了然。
+- **涉及文件**：`backend/internal/storage/remote/{source.go,sync.go,sync_meta_test.go}`。
+- **实机验证（真 SFTP 端到端）**：用真实存储池凭据同步测试快照，远端生成 `snapshots/192.3.170.78/entry-path-test/<ID>/`，内含测试文件与 `snapshot-meta.json`（source_host=192.3.170.78、实例名、中文备注、版本号全部正确）；旧目录不受影响。
+
 ## Features / 功能介绍
 
 ### English
