@@ -78,4 +78,5 @@ deploy-pve-windows.ps1
 
 # Local ops notes (server internal IPs, not for the public repo)
 docs/vip-keepalived-test.md
+docs/infor*
 .zcodeignore
