@@ -312,6 +312,17 @@ curl -fsSL https://raw.githubusercontent.com/4kercc/CLICD/main/install.sh | sudo
 - **涉及文件**：`backend/internal/storage/remote/{source.go,sync.go,sync_meta_test.go}`。
 - **实机验证（真 SFTP 端到端）**：用真实存储池凭据同步测试快照，远端生成 `snapshots/192.3.170.78/entry-path-test/<ID>/`，内含测试文件与 `snapshot-meta.json`（source_host=192.3.170.78、实例名、中文备注、版本号全部正确）；旧目录不受影响。
 
+### 28. 🗑️ 删除本地快照/备份时同步删除远端副本 (Delete Remote Copies - v1.20.20)
+- **问题**：本地删除快照后，远端副本原封不动——实测远端池里积压了大量孤儿：容器 3 远端 12 个目录而本地只剩 2 个、容器 25 远端 3 个本地 5 个、`snapshots/6/`（容器已删）、`backups/8/`（本地备份表只有容器 4 的记录）全是无人能辨认的历史遗留。
+- **实现**：
+  - `StorageClient` 新增 **`DeletePath(ctx, path) (bool, error)`**——递归删除文件或整个目录，并返回"本来是否存在"，让调用方能区分"真删掉了"和"本来就没传上去"；三个后端各自实现（SFTP `rm -rf`、WebDAV DELETE 集合即递归、MinIO/S3 按前缀 ListObjectsV2 + 逐个删除）；
+  - 可选接口 `emptyDirPruner`（SFTP `rmdir`、WebDAV DELETE）用于**清理空父目录**，删掉最后一个快照后 `snapshots/<host>/<实例>/` 不会留下空壳；
+  - **候选路径策略**：`SnapshotRemoteCandidates` 同时覆盖「记录里的 `remote_path`」+「新命名」+「旧数字命名」，因此**没有 remote_path 记录的历史快照也能被正确清理**（本机 18 个快照的 remote_path 全为空，正是这个原因必须按 ID 反推路径）；
+  - 接入点：`lxc`/`kvm` 的 `deleteSnapshotLocked` + `kvm.DeleteBackup`——覆盖用户手动删除、快照保留策略自动清理、备份删除三条路径；**删除为尽力而为**：本地已删则远端失败只记日志，不会让删除操作失败。
+- **踩坑**：Go 的 `ssh.Session` **只能执行一条命令**——先 `session.Run("test -e …")` 再 `session.CombinedOutput("rm -rf …")` 会报 `ssh: Stdout already set` 且删除根本没执行（端到端测试抓到的）。改为单条命令 `if [ -e P ]; then rm -rf P; else exit 7; fi`，用退出码 7 表示"不存在"。
+- **涉及文件**：`backend/internal/storage/remote/{remote.go,remote_delete.go,sync.go,sync_delete_test.go}`、`backend/internal/lxc/snapshot.go`、`backend/internal/kvm/kvm.go`。
+- **实机验证（真 SFTP）**：上传测试快照 → 删除 → 远端目录被删且**空父目录逐级清理**（`snapshots/192.3.170.78/` 整体消失）；重复删除不再报"已删除"（正确识别为不存在）；伪造的传统路径孤儿 `snapshots/998/...` 同样被清除。单测覆盖候选路径（含去重）与存储池选择。
+
 ## Features / 功能介绍
 
 ### English

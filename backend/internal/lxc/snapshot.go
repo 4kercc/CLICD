@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"clicd/internal/config"
+	"clicd/internal/storage/remote"
 )
 
 var (
@@ -149,6 +150,9 @@ func (m *Manager) deleteSnapshotLocked(snapshot config.Snapshot) error {
 		}
 	}
 	config.RemoveSnapshot(snapshot.ID)
+	// The remote copy goes with the local one: leaving it behind is how pools
+	// fill up with directories nobody can identify afterwards.
+	remote.DeleteSnapshotFromRemoteStorage(&snapshot)
 	return nil
 }
 

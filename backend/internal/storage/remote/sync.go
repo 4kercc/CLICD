@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -159,6 +161,170 @@ func writeBackupMeta(dir string, bkp *config.Backup) {
 	}
 	if err := os.WriteFile(filepath.Join(dir, "backup-meta.json"), data, 0o644); err != nil {
 		fmt.Printf("Warning: failed to write backup meta for %s: %v\n", bkp.ID, err)
+	}
+}
+
+// SnapshotRemoteCandidates lists the remote directories a snapshot may occupy:
+// the recorded path when one was stored, plus the paths the current and the
+// legacy naming schemes imply. Snapshots synced before the host/instance layout
+// (or whose recorded path was lost) would otherwise stay behind as orphans when
+// they are deleted locally.
+func SnapshotRemoteCandidates(snap *config.Snapshot) []string {
+	if snap == nil {
+		return nil
+	}
+	return remoteCandidates(
+		snap.RemotePath,
+		fmt.Sprintf("snapshots/%s/%s/%s", SourceHostID(), SanitizePathSegment(snap.ContainerName), snap.ID),
+		fmt.Sprintf("snapshots/%d/%s", snap.ContainerID, snap.ID),
+	)
+}
+
+// BackupRemoteCandidates is the backup counterpart of SnapshotRemoteCandidates.
+func BackupRemoteCandidates(bkp *config.Backup) []string {
+	if bkp == nil {
+		return nil
+	}
+	return remoteCandidates(
+		bkp.RemotePath,
+		fmt.Sprintf("backups/%s/%s/%s", SourceHostID(), SanitizePathSegment(bkp.ContainerName), bkp.ID),
+		fmt.Sprintf("backups/%d/%s", bkp.ContainerID, bkp.ID),
+	)
+}
+
+func remoteCandidates(paths ...string) []string {
+	out := make([]string, 0, len(paths))
+	for _, candidate := range paths {
+		candidate = strings.Trim(strings.TrimSpace(candidate), "/")
+		if candidate == "" {
+			continue
+		}
+		duplicate := false
+		for _, existing := range out {
+			if existing == candidate {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			out = append(out, candidate)
+		}
+	}
+	return out
+}
+
+// remotePoolForSnapshot picks the pool to delete from: the one the snapshot was
+// synced to when that is still known, otherwise the first enabled pool that
+// syncs snapshots.
+func remotePoolForSnapshot(snap *config.Snapshot) (config.StoragePool, bool) {
+	return pickRemotePool(snap.RemoteStoragePoolID, func(pool config.StoragePool) bool {
+		return pool.SyncSnapshots
+	})
+}
+
+func remotePoolForBackup(bkp *config.Backup) (config.StoragePool, bool) {
+	return pickRemotePool(bkp.RemoteStoragePoolID, func(pool config.StoragePool) bool {
+		return pool.SyncBackups
+	})
+}
+
+func pickRemotePool(preferred string, wanted func(config.StoragePool) bool) (config.StoragePool, bool) {
+	if config.AppConfig == nil {
+		return config.StoragePool{}, false
+	}
+	for _, pool := range config.AppConfig.StoragePools {
+		if pool.ID == preferred && pool.Enabled && pool.Type != "" && pool.Type != "local" {
+			return pool, true
+		}
+	}
+	for _, pool := range config.AppConfig.StoragePools {
+		if pool.Enabled && pool.Type != "" && pool.Type != "local" && wanted(pool) {
+			return pool, true
+		}
+	}
+	return config.StoragePool{}, false
+}
+
+// DeleteSnapshotFromRemoteStorage removes the remote copies of a snapshot that
+// was just deleted locally, trying every path it could occupy. Best effort by
+// design: the local snapshot is already gone, so a failure here is logged
+// rather than turned into an error — it only means an orphan is left to clean.
+func DeleteSnapshotFromRemoteStorage(snap *config.Snapshot) {
+	candidates := SnapshotRemoteCandidates(snap)
+	if len(candidates) == 0 {
+		return
+	}
+	pool, ok := remotePoolForSnapshot(snap)
+	if !ok {
+		return
+	}
+	client, err := NewClient(pool.Type, pool.Config)
+	if err != nil {
+		fmt.Printf("Warning: cannot reach remote pool %s to delete snapshot %s: %v\n", pool.Name, snap.ID, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	for _, candidate := range candidates {
+		removed, err := client.DeletePath(ctx, candidate)
+		if err != nil {
+			fmt.Printf("Warning: failed to delete remote snapshot %s at %s: %v\n", snap.ID, candidate, err)
+			continue
+		}
+		if !removed {
+			continue
+		}
+		fmt.Printf("Deleted remote snapshot %s from %s (%s)\n", snap.ID, pool.Name, candidate)
+		pruneRemoteParents(ctx, client, candidate)
+	}
+}
+
+// DeleteBackupFromRemoteStorage is the backup counterpart of
+// DeleteSnapshotFromRemoteStorage.
+func DeleteBackupFromRemoteStorage(bkp *config.Backup) {
+	candidates := BackupRemoteCandidates(bkp)
+	if len(candidates) == 0 {
+		return
+	}
+	pool, ok := remotePoolForBackup(bkp)
+	if !ok {
+		return
+	}
+	client, err := NewClient(pool.Type, pool.Config)
+	if err != nil {
+		fmt.Printf("Warning: cannot reach remote pool %s to delete backup %s: %v\n", pool.Name, bkp.ID, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	for _, candidate := range candidates {
+		removed, err := client.DeletePath(ctx, candidate)
+		if err != nil {
+			fmt.Printf("Warning: failed to delete remote backup %s at %s: %v\n", bkp.ID, candidate, err)
+			continue
+		}
+		if !removed {
+			continue
+		}
+		fmt.Printf("Deleted remote backup %s from %s (%s)\n", bkp.ID, pool.Name, candidate)
+		pruneRemoteParents(ctx, client, candidate)
+	}
+}
+
+// pruneRemoteParents drops the instance and host directories once their last
+// snapshot is gone, so the pool does not fill up with empty shells.
+func pruneRemoteParents(ctx context.Context, client StorageClient, candidate string) {
+	pruner, ok := client.(emptyDirPruner)
+	if !ok {
+		return
+	}
+	dir := path.Dir(candidate)
+	for depth := 0; depth < 2 && dir != "." && dir != "/" && dir != ""; depth++ {
+		if err := pruner.PruneEmptyDir(ctx, dir); err != nil {
+			return
+		}
+		fmt.Printf("Removed empty remote directory %s\n", dir)
+		dir = path.Dir(dir)
 	}
 }
 

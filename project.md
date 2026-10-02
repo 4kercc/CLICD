@@ -402,6 +402,19 @@
 
 ---
 
+### 29. 🗑️ 删除本地快照/备份时同步删除远端副本 (v1.20.20)
+- **背景**：本地删除快照不会动远端副本。实测远端池孤儿遍布：container 3 远端 12 个目录本地仅剩 2 个、container 25 远端 3 个本地 5 个、`snapshots/6/`（容器已删）、`backups/8/`（本地备份表仅 container 4）——同时本地 18 个快照的 `remote_synced=0` 且 `remote_path` 全空，**所以不能只按记录路径删，必须按 ID 反推候选路径**。
+- **实现**：
+  - `StorageClient` 增 `DeletePath(ctx, path) (bool, error)`：递归删除并返回"是否真的存在过"。SFTP：单条命令 `if [ -e P ]; then rm -rf P; else exit 7; fi`（8 表示不存在），**坑：Go `ssh.Session` 只能跑一条命令**，先 Run 再 CombinedOutput 会 `ssh: Stdout already set` 且删除未执行（E2E 抓到）；WebDAV：DELETE 集合（RFC 4918 递归），404 → 不存在；MinIO/S3：`listPrefix`（ListObjectsV2 + 分页 + XML 解析）后逐对象 DELETE。
+  - 可选接口 `emptyDirPruner`（SFTP `rmdir` / WebDAV DELETE）→ `pruneRemoteParents` 逐级清理空父目录（最多两级）。
+  - `SnapshotRemoteCandidates` / `BackupRemoteCandidates`：`remote_path`（如有）+ 新命名 + 旧数字命名，去重；`remotePoolForSnapshot/Backup` 优先记录中的池，否则第一个启用且对应同步开关打开的远端池。
+  - 接入 `lxc`/`kvm` `deleteSnapshotLocked` + `kvm.DeleteBackup`（覆盖手动删除 / 保留策略自动清理 / 备份删除）；**尽力而为**：本地已删，远端失败只 `Warning` 记日志。
+- **涉及文件**：`backend/internal/storage/remote/{remote.go,remote_delete.go,sync.go,sync_delete_test.go}`、`backend/internal/lxc/snapshot.go`、`backend/internal/kvm/kvm.go`。
+- **实机验证（真 SFTP）**：上传 → 删除后远端目录消失且空父目录逐级回收；二次删除无"已删除"日志（正确判定不存在）；伪造传统路径孤儿 `snapshots/998/snap-998-legacyorphan` 被清除。单测：候选路径三态、去重、空段、池选择优先级。
+- **遗留（需用户决策）**：① 存量孤儿（本机远端约 15 个目录、合计数十 GB）本地记录已不在，**不会被自动清理**——可写一次性清扫脚本按「远端目录 ID 不在本地快照表」判定后删除；② **远端同步自 2026-09-27 起 100% 失败**（`Failed to sync … EOF`，8 天内 4 次失败 0 次成功），失败的都是 30–52GB 的大快照，远端现有数据停在 9 月中旬——疑似长传输中断（远端磁盘尚余 161G，非空间问题），需单独排查（保活/分片/续传）；③ 本地快照体积已达 400GB+（container 25 每日一个约 50GB），保留策略值得复核。
+
+---
+
 ## 📝 AI 接力开发与修改记录规范 (Development Guidelines for AI Assistants)
 后续所有 AI 助手在接力开发本项目时，必须严格遵守以下规范：
 1. **持续同步 `project.md`**：完成任何代码修改、架构调整或需求上线后，必须在 `project.md` 中以清晰的小节记录修改背景、改动文件、技术细节以及实机验证状态。

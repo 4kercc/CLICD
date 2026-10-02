@@ -30,6 +30,7 @@ import (
 	"clicd/internal/config"
 	"clicd/internal/lxc"
 	"clicd/internal/safehttp"
+	"clicd/internal/storage/remote"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -1469,6 +1470,9 @@ func (m *Manager) deleteSnapshotLocked(snapshot config.Snapshot) error {
 		}
 	}
 	config.RemoveSnapshot(snapshot.ID)
+	// The remote copy goes with the local one: leaving it behind is how pools
+	// fill up with directories nobody can identify afterwards.
+	remote.DeleteSnapshotFromRemoteStorage(&snapshot)
 	return nil
 }
 
@@ -2167,6 +2171,7 @@ func (m *Manager) DeleteBackup(id string) error {
 		_ = os.RemoveAll(backup.Path)
 	}
 	config.RemoveBackup(backup.ID)
+	remote.DeleteBackupFromRemoteStorage(backup)
 	return nil
 }
 

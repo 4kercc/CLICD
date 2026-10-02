@@ -25,6 +25,18 @@ type StorageClient interface {
 	UploadFile(ctx context.Context, localPath, remotePath string) error
 	DownloadFile(ctx context.Context, remotePath, localPath string) error
 	DeleteFile(ctx context.Context, remotePath string) error
+	// DeletePath removes a file, or a whole directory/prefix and everything
+	// under it. It reports whether anything was actually there, so callers can
+	// tell "removed" from "was never uploaded" — the difference between a real
+	// deletion and a snapshot that only ever existed locally.
+	DeletePath(ctx context.Context, remotePath string) (bool, error)
+}
+
+// emptyDirPruner is implemented by clients whose backend has directories, so a
+// caller can drop the parent folders left behind once their last child is gone.
+// Backends without directories simply do not implement it.
+type emptyDirPruner interface {
+	PruneEmptyDir(ctx context.Context, remotePath string) error
 }
 
 // NewClient creates a StorageClient based on pool type and config.
