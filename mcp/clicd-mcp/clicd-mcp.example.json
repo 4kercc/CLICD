@@ -1,0 +1,13 @@
+{
+  "defaultPanel": "独服",
+  "panels": {
+    "独服": {
+      "baseUrl": "http://192.3.170.78:8999",
+      "apiKey": "clicd_sk_replace_me"
+    },
+    "绿云": {
+      "baseUrl": "http://173.249.204.248:8999",
+      "apiKey": "clicd_sk_replace_me"
+    }
+  }
+}

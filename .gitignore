@@ -41,6 +41,7 @@ config.json
 *.pem
 *.key
 id_rsa*
+mcp/clicd-mcp/clicd-mcp.local.json
 
 # Logs
 *.log
@@ -80,3 +81,4 @@ deploy-pve-windows.ps1
 docs/vip-keepalived-test.md
 docs/infor*
 .zcodeignore
+project.md
