@@ -65,6 +65,13 @@ func (m *Manager) ApplyPortMappings(id int) error {
 			}
 			if hostIP != "" {
 				args = append(args, "-d", hostIP)
+			} else {
+				// A wildcard mapping must only catch traffic addressed to this
+				// host. Without a destination match the rule also DNATs transit
+				// traffic this host forwards — e.g. a guest dialling an outside
+				// server on a port that collides with a local mapping lands on
+				// the local container instead.
+				args = append(args, "-m", "addrtype", "--dst-type", "LOCAL")
 			}
 			args = append(args,
 				"--dport", fmt.Sprintf("%d", pm.HostPort),
