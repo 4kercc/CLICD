@@ -511,3 +511,31 @@ func TestAppendMissingSeccompRulesAddsFutexMitigationOnce(t *testing.T) {
 		}
 	}
 }
+
+func TestAllocateDefaultEqualPortsSkipsPortsBoundByOtherContainers(t *testing.T) {
+	previous := config.AppConfig
+	t.Cleanup(func() { config.AppConfig = previous })
+	config.AppConfig = &config.ClicdConfig{
+		NATPortStart: 20000,
+		NATPortEnd:   20010,
+		Containers: []config.Container{{
+			ID: 3,
+			PortMappings: []config.PortMapping{
+				{HostPort: 20000, ContainerPort: 20000, Protocol: "tcp"},
+				{HostPort: 20001, ContainerPort: 20001, Protocol: "tcp"},
+			},
+		}},
+	}
+
+	container := &config.Container{
+		ID: -1,
+		PortMappings: []config.PortMapping{
+			{HostPort: 22000, ContainerPort: 22, Protocol: "tcp"},
+		},
+	}
+	got := allocateDefaultEqualPorts(container, 2)
+	want := []int{20002, 20003}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("allocateDefaultEqualPorts = %v, want %v", got, want)
+	}
+}

@@ -1334,36 +1334,19 @@ func sameCreateNATReservations(left, right []config.PortMapping) bool {
 }
 
 func allocateDefaultEqualPorts(c *config.Container, count int) []int {
-	if count <= 0 {
+	if count <= 0 || c == nil {
 		return nil
-	}
-	used := map[int]bool{}
-	// Mark current container's ports
-	for _, pm := range c.PortMappings {
-		for _, hostIP := range expandPortMappingHostIPs(c, pm) {
-			used[hostPortKey(hostIP, pm.HostPort)] = true
-		}
-		used[pm.ContainerPort] = true
-	}
-	// Also mark all other containers' host ports (LXC + KVM)
-	for _, oc := range config.AppConfig.Containers {
-		if oc.ID == c.ID {
-			continue
-		}
-		for _, pm := range oc.PortMappings {
-			oc := oc
-			for _, hostIP := range expandPortMappingHostIPs(&oc, pm) {
-				used[hostPortKey(hostIP, pm.HostPort)] = true
-			}
-		}
 	}
 	ports := make([]int, 0, count)
 	start, end := config.NATPortRange()
+	// HostPortAvailable applies the same wildcard-aware conflict rules used when
+	// the mapping is finally validated, so ports already bound by another
+	// instance (including through an empty/wildcard host IP) are skipped.
 	for next := start; next <= end && len(ports) < count; next++ {
-		hostIP := c.PrimaryPublicIPv4()
-		if !used[hostPortKey(hostIP, next)] && !used[next] {
-			ports = append(ports, next)
+		if !HostPortAvailable(c, "", next, "tcp") {
+			continue
 		}
+		ports = append(ports, next)
 	}
 	return ports
 }
