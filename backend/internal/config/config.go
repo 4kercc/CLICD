@@ -2165,6 +2165,21 @@ func AddLoginLog(username, ip, userAgent string, success bool) {
 	SaveConfig()
 }
 
+// Reload re-reads the persisted configuration into AppConfig. The CLI uses it
+// after stopping the service so a change is applied on top of the service's
+// last saved state instead of the CLI process's stale startup snapshot.
+func Reload() error {
+	cfg, ok, err := loadConfigFromDB()
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("config not found in database")
+	}
+	AppConfig = cfg
+	return nil
+}
+
 // ResetAdminPassword resets the admin password from CLI
 func ResetAdminPassword(newPassword string) error {
 	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)

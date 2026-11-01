@@ -694,44 +694,85 @@ func cliResetPassword(reader *bufio.Reader) {
 		return
 	}
 
+	// Stop the panel first: the running service saves its in-memory config on
+	// shutdown, which would overwrite the new password hash with the old one.
+	wasRunning := isWebPanelRunning()
+	if wasRunning {
+		if err := stopService("clicd"); err != nil {
+			cliPrintf("暂停 Web 面板失败: %v\n", err)
+			return
+		}
+		if err := config.Reload(); err != nil {
+			cliPrintf("重新加载配置失败: %v\n", err)
+			_ = startService("clicd")
+			return
+		}
+	}
+
 	if err := config.ResetAdminPassword(newPass); err != nil {
 		cliPrintf("重置失败: %v\n", err)
+		if wasRunning {
+			_ = startService("clicd")
+		}
 		return
 	}
 	cliPrintln("管理员密码已重置。")
-	restartWebPanelForConfigChange()
+	if wasRunning {
+		if err := startService("clicd"); err != nil {
+			cliPrintf("启动 Web 面板失败: %v\n", err)
+			return
+		}
+		cliPrintln("Web 面板已重载并应用配置变更。")
+	}
 }
 
 func cliToggleWebPanel() {
-	if config.AppConfig.WebAccessDisabled {
-		config.AppConfig.WebAccessDisabled = false
-		if err := config.SaveConfig(); err != nil {
-			cliPrintf("保存配置失败: %v\n", err)
+	// Same ordering as the password reset: stop, reload, change, start.
+	wasRunning := isWebPanelRunning()
+	if wasRunning {
+		if err := stopService("clicd"); err != nil {
+			cliPrintf("暂停 Web 面板失败: %v\n", err)
 			return
 		}
-		cliPrintln("Web 访问入口已开启！")
-		restartWebPanelForConfigChange()
+		if err := config.Reload(); err != nil {
+			cliPrintf("重新加载配置失败: %v\n", err)
+			_ = startService("clicd")
+			return
+		}
+	}
+
+	disable := !config.AppConfig.WebAccessDisabled
+	config.AppConfig.WebAccessDisabled = disable
+	if err := config.SaveConfig(); err != nil {
+		cliPrintf("保存配置失败: %v\n", err)
+		if wasRunning {
+			_ = startService("clicd")
+		}
 		return
 	}
 
-	if isWebPanelRunning() {
-		config.AppConfig.WebAccessDisabled = true
-		if err := config.SaveConfig(); err != nil {
-			cliPrintf("保存配置失败: %v\n", err)
+	if wasRunning {
+		if err := startService("clicd"); err != nil {
+			cliPrintf("启动 Web 面板失败: %v\n", err)
 			return
 		}
-		cliPrintln("Web 访问入口已关闭（安全封锁生效）。")
-		restartWebPanelForConfigChange()
+		if disable {
+			cliPrintln("Web 访问入口已关闭（安全封锁生效）。")
+		} else {
+			cliPrintln("Web 访问入口已开启！")
+		}
 		return
 	}
 
-	if err := startService("clicd"); err != nil {
-		cliPrintf("启动 Web 面板失败: %v\n", err)
+	if !disable {
+		if err := startService("clicd"); err != nil {
+			cliPrintf("启动 Web 面板失败: %v\n", err)
+			return
+		}
+		cliPrintln("Web 面板已启动并开启访问入口。")
 		return
 	}
-	config.AppConfig.WebAccessDisabled = false
-	_ = config.SaveConfig()
-	cliPrintln("Web 面板已启动并开启访问入口。")
+	cliPrintln("Web 访问入口已关闭（安全封锁生效）。")
 }
 
 type githubRelease struct {
