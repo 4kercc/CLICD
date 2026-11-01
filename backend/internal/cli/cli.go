@@ -16,11 +16,42 @@ import (
 	"time"
 
 	"clicd/internal/config"
+	"clicd/internal/kvm"
 	"clicd/internal/lxc"
 	"clicd/internal/version"
 )
 
-var manager = lxc.NewManager()
+var (
+	lxcManager = lxc.NewManager()
+	kvmManager = kvm.NewManager()
+	// manager stays LXC-only for operations that have no KVM equivalent
+	// (listing, creating, importing existing containers).
+	manager = lxcManager
+)
+
+// containerRuntime is the subset of LXC/KVM manager operations the CLI menu
+// needs. Both managers implement it with identical signatures.
+type containerRuntime interface {
+	StartContainer(id int) error
+	StopContainer(id int) error
+	RestartContainer(id int) error
+	ReinstallContainer(id int, templateID string, authConfig ...lxc.ContainerConfig) error
+	DestroyContainer(id int) error
+}
+
+// runtimeManagerFor dispatches by the instance's virtualization type. Without
+// this a KVM guest was sent to the LXC manager and failed with
+// "open /var/lib/lxc/ct-N/config: no such file or directory".
+func runtimeManagerFor(id int) (containerRuntime, error) {
+	c := config.FindContainer(id)
+	if c == nil {
+		return nil, fmt.Errorf("容器不存在: %d", id)
+	}
+	if c.IsKVM() {
+		return kvmManager, nil
+	}
+	return lxcManager, nil
+}
 
 const (
 	clicdBackupDir              = "/root/clicd-backups"
@@ -516,7 +547,12 @@ func cliStartContainer(reader *bufio.Reader) {
 	if id == 0 {
 		return
 	}
-	if err := manager.StartContainer(id); err != nil {
+	mgr, err := runtimeManagerFor(id)
+	if err != nil {
+		cliPrintf("开机失败: %v\n", err)
+		return
+	}
+	if err := mgr.StartContainer(id); err != nil {
 		cliPrintf("开机失败: %v\n", err)
 		return
 	}
@@ -528,7 +564,12 @@ func cliStopContainer(reader *bufio.Reader) {
 	if id == 0 {
 		return
 	}
-	if err := manager.StopContainer(id); err != nil {
+	mgr, err := runtimeManagerFor(id)
+	if err != nil {
+		cliPrintf("关机失败: %v\n", err)
+		return
+	}
+	if err := mgr.StopContainer(id); err != nil {
 		cliPrintf("关机失败: %v\n", err)
 		return
 	}
@@ -540,7 +581,12 @@ func cliRestartContainer(reader *bufio.Reader) {
 	if id == 0 {
 		return
 	}
-	if err := manager.RestartContainer(id); err != nil {
+	mgr, err := runtimeManagerFor(id)
+	if err != nil {
+		cliPrintf("重启失败: %v\n", err)
+		return
+	}
+	if err := mgr.RestartContainer(id); err != nil {
 		cliPrintf("重启失败: %v\n", err)
 		return
 	}
@@ -557,7 +603,12 @@ func cliDeleteContainer(reader *bufio.Reader) {
 		cliPrintln("已取消")
 		return
 	}
-	if err := manager.DestroyContainer(id); err != nil {
+	mgr, err := runtimeManagerFor(id)
+	if err != nil {
+		cliPrintf("删除失败: %v\n", err)
+		return
+	}
+	if err := mgr.DestroyContainer(id); err != nil {
 		cliPrintf("删除失败: %v\n", err)
 		return
 	}
@@ -571,16 +622,50 @@ func cliReinstallContainer(reader *bufio.Reader) {
 		return
 	}
 
-	templates := lxc.GetTemplates()
-	cliPrintln("\n可用镜像:")
-	for i, template := range templates {
-		fmt.Printf("  %d. %s\n", i+1, template.Name)
+	c := config.FindContainer(id)
+	if c == nil {
+		cliPrintf("重装失败: 容器不存在: %d\n", id)
+		return
+	}
+	mgr, err := runtimeManagerFor(id)
+	if err != nil {
+		cliPrintf("重装失败: %v\n", err)
+		return
 	}
 
-	tmplIdx := promptInt(reader, fmt.Sprintf("镜像 [1-%d]", len(templates)), 1)
-	if tmplIdx < 1 || tmplIdx > len(templates) {
-		cliPrintln("镜像选择无效")
-		return
+	var templateID string
+	if c.IsKVM() {
+		images := kvm.GetImages()
+		if len(images) == 0 {
+			cliPrintln("没有可用的 KVM 镜像")
+			return
+		}
+		cliPrintln("\n可用镜像:")
+		for i, image := range images {
+			fmt.Printf("  %d. %s\n", i+1, image.Name)
+		}
+		idx := promptInt(reader, fmt.Sprintf("镜像 [1-%d]", len(images)), 1)
+		if idx < 1 || idx > len(images) {
+			cliPrintln("镜像选择无效")
+			return
+		}
+		templateID = images[idx-1].ID
+	} else {
+		templates := lxc.GetTemplates()
+		if len(templates) == 0 {
+			cliPrintln("没有可用的 LXC 模板")
+			return
+		}
+		cliPrintln("\n可用镜像:")
+		for i, template := range templates {
+			fmt.Printf("  %d. %s\n", i+1, template.Name)
+		}
+		idx := promptInt(reader, fmt.Sprintf("镜像 [1-%d]", len(templates)), 1)
+		if idx < 1 || idx > len(templates) {
+			cliPrintln("镜像选择无效")
+			return
+		}
+		templateID = templates[idx-1].ID
 	}
 
 	confirm := promptString(reader, fmt.Sprintf("确认重装容器 %s？输入 yes 继续", name), "no")
@@ -589,7 +674,7 @@ func cliReinstallContainer(reader *bufio.Reader) {
 		return
 	}
 
-	if err := manager.ReinstallContainer(id, templates[tmplIdx-1].ID); err != nil {
+	if err := mgr.ReinstallContainer(id, templateID); err != nil {
 		cliPrintf("重装失败: %v\n", err)
 		return
 	}

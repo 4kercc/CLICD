@@ -3,6 +3,8 @@ package cli
 import (
 	"strings"
 	"testing"
+
+	"clicd/internal/config"
 )
 
 func TestSafeReleaseBackupComponent(t *testing.T) {
@@ -70,5 +72,24 @@ func TestFormatSSHAccessHandlesMissingPort(t *testing.T) {
 	out := formatSSHAccess(0)
 	if !strings.Contains(out, "端口未分配") {
 		t.Fatalf("formatSSHAccess output = %q, want missing port message", out)
+	}
+}
+
+func TestRuntimeManagerForDispatchesByVirtualization(t *testing.T) {
+	previous := config.AppConfig
+	t.Cleanup(func() { config.AppConfig = previous })
+	config.AppConfig = &config.ClicdConfig{Containers: []config.Container{
+		{ID: 1, Name: "lxc-one", Virtualization: config.VirtualizationLXC, LXCName: "ct-1"},
+		{ID: 2, Name: "kvm-one", Virtualization: config.VirtualizationKVM, KVMName: "vm-2"},
+	}}
+
+	if mgr, err := runtimeManagerFor(1); err != nil || mgr != lxcManager {
+		t.Fatalf("LXC container dispatched to %T (err=%v), want lxc manager", mgr, err)
+	}
+	if mgr, err := runtimeManagerFor(2); err != nil || mgr != kvmManager {
+		t.Fatalf("KVM container dispatched to %T (err=%v), want kvm manager", mgr, err)
+	}
+	if _, err := runtimeManagerFor(99); err == nil {
+		t.Fatal("missing container should return an error")
 	}
 }
