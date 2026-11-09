@@ -571,7 +571,13 @@ func (m *Manager) defineContainer(id int, vmName string, cfg lxc.ContainerConfig
 		winAdminPassword = generateWindowsPassword()
 		unattendPath := filepath.Join(m.instanceDir(vmName), "unattend.iso")
 		cfg.ReportProgress("cloud_init", "生成 Windows 自动应答配置")
-		if err := createWindowsUnattendISO(unattendPath, cfg.Name, winAdminPassword, mac, ipv6List, ipv4List, IsWindows11Image(image.ID), cfg.InitScript); err != nil {
+		// Match the answer file to the media instead of guessing: edition index,
+		// UI language and product key all come from the ISO itself.
+		windowsProfile := windowsInstallProfileFor(ImagePath(image.ID))
+		if IsWindows11Image(image.ID) {
+			windowsProfile.RequiresBypass = true
+		}
+		if err := createWindowsUnattendISO(unattendPath, cfg.Name, winAdminPassword, mac, ipv6List, ipv4List, windowsProfile, cfg.InitScript); err != nil {
 			return nil, err
 		}
 		xml = windowsDomainXML(vmName, int(cfg.VCPU), cfg.RAMMB, diskPath, ImagePath(image.ID), unattendPath, cfg.ExtraISO, mac, cfg.IOReadMBps, cfg.IOWriteMBps, cfg.NetworkDownMbps, cfg.NetworkUpMbps)
@@ -3032,7 +3038,7 @@ func createEmptyDisk(target string, diskGB int) error {
 	return nil
 }
 
-func createWindowsUnattendISO(target, hostname, adminPassword, mac string, ipv6s []string, ipv4s []string, windows11 bool, initScript string) error {
+func createWindowsUnattendISO(target, hostname, adminPassword, mac string, ipv6s []string, ipv4s []string, profile windowsInstallProfile, initScript string) error {
 	tool := firstAvailableCommand("genisoimage", "mkisofs", "xorriso")
 	if tool == "" {
 		return fmt.Errorf("one of genisoimage, mkisofs, xorriso is required for Windows unattended setup")
@@ -3052,7 +3058,7 @@ func createWindowsUnattendISO(target, hostname, adminPassword, mac string, ipv6s
 			return err
 		}
 	}
-	if err := os.WriteFile(answerPath, []byte(windowsAutounattendXML(hostname, adminPassword, windows11)), 0600); err != nil {
+	if err := os.WriteFile(answerPath, []byte(windowsAutounattendXML(hostname, adminPassword, profile)), 0600); err != nil {
 		return err
 	}
 	if err := os.WriteFile(filepath.Join(setupScriptsDir, "SetupComplete.cmd"), []byte(windowsSetupCompleteCMD()), 0600); err != nil {
@@ -3090,14 +3096,14 @@ func firstAvailableCommand(names ...string) string {
 	return ""
 }
 
-func windowsAutounattendXML(hostname, adminPassword string, windows11 bool) string {
+func windowsAutounattendXML(hostname, adminPassword string, profile windowsInstallProfile) string {
 	if strings.TrimSpace(hostname) == "" {
 		hostname = "clicd-win"
 	}
 	hostname = sanitizeWindowsComputerName(hostname)
 	setupCommand := `cmd.exe /c if exist C:\CLICD\FirstLogon.ps1 (powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\CLICD\FirstLogon.ps1) else (for %d in (D E F G H I J K L M N O P Q R S T U V W X Y Z) do @if exist %d:\FirstLogon.ps1 powershell.exe -NoProfile -ExecutionPolicy Bypass -File %d:\FirstLogon.ps1)`
 	compatibilityCommands := ""
-	if windows11 {
+	if profile.RequiresBypass {
 		compatibilityCommands = `
       <RunSynchronous>
         <RunSynchronousCommand wcm:action="add"><Order>1</Order><Description>Allow virtual TPM compatibility</Description><Path>reg.exe add HKLM\SYSTEM\Setup\LabConfig /v BypassTPMCheck /t REG_DWORD /d 1 /f</Path></RunSynchronousCommand>
@@ -3105,7 +3111,7 @@ func windowsAutounattendXML(hostname, adminPassword string, windows11 bool) stri
         <RunSynchronousCommand wcm:action="add"><Order>3</Order><Description>Allow virtual CPU compatibility</Description><Path>reg.exe add HKLM\SYSTEM\Setup\LabConfig /v BypassCPUCheck /t REG_DWORD /d 1 /f</Path></RunSynchronousCommand>
       </RunSynchronous>`
 	}
-	return fmt.Sprintf(`<?xml version="1.0" encoding="utf-8"?>
+	xml := fmt.Sprintf(`<?xml version="1.0" encoding="utf-8"?>
 <unattend xmlns="urn:schemas-microsoft-com:unattend">
   <settings pass="windowsPE">
     <component name="Microsoft-Windows-International-Core-WinPE" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
@@ -3155,6 +3161,22 @@ func windowsAutounattendXML(hostname, adminPassword string, windows11 bool) stri
   </settings>
 </unattend>
 `, compatibilityCommands, xmlEscape(hostname), xmlEscape(adminPassword), xmlEscape(adminPassword), xmlEscape(setupCommand))
+
+	// The template is written for en-US / index 1 / no product key because that is
+	// what an English single-edition ISO needs. Adapt it to the media we actually
+	// have: a language the image lacks makes msoobe crash, index 1 is Server Core
+	// on Server media, and multi-edition media refuse to install without a key.
+	if language := strings.TrimSpace(profile.Language); language != "" && !strings.EqualFold(language, "en-US") {
+		xml = strings.ReplaceAll(xml, ">en-US<", ">"+xmlEscape(language)+"<")
+	}
+	if index := profile.Index; index > 1 {
+		xml = strings.Replace(xml, "<Value>1</Value>", fmt.Sprintf("<Value>%d</Value>", index), 1)
+	}
+	if key := strings.TrimSpace(profile.ProductKey); key != "" {
+		productKey := "<ProductKey><Key>" + xmlEscape(key) + "</Key><WillShowUI>Never</WillShowUI></ProductKey>"
+		xml = strings.Replace(xml, "<Organization>CLICD</Organization>", "<Organization>CLICD</Organization>"+productKey, 1)
+	}
+	return xml
 }
 
 func windowsMinimumResources(imageID string) (float64, int, int) {

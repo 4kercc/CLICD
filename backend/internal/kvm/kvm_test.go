@@ -50,8 +50,8 @@ func TestWindows11ImageDefinition(t *testing.T) {
 }
 
 func TestWindows11UnattendAddsCompatibilityChecksOnlyForWindows11(t *testing.T) {
-	windows11 := windowsAutounattendXML("win11-test", "Password123!", true)
-	windows10 := windowsAutounattendXML("win10-test", "Password123!", false)
+	windows11 := windowsAutounattendXML("win11-test", "Password123!", windowsInstallProfile{Index: 1, Language: "en-US", RequiresBypass: true})
+	windows10 := windowsAutounattendXML("win10-test", "Password123!", windowsInstallProfile{Index: 1, Language: "en-US"})
 
 	for _, key := range []string{"BypassTPMCheck", "BypassSecureBootCheck", "BypassCPUCheck"} {
 		if !strings.Contains(windows11, key) {
